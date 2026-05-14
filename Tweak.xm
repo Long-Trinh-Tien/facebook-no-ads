@@ -2,50 +2,38 @@
 #import <dlfcn.h>
 #import <Foundation/Foundation.h>
 
-static BOOL disableStorySeen = YES;
-static IMP orig_setSeenState = NULL;
-
-static void hook_setSeenState(id self, SEL _cmd, id state) {
-  if (disableStorySeen) return;
-  ((void(*)(id, SEL, id))orig_setSeenState)(self, _cmd, state);
-}
-
-// Attempt to hook class+method. Returns YES if hooked.
-static BOOL tryHookClass(const char *className) {
-  Class cls = objc_getClass(className);
-  if (!cls) { NSLog(@"[noseen] class not found: %s", className); return NO; }
-
-  SEL sel = @selector(setSeenState:);
-  Method m = class_getInstanceMethod(cls, sel);
-  if (!m) { NSLog(@"[noseen] no setSeenState: on %s", className); return NO; }
-
-  orig_setSeenState = method_getImplementation(m);
-  method_setImplementation(m, (IMP)hook_setSeenState);
-  NSLog(@"[noseen] HOOKED %s", className);
-  return YES;
-}
-
 %ctor {
   @autoreleasepool {
-    // Chỉ dlopen FBSharedFramework (cần cho class lookup), skip FBSharedDynamicFramework
-    NSString *fwPath = [[NSBundle mainBundle].bundlePath
+    // Chỉ load FBSharedFramework, KHÔNG load FBSharedDynamicFramework
+    NSString *path = [[NSBundle mainBundle].bundlePath
       stringByAppendingPathComponent:@"Frameworks/FBSharedFramework.framework/FBSharedFramework"];
-    dlopen([fwPath UTF8String], RTLD_NOW | RTLD_GLOBAL);
+    dlopen([path UTF8String], RTLD_NOW | RTLD_GLOBAL);
 
-    // Thử từng class có setSeenState: tiềm năng
-    const char *candidates[] = {
-      "FBSnacksSurfaceAwareSeenStateWriter",
-      "FBSnacksCardSeenStateInfo",
-      "FBSnacksUnifiedSeenStateMutator",
-      "FBShortsSeenStateMutator",
-      "FBSnacksViewReceiptsSeenStateInfoDataSource",
-      "FBSnacksSeenStateInfoDataSource",
-    };
+    // Scan tất cả class tìm setSeenState:
+    SEL targetSel = @selector(setSeenState:);
+    int classCount = objc_getClassList(NULL, 0);
+    Class *classes = (Class *)malloc(sizeof(Class) * classCount);
+    classCount = objc_getClassList(classes, classCount);
 
-    int hooked = 0;
-    for (int i = 0; i < sizeof(candidates)/sizeof(candidates[0]); i++) {
-      if (tryHookClass(candidates[i])) hooked++;
+    // Mảng lưu kết quả
+    #define MAX_FOUND 50
+    const char *found[MAX_FOUND];
+    int foundCount = 0;
+
+    for (int i = 0; i < classCount && foundCount < MAX_FOUND; i++) {
+      Class cls = classes[i];
+      const char *name = class_getName(cls);
+      if (strncmp(name, "FB", 2) != 0 && strncmp(name, "FBSnacks", 8) != 0) continue;
+      if (class_getInstanceMethod(cls, targetSel)) {
+        found[foundCount++] = name;
+      }
     }
-    NSLog(@"[noseen] hooked %d classes", hooked);
+    free(classes);
+
+    // Log sau khi loop để tránh crash trong loop
+    NSLog(@"[noseen] scanned %d classes, found %d:", classCount, foundCount);
+    for (int i = 0; i < foundCount; i++) {
+      NSLog(@"[noseen]   %s", found[i]);
+    }
   }
 }
