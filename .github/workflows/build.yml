@@ -16,12 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Theos
-        run: |
-          git clone --recursive https://github.com/theos/theos.git /tmp/theos
-          curl -fsSL https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_macosx_x86_64 -o /tmp/theos/bin/ldid
-          chmod +x /tmp/theos/bin/ldid
-          echo "THEOS=/tmp/theos" >> $GITHUB_ENV
+      - name: Setup Theos
+        uses: waruhachi/theos-action@v2.4.6
 
       - name: Build
         run: |
