@@ -1,4 +1,5 @@
 #import <objc/runtime.h>
+#import <dlfcn.h>
 #import <Foundation/Foundation.h>
 
 static BOOL disableStorySeen = YES;
