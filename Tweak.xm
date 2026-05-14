@@ -10,7 +10,7 @@ static void hook_setSeenState(id self, SEL _cmd, id state) {
   NSString *key = NSStringFromClass([self class]);
   NSValue *val = [origIMPs objectForKey:key];
   if (!val) return;
-  IMP orig = [val pointerValue];
+  IMP orig = (IMP)[val pointerValue];
   if (orig) {
     ((void(*)(id, SEL, id))orig)(self, _cmd, state);
   }
@@ -37,7 +37,7 @@ static void hookAllClasses() {
     if ([origIMPs objectForKey:key]) continue;
 
     IMP orig = method_getImplementation(m);
-    [origIMPs setObject:[NSValue valueWithPointer:orig] forKey:key];
+    [origIMPs setObject:[NSValue valueWithPointer:(void *)orig] forKey:key];
     method_setImplementation(m, (IMP)hook_setSeenState);
     hooked++;
     NSLog(@"[noseen] hooked %s", name);
