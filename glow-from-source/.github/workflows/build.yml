@@ -1,0 +1,26 @@
+name: Build Glow from Source
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'Tweak.xm'
+      - 'Makefile'
+      - 'control'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Theos
+        uses: waruhachi/theos-action@v2.4.6
+      - name: Build
+        run: make clean package FINALPACKAGE=1
+      - name: Upload .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: glow-deb
+          path: packages/*.deb

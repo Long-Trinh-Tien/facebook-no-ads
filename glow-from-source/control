@@ -1,0 +1,9 @@
+Package: com.dvntm.glow
+Name: Glow for Facebook
+Version: 1.3.1
+Architecture: iphoneos-arm
+Description: Cleaner. Smarter. Yours.
+Maintainer: dvntm
+Author: dvntm
+Section: Tweaks
+Depends: mobilesubstrate (>= 0.9.5000), firmware (>= 14.0)
