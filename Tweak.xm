@@ -4,18 +4,24 @@
 static BOOL disableStorySeen = YES;
 
 // ─── Hook: _attemptSendSeenStateAndHandleResponse:bucket: ───
-// Method này gửi seen state mutation lên server. No-op = ko gửi.
 static IMP orig_attemptSend = NULL;
 static void hook_attemptSend(id self, SEL _cmd, id response, id bucket) {
-  if (disableStorySeen) return;
+  if (disableStorySeen) {
+    NSLog(@"[noseen] BLOCKED _attemptSendSeenStateAndHandleResponse:bucket:");
+    return;
+  }
+  NSLog(@"[noseen] ALLOWED _attemptSendSeenStateAndHandleResponse:bucket:");
   if (orig_attemptSend) ((void(*)(id, SEL, id, id))orig_attemptSend)(self, _cmd, response, bucket);
 }
 
 // ─── Hook: _markThreadsAsSeen:fromBucket:...:isAnonymousView:completion: ───
-// Method này đánh dấu thread đã seen. No-op = ko đánh dấu.
 static IMP orig_markSeen = NULL;
 static void hook_markSeen(id self, SEL _cmd, id threads, id bucket, id tracking, BOOL isAnonymous, id completion) {
-  if (disableStorySeen) return;
+  if (disableStorySeen) {
+    NSLog(@"[noseen] BLOCKED _markThreadsAsSeen: %@ threads, isAnonymous=%d", threads, isAnonymous);
+    return;
+  }
+  NSLog(@"[noseen] ALLOWED _markThreadsAsSeen:");
   if (orig_markSeen) ((void(*)(id, SEL, id, id, id, BOOL, id))orig_markSeen)(self, _cmd, threads, bucket, tracking, isAnonymous, completion);
 }
 
