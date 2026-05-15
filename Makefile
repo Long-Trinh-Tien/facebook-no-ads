@@ -7,6 +7,7 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = facebooknoads
 facebooknoads_FILES = Tweak.xm
 facebooknoads_CFLAGS = -fobjc-arc
+facebooknoads_LDFLAGS = -lsubstrate
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 
