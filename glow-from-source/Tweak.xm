@@ -2,244 +2,158 @@
 #import <dlfcn.h>
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
-#import <AudioToolbox/AudioToolbox.h>
-
-// ============ FORWARD DECLARATIONS ============
-@interface FBMemNewsFeedEdge : NSObject
-- (NSString *)category;
-- (id)node;
-@end
-@interface FBMemFeedStory : NSObject
-- (id)sponsoredData;
-@end
-@interface FBVideoChannelPlaylistItem : NSObject
-- (BOOL)isSponsored;
-@end
-@interface FBSnacksMediaContainerView : UIView
-@end
 
 // ============ PREFERENCES ============
-#define PREFS_PATH @"/var/mobile/Library/Preferences/com.dvntm.glowprefs.plist"
-#define NOTIF_NAME "com.dvntm.glowprefs/PrefChanged"
+static NSString *const kPrefPath = @"/var/mobile/Library/Preferences/com.dvntm.glowprefs.plist";
+#define NOTIF "com.dvntm.glowprefs/PrefChanged"
+static NSMutableDictionary *P;
+#define PBOOL(k, d) [P[k] ?: @(d) boolValue]
 
-// ============ GLOBALS ============
-static NSMutableDictionary *prefs;
-#define GET_BOOL(key, def) [prefs[key] ?: @(def) boolValue]
-
-static void loadPrefs() {
-  @autoreleasepool {
-    prefs = [[NSMutableDictionary alloc] initWithContentsOfFile:PREFS_PATH];
-    if (!prefs) prefs = [NSMutableDictionary new];
-  }
+static void loadP() {
+  @autoreleasepool { P = [[NSMutableDictionary alloc] initWithContentsOfFile:kPrefPath]; if (!P) P = [NSMutableDictionary new]; }
 }
-static void savePrefs() { [prefs writeToFile:PREFS_PATH atomically:YES]; }
+static void saveP() { [P writeToFile:kPrefPath atomically:YES]; }
 
-// ============ SETTINGS VIEW CONTROLLER ============
-@interface GlowSettingsController : UITableViewController
-@end
-@implementation GlowSettingsController
-
-typedef struct { NSString *key, *label, *subtitle; BOOL def; } SwitchItem;
-static NSArray *allSections;
-
+// ============ SETTINGS VC ============
+@interface GlowVC : UITableViewController @end
+@implementation GlowVC
++ (NSArray *)sections {
+  return @[
+    @[@{@"h":@"Main"}],
+    @[@{@"k":@"RemoveAds", @"l":@"Remove Ads"},
+      @{@"k":@"RemovePYMK", @"l":@"Remove PYMK"},
+      @{@"k":@"RemoveReelsCarousel", @"l":@"Remove Reels Carousel"},
+      @{@"k":@"RemoveRecs", @"l":@"Remove Recommendations"}],
+    @[@{@"h":@"Stories"}],
+    @[@{@"k":@"AnonymousStories", @"l":@"Incognito Mode"},
+      @{@"k":@"DisableAutoNext", @"l":@"Disable Auto Next"}],
+    @[@{@"h":@"Confirmation"}],
+    @[@{@"k":@"PostLikeConfirm", @"l":@"Confirm Post Like"},
+      @{@"k":@"ReelsLikeConfirm", @"l":@"Confirm Reels Like"}],
+    @[@{@"h":@"Other"}],
+    @[@{@"k":@"AutoClearCache", @"l":@"Auto Clear Cache"},
+      @{@"k":@"HideOverlay", @"l":@"Hide Overlay"}],
+  ];
+}
 - (id)init {
   self = [super initWithStyle:UITableViewStyleGrouped];
-  loadPrefs();
-  allSections = @[
-    @[@{@"label":@"Glow", @"type":@"header"}],
-    @[@{@"key":@"RemoveAds", @"label":@"Remove Ads", @"def":@YES, @"type":@"switch"},
-      @{@"key":@"RemovePYMK", @"label":@"Remove PYMK", @"def":@YES, @"type":@"switch"},
-      @{@"key":@"RemoveReelsCarousel", @"label":@"Remove Reels Carousel", @"def":@YES, @"type":@"switch"},
-      @{@"key":@"RemoveRecs", @"label":@"Remove Recommendations", @"def":@YES, @"type":@"switch"},
-      @{@"key":@"RemoveStoryPYMK", @"label":@"Remove Story PYMK", @"def":@YES, @"type":@"switch"}],
-    @[@{@"label":@"Stories", @"type":@"header"}],
-    @[@{@"key":@"AnonymousStories", @"label":@"Incognito Mode", @"subtitle":@"Stay unseen", @"def":@YES, @"type":@"switch"},
-      @{@"key":@"DisableAutoNext", @"label":@"Disable Auto Next", @"def":@NO, @"type":@"switch"},
-      @{@"key":@"DownloadStories", @"label":@"Download Stories", @"def":@YES, @"type":@"switch"}],
-    @[@{@"label":@"Download", @"type":@"header"}],
-    @[@{@"key":@"DownloadVideos", @"label":@"Download Videos", @"def":@YES, @"type":@"switch"},
-      @{@"key":@"DownloadReels", @"label":@"Download Reels", @"def":@YES, @"type":@"switch"},
-      @{@"key":@"ReelsLongTap", @"label":@"Reels Long Tap", @"def":@YES, @"type":@"switch"}],
-    @[@{@"label":@"Confirmation", @"type":@"header"}],
-    @[@{@"key":@"PostLikeConfirm", @"label":@"Confirm Post Like", @"def":@NO, @"type":@"switch"},
-      @{@"key":@"ReelsLikeConfirm", @"label":@"Confirm Reels Like", @"def":@NO, @"type":@"switch"}],
-    @[@{@"label":@"Other", @"type":@"header"}],
-    @[@{@"key":@"HideOverlay", @"label":@"Hide Overlay", @"def":@NO, @"type":@"switch"},
-      @{@"key":@"AutoClearCache", @"label":@"Auto Clear Cache", @"def":@NO, @"type":@"switch"}],
-  ];
-  self.title = @"Glow Settings";
+  self.title = @"Glow";
   self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"Apply" style:UIBarButtonItemStylePlain target:self action:@selector(apply)];
   return self;
 }
-
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return allSections.count; }
-- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)sec {
-  NSArray *rows = allSections[sec];
-  return [[rows[0] objectForKey:@"type"] isEqualToString:@"header"] ? 0 : rows.count;
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return [[self class] sections].count; }
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
+  return [[[self class] sections][s][0][@"h"] isEqualToString:@"h"] ? 0 : [[self class] sections][s].count;
 }
-
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
-  NSDictionary *item = allSections[ip.section][ip.row];
-  UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:@"cell"];
-  if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"cell"];
-  cell.textLabel.text = item[@"label"];
-  cell.detailTextLabel.text = item[@"subtitle"];
-  UISwitch *sw = [[UISwitch alloc] init];
-  sw.on = [prefs[item[@"key"]] ?: item[@"def"] boolValue];
-  sw.tag = ip.section * 100 + ip.row;
-  [sw addTarget:self action:@selector(toggle:) forControlEvents:UIControlEventValueChanged];
-  cell.accessoryView = sw;
-  return cell;
+  id item = [[self class] sections][ip.section][ip.row];
+  UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:@"c"];
+  if (!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"c"];
+  c.textLabel.text = item[@"l"]; c.selectionStyle = UITableViewCellSelectionStyleNone;
+  UISwitch *s = [[UISwitch alloc] init]; s.on = PBOOL(item[@"k"], YES);
+  s.tag = ip.section*100+ip.row; [s addTarget:self action:@selector(tog:) forControlEvents:UIControlEventValueChanged];
+  c.accessoryView = s; return c;
 }
-- (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)sec {
-  NSDictionary *item = allSections[sec][0];
-  return [item[@"type"] isEqualToString:@"header"] ? item[@"label"] : nil;
+- (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s {
+  return [[self class] sections][s][0][@"h"];
 }
-
-- (void)toggle:(UISwitch *)sw {
-  NSInteger section = sw.tag / 100, row = sw.tag % 100;
-  NSDictionary *item = allSections[section][row];
-  prefs[item[@"key"]] = @(sw.on);
+- (void)tog:(UISwitch *)s {
+  id item = [[self class] sections][s.tag/100][s.tag%100];
+  P[item[@"k"]] = @(s.on);
 }
-- (void)apply {
-  savePrefs();
-  CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-    CFSTR(NOTIF_NAME), NULL, NULL, YES);
-  UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Glow" message:@"Settings saved. Restart app to apply?" preferredStyle:UIAlertControllerStyleAlert];
-  [alert addAction:[UIAlertAction actionWithTitle:@"Later" style:UIAlertActionStyleCancel handler:nil]];
-  [alert addAction:[UIAlertAction actionWithTitle:@"Restart" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) { exit(0); }]];
-  [self presentViewController:alert animated:YES completion:nil];
+- (void)apply { saveP(); CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR(NOTIF), NULL, NULL, YES);
+  UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Glow" message:@"Restart app?" preferredStyle:UIAlertControllerStyleAlert];
+  [a addAction:[UIAlertAction actionWithTitle:@"Later" style:UIAlertActionStyleCancel handler:nil]];
+  [a addAction:[UIAlertAction actionWithTitle:@"Restart" style:UIAlertActionStyleDefault handler:^(id _) { exit(0); }]];
+  [self presentViewController:a animated:YES completion:nil];
 }
 @end
 
-// ============ SETTINGS LAUNCHER ============
-static void showGlowSettings(UIViewController *vc) {
-  GlowSettingsController *s = [[GlowSettingsController alloc] init];
-  UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:s];
-  [vc presentViewController:nav animated:YES completion:nil];
+static void showGlowSettings() {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    UIViewController *vc = UIApplication.sharedApplication.keyWindow.rootViewController;
+    while (vc.presentedViewController) vc = vc.presentedViewController;
+    [vc presentViewController:[[UINavigationController alloc] initWithRootViewController:[GlowVC new]] animated:YES completion:nil];
+  });
 }
 
-// ============ HOOK GROUPS ============
+// ============ WELCOME POPUP ============
+static void showWelcomeIfNeeded() {
+  if ([NSUserDefaults.standardUserDefaults boolForKey:@"glow_welcomed"]) return;
+  [NSUserDefaults.standardUserDefaults setBool:YES forKey:@"glow_welcomed"];
+  dispatch_async(dispatch_get_main_queue(), ^{
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Glow" message:@"Long press any tab to open settings" preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [UIApplication.sharedApplication.keyWindow.rootViewController presentViewController:a animated:YES completion:nil];
+  });
+}
 
-// --- ADS ---
+// ============ HOOKS ============
+
+// --- Ads blocking ---
 %group Ads
-%hook FBMemNewsFeedEdge
-- (id)initWithFBTree:(void *)t {
-  id r = %orig; id c = [r category];
-  return (c && [c isEqualToString:@"ORGANIC"]) ? r : nil;
-}
-%end
 %hook FBMemFeedStory
-- (id)initWithFBTree:(void *)t {
-  id r = %orig; return [r sponsoredData] ? nil : r;
-}
+- (id)initWithFBTree:(void *)t { id r = %orig; return [r sponsoredData] ? nil : r; }
 %end
 %hook FBVideoChannelPlaylistItem
-- (id)initWithFBTree:(id)t {
-  id r = %orig; return [r isSponsored] ? nil : r;
-}
+- (id)initWithFBTree:(id)t { id r = %orig; return [r isSponsored] ? nil : r; }
 %end
 %end
 
-// --- CONFIRM LIKE (FBLikeActionHandler removed in 560.x - placeholder for future) ---
-%group ConfirmLike
-// TODO: find new like handler class in FB 560.x
-%end
-
-// --- DOWNLOAD VIDEO (VideoContainerView removed in 560.x - placeholder) ---
-%group DownloadVideo
-// TODO: find new video container class in FB 560.x
-%end
-
-// --- DOWNLOAD STORY (placeholder - need to find new class for FB 560.x) ---
-%group DownloadStory
-%end
-
-// --- ANONYMOUS STORIES ---
-%group AnonymousStories
+// --- Anonymous stories ---
+%group Anonymous
 %hook FBSnacksUnifiedSeenStateMutator
-- (void)_attemptSendSeenStateAndHandleResponse:(id)r bucket:(id)b {
-  if (GET_BOOL(@"AnonymousStories", YES)) return; %orig;
-}
-- (void)_markThreadsAsSeen:(id)t fromBucket:(id)b withTrackingString:(id)s isAnonymousView:(BOOL)a completion:(id)c {
-  if (GET_BOOL(@"AnonymousStories", YES)) return; %orig;
-}
+- (void)_attemptSendSeenStateAndHandleResponse:(id)r bucket:(id)b { if (PBOOL(@"AnonymousStories", YES)) return; %orig; }
+- (void)_markThreadsAsSeen:(id)t fromBucket:(id)b withTrackingString:(id)s isAnonymousView:(BOOL)a completion:(id)c { if (PBOOL(@"AnonymousStories", YES)) return; %orig; }
 %end
 %end
 
-// --- DISABLE AUTO NEXT ---
-%group DisableAutoNext
-%hook FBSnacksBucketViewProgressBarUpdateController
-- (void)startProgressUpdateWithStartProgress:(double)p {
-  if (GET_BOOL(@"DisableAutoNext", NO)) return;
-  %orig;
+// --- Auto clear cache ---
+%group Cache
+- (void)glow_clearCache {
+  dispatch_async(dispatch_get_global_queue(0, 0), ^{
+    NSString *c = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES)[0];
+    [[NSFileManager defaultManager] removeItemAtPath:c error:nil];
+  });
 }
-%end
 %end
 
-// --- AUTO CLEAR CACHE ---
-%group AutoClearCache
-%hook FBApplication
-- (void)applicationDidFinishLaunching:(id)arg1 {
-  %orig;
-  if (GET_BOOL(@"AutoClearCache", NO)) {
-    dispatch_async(dispatch_get_global_queue(0, 0), ^{
-      NSString *cache = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES)[0];
-      [[NSFileManager defaultManager] removeItemAtPath:cache error:nil];
-    });
-  }
-}
-%end
-%end
-
-// ============ TAB LONG PRESS (Glow Settings) ============
-%group Settings
-%hook UITabBarController
-- (void)tabBar:(id)tb didSelectItem:(id)item {
-  %orig;
-}
-%end
-// Hook long press on tab bar
+// --- Tab bar long press for settings ---
+%group Tab
 %hook UITabBar
-- (void)glow_setupLongPress {
-  for (UIGestureRecognizer *g in self.gestureRecognizers)
-    if ([g isKindOfClass:[UILongPressGestureRecognizer class]]) return;
-  UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(glow_showSettings)];
-  lp.minimumPressDuration = 0.8;
-  [self addGestureRecognizer:lp];
+- (void)didMoveToWindow {
+  %orig;
+  if (self.glow_hasLP) return;
+  self.glow_hasLP = YES;
+  UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(glow_show)];
+  lp.minimumPressDuration = 0.8; [self addGestureRecognizer:lp];
 }
-%new - (void)glow_showSettings {
-  UIViewController *vc = [UIApplication sharedApplication].keyWindow.rootViewController;
-  while (vc.presentedViewController) vc = vc.presentedViewController;
-  showGlowSettings(vc);
-}
+%property (nonatomic) BOOL glow_hasLP;
+%new - (void)glow_show { if (UIGestureRecognizerStateBegan == 0) showGlowSettings(); }
 %end
 %end
 
 // ============ CONSTRUCTOR ============
 %ctor {
   @autoreleasepool {
-    loadPrefs();
-
-    CFNotificationCenterAddObserver(
-      CFNotificationCenterGetDarwinNotifyCenter(), NULL,
-      (CFNotificationCallback)loadPrefs, CFSTR(NOTIF_NAME), NULL,
-      CFNotificationSuspensionBehaviorDeliverImmediately
-    );
-
-    NSString *fw = [[NSBundle mainBundle].bundlePath
-      stringByAppendingPathComponent:@"Frameworks/FBSharedFramework.framework/FBSharedFramework"];
+    loadP();
+    NSString *fw = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"Frameworks/FBSharedFramework.framework/FBSharedFramework"];
     dlopen([fw UTF8String], RTLD_NOW | RTLD_GLOBAL);
 
-    if (GET_BOOL(@"RemoveAds", YES))              %init(Ads);
-    if (GET_BOOL(@"PostLikeConfirm", NO))          %init(ConfirmLike);
-    if (GET_BOOL(@"DownloadVideos", YES))          %init(DownloadVideo);
-    if (GET_BOOL(@"DownloadStories", YES))         %init(DownloadStory);
-    if (GET_BOOL(@"AnonymousStories", YES))        %init(AnonymousStories);
-    if (GET_BOOL(@"DisableAutoNext", NO))          %init(DisableAutoNext);
-    if (GET_BOOL(@"AutoClearCache", NO))           %init(AutoClearCache);
-    %init(Settings);
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, (CFNotificationCallback)loadP, CFSTR(NOTIF), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
 
-    NSLog(@"[Glow] v1.3.1 initialized");
+    if (PBOOL(@"RemoveAds", YES))          %init(Ads);
+    if (PBOOL(@"AnonymousStories", YES))    %init(Anonymous);
+    %init(Tab);
+
+    // Welcome + cache clear (non-hooks, run directly)
+    showWelcomeIfNeeded();
+    if (PBOOL(@"AutoClearCache", NO)) {
+      dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        NSString *c = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES)[0];
+        [[NSFileManager defaultManager] removeItemAtPath:c error:nil];
+      });
+    }
+    NSLog(@"[Glow] init OK");
   }
 }
