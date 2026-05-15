@@ -1,12 +1,30 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
+
+// ============== FORWARD DECLARATIONS ==============
+@interface FBMemNewsFeedEdge : NSObject
+- (NSString *)category;
+@end
+@interface FBMemFeedStory : NSObject
+- (id)sponsoredData;
+@end
+@interface FBVideoChannelPlaylistItem : NSObject
+- (BOOL)isSponsored;
+@end
+@interface VideoContainerView : UIView
+@property(readonly, nonatomic) id controller;
+- (id)currentVideoPlaybackItem;
+@end
+@interface FBSnacksMediaContainerView : UIView
+@property(nonatomic, retain) UIButton *glow_downloadBtn;
+@end
 
 // ============== PREFERENCES ==============
 #define PLIST_PATH "/var/mobile/Library/Preferences/com.dvntm.glowprefs.plist"
 #define PREF_CHANGED_NOTIF "com.dvntm.glowprefs/PrefChanged"
 
-// Feature toggles
 static BOOL pref_removeAds = YES;
 static BOOL pref_removePYMK = YES;
 static BOOL pref_removeReelsCarousel = YES;
@@ -46,19 +64,16 @@ static void reloadPrefs() {
 %hook FBMemNewsFeedEdge
 - (id)initWithFBTree:(void *)arg1 {
   id orig = %orig;
-  id category = [orig category];
-  if (category && [category isEqualToString:@"ORGANIC"]) return orig;
-  return nil;
+  id cat = [orig category];
+  return (cat && [cat isEqualToString:@"ORGANIC"]) ? orig : nil;
 }
 %end
-
 %hook FBMemFeedStory
 - (id)initWithFBTree:(void *)arg1 {
   id orig = %orig;
-  return [orig sponsoredData] == nil ? orig : nil;
+  return [orig sponsoredData] ? nil : orig;
 }
 %end
-
 %hook FBVideoChannelPlaylistItem
 - (id)initWithFBTree:(id)arg1 {
   id orig = %orig;
@@ -77,19 +92,15 @@ static void reloadPrefs() {
   [orig addGestureRecognizer:lp];
   return orig;
 }
-
 %new
 - (void)glow_handleLongPress:(UILongPressGestureRecognizer *)sender {
   if (sender.state != UIGestureRecognizerStateBegan) return;
-  // Get video URL from current playback item
-  id playbackItem = [self.controller currentVideoPlaybackItem];
+  id playbackItem = [self.controller valueForKey:@"currentVideoPlaybackItem"];
   if (!playbackItem) return;
   NSURL *hdURL = [playbackItem valueForKey:@"HDPlaybackURL"];
   NSURL *sdURL = [playbackItem valueForKey:@"SDPlaybackURL"];
   NSURL *url = hdURL ?: sdURL;
-  if (!url) return;
-  // Save to photos
-  UISaveVideoAtPathToSavedPhotosAlbum(url.absoluteString, nil, nil, nil);
+  if (url) UISaveVideoAtPathToSavedPhotosAlbum(url.absoluteString, nil, nil, nil);
 }
 %end
 %end
@@ -98,36 +109,31 @@ static void reloadPrefs() {
 %group DownloadStory
 %hook FBSnacksMediaContainerView
 %property (nonatomic, retain) UIButton *glow_downloadBtn;
-
 - (id)initWithThread:(id)arg1 bucket:(id)arg2 mediaViewDelegate:(id)arg3 mediaViewGenerator:(id *)arg4 toolbox:(id)arg5 {
   self = %orig;
   self.glow_downloadBtn = [UIButton buttonWithType:UIButtonTypeCustom];
   [self.glow_downloadBtn setTitle:@"↓" forState:UIControlStateNormal];
+  [self.glow_downloadBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
   [self.glow_downloadBtn addTarget:self action:@selector(glow_saveStory) forControlEvents:UIControlEventTouchUpInside];
   self.glow_downloadBtn.frame = CGRectMake([UIScreen mainScreen].bounds.size.width - 50, 100, 40, 40);
   [self addSubview:self.glow_downloadBtn];
   return self;
 }
-
 %new
 - (void)glow_saveStory {
   id mediaView = [self valueForKey:@"mediaView"];
   if ([mediaView isKindOfClass:NSClassFromString(@"FBSnacksPhotoView")]) {
-    // Save image
-    id photoView = [mediaView valueForKey:@"_photoView"];
-    id imageView = [photoView valueForKey:@"_photoView"];
-    id specifier = [imageView valueForKey:@"imageSpecifier"];
-    if ([specifier isKindOfClass:NSClassFromString(@"FBWebImageNetworkSpecifier")]) {
-      NSURL *url = [[specifier valueForKey:@"allInfoURLsSortedByDescImageFlag"] firstObject];
-      if (url) {
-        NSData *data = [NSData dataWithContentsOfURL:url];
-        UIImage *img = [UIImage imageWithData:data];
-        UIImageWriteToSavedPhotosAlbum(img, nil, nil, nil);
-      }
+    id pwv = [mediaView valueForKey:@"_photoView"];
+    id fbv = [pwv valueForKey:@"_photoView"];
+    id spec = [fbv valueForKey:@"imageSpecifier"];
+    NSURL *url = [[spec valueForKey:@"allInfoURLsSortedByDescImageFlag"] firstObject];
+    if (url) {
+      NSData *data = [NSData dataWithContentsOfURL:url];
+      UIImageWriteToSavedPhotosAlbum([UIImage imageWithData:data], nil, nil, nil);
     }
   } else if ([mediaView isKindOfClass:NSClassFromString(@"FBSnacksNewVideoView")]) {
-    id manager = [mediaView valueForKey:@"manager"];
-    id item = [manager currentVideoPlaybackItem];
+    id mgr = [mediaView valueForKey:@"manager"];
+    id item = [mgr currentVideoPlaybackItem];
     NSURL *url = [item valueForKey:@"HDPlaybackURL"] ?: [item valueForKey:@"SDPlaybackURL"];
     if (url) UISaveVideoAtPathToSavedPhotosAlbum(url.absoluteString, nil, nil, nil);
   }
@@ -135,16 +141,7 @@ static void reloadPrefs() {
 %end
 %end
 
-// ============== ANONYMOUS STORIES (FIX) ==============
-static IMP orig_attemptSend = NULL;
-static void hook_attemptSend(id self, SEL _cmd, id response, id bucket) {
-  // No-op — block sending seen state to server
-}
-static IMP orig_markSeen = NULL;
-static void hook_markSeen(id self, SEL _cmd, id threads, id bucket, id tracking, BOOL isAnonymous, id completion) {
-  // No-op — block marking as seen
-}
-
+// ============== ANONYMOUS STORIES ==============
 %group AnonymousStories
 %hook FBSnacksUnifiedSeenStateMutator
 - (void)_attemptSendSeenStateAndHandleResponse:(id)response bucket:(id)bucket {
@@ -162,17 +159,13 @@ static void hook_markSeen(id self, SEL _cmd, id threads, id bucket, id tracking,
 %ctor {
   @autoreleasepool {
     reloadPrefs();
-
     CFNotificationCenterAddObserver(
-      CFNotificationCenterGetDarwinNotifyCenter(),
-      NULL,
+      CFNotificationCenterGetDarwinNotifyCenter(), NULL,
       (CFNotificationCallback)reloadPrefs,
-      CFSTR(PREF_CHANGED_NOTIF),
-      NULL,
+      CFSTR(PREF_CHANGED_NOTIF), NULL,
       CFNotificationSuspensionBehaviorDeliverImmediately
     );
 
-    // Load FBSharedFramework (needed for story classes)
     NSString *fw = [[NSBundle mainBundle].bundlePath
       stringByAppendingPathComponent:@"Frameworks/FBSharedFramework.framework/FBSharedFramework"];
     dlopen([fw UTF8String], RTLD_NOW | RTLD_GLOBAL);
