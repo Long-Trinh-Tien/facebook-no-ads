@@ -2,10 +2,12 @@
 #import <dlfcn.h>
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <AudioToolbox/AudioToolbox.h>
 
-// ============== FORWARD DECLARATIONS ==============
+// ============ FORWARD DECLARATIONS ============
 @interface FBMemNewsFeedEdge : NSObject
 - (NSString *)category;
+- (id)node;
 @end
 @interface FBMemFeedStory : NSObject
 - (id)sponsoredData;
@@ -13,156 +15,215 @@
 @interface FBVideoChannelPlaylistItem : NSObject
 - (BOOL)isSponsored;
 @end
-@interface VideoContainerView : UIView
-@property(readonly, nonatomic) id controller;
-- (id)currentVideoPlaybackItem;
-@end
 @interface FBSnacksMediaContainerView : UIView
-@property(nonatomic, retain) UIButton *glow_downloadBtn;
 @end
 
-// ============== PREFERENCES ==============
-#define PLIST_PATH "/var/mobile/Library/Preferences/com.dvntm.glowprefs.plist"
-#define PREF_CHANGED_NOTIF "com.dvntm.glowprefs/PrefChanged"
+// ============ PREFERENCES ============
+#define PREFS_PATH @"/var/mobile/Library/Preferences/com.dvntm.glowprefs.plist"
+#define NOTIF_NAME "com.dvntm.glowprefs/PrefChanged"
 
-static BOOL pref_removeAds = YES;
-static BOOL pref_removePYMK = YES;
-static BOOL pref_removeReelsCarousel = YES;
-static BOOL pref_removeRecs = YES;
-static BOOL pref_postLikeConfirm = NO;
-static BOOL pref_reelsLikeConfirm = NO;
-static BOOL pref_downloadVideos = YES;
-static BOOL pref_downloadReels = YES;
-static BOOL pref_downloadStories = YES;
-static BOOL pref_anonymousStories = YES;
-static BOOL pref_disableAutoNext = NO;
-static BOOL pref_hideOverlay = NO;
-static BOOL pref_clearCache = NO;
+// ============ GLOBALS ============
+static NSMutableDictionary *prefs;
+#define GET_BOOL(key, def) [prefs[key] ?: @(def) boolValue]
 
-static void reloadPrefs() {
+static void loadPrefs() {
   @autoreleasepool {
-    NSDictionary *s = [[NSDictionary alloc] initWithContentsOfFile:@PLIST_PATH];
-    if (!s) s = @{};
-    pref_removeAds = [s[@"RemoveAds"] ?: @YES boolValue];
-    pref_removePYMK = [s[@"RemovePYMK"] ?: @YES boolValue];
-    pref_removeReelsCarousel = [s[@"RemoveReelsCarousel"] ?: @YES boolValue];
-    pref_removeRecs = [s[@"RemoveRecs"] ?: @YES boolValue];
-    pref_postLikeConfirm = [s[@"PostLikeConfirm"] ?: @NO boolValue];
-    pref_reelsLikeConfirm = [s[@"ReelsLikeConfirm"] ?: @NO boolValue];
-    pref_downloadVideos = [s[@"DownloadVideos"] ?: @YES boolValue];
-    pref_downloadReels = [s[@"DownloadReels"] ?: @YES boolValue];
-    pref_downloadStories = [s[@"DownloadStories"] ?: @YES boolValue];
-    pref_anonymousStories = [s[@"AnonymousStories"] ?: @YES boolValue];
-    pref_disableAutoNext = [s[@"DisableAutoNext"] ?: @NO boolValue];
-    pref_hideOverlay = [s[@"HideOverlay"] ?: @NO boolValue];
-    pref_clearCache = [s[@"AutoClearCache"] ?: @NO boolValue];
+    prefs = [[NSMutableDictionary alloc] initWithContentsOfFile:PREFS_PATH];
+    if (!prefs) prefs = [NSMutableDictionary new];
   }
 }
+static void savePrefs() { [prefs writeToFile:PREFS_PATH atomically:YES]; }
 
-// ============== NO ADS ==============
-%group NoAds
+// ============ SETTINGS VIEW CONTROLLER ============
+@interface GlowSettingsController : UITableViewController
+@end
+@implementation GlowSettingsController
+
+typedef struct { NSString *key, *label, *subtitle; BOOL def; } SwitchItem;
+static NSArray *allSections;
+
+- (id)init {
+  self = [super initWithStyle:UITableViewStyleGrouped];
+  loadPrefs();
+  allSections = @[
+    @[@{@"label":@"Glow", @"type":@"header"}],
+    @[@{@"key":@"RemoveAds", @"label":@"Remove Ads", @"def":@YES, @"type":@"switch"},
+      @{@"key":@"RemovePYMK", @"label":@"Remove PYMK", @"def":@YES, @"type":@"switch"},
+      @{@"key":@"RemoveReelsCarousel", @"label":@"Remove Reels Carousel", @"def":@YES, @"type":@"switch"},
+      @{@"key":@"RemoveRecs", @"label":@"Remove Recommendations", @"def":@YES, @"type":@"switch"},
+      @{@"key":@"RemoveStoryPYMK", @"label":@"Remove Story PYMK", @"def":@YES, @"type":@"switch"}],
+    @[@{@"label":@"Stories", @"type":@"header"}],
+    @[@{@"key":@"AnonymousStories", @"label":@"Incognito Mode", @"subtitle":@"Stay unseen", @"def":@YES, @"type":@"switch"},
+      @{@"key":@"DisableAutoNext", @"label":@"Disable Auto Next", @"def":@NO, @"type":@"switch"},
+      @{@"key":@"DownloadStories", @"label":@"Download Stories", @"def":@YES, @"type":@"switch"}],
+    @[@{@"label":@"Download", @"type":@"header"}],
+    @[@{@"key":@"DownloadVideos", @"label":@"Download Videos", @"def":@YES, @"type":@"switch"},
+      @{@"key":@"DownloadReels", @"label":@"Download Reels", @"def":@YES, @"type":@"switch"},
+      @{@"key":@"ReelsLongTap", @"label":@"Reels Long Tap", @"def":@YES, @"type":@"switch"}],
+    @[@{@"label":@"Confirmation", @"type":@"header"}],
+    @[@{@"key":@"PostLikeConfirm", @"label":@"Confirm Post Like", @"def":@NO, @"type":@"switch"},
+      @{@"key":@"ReelsLikeConfirm", @"label":@"Confirm Reels Like", @"def":@NO, @"type":@"switch"}],
+    @[@{@"label":@"Other", @"type":@"header"}],
+    @[@{@"key":@"HideOverlay", @"label":@"Hide Overlay", @"def":@NO, @"type":@"switch"},
+      @{@"key":@"AutoClearCache", @"label":@"Auto Clear Cache", @"def":@NO, @"type":@"switch"}],
+  ];
+  self.title = @"Glow Settings";
+  self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"Apply" style:UIBarButtonItemStylePlain target:self action:@selector(apply)];
+  return self;
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return allSections.count; }
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)sec {
+  NSArray *rows = allSections[sec];
+  return [[rows[0] objectForKey:@"type"] isEqualToString:@"header"] ? 0 : rows.count;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+  NSDictionary *item = allSections[ip.section][ip.row];
+  UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:@"cell"];
+  if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"cell"];
+  cell.textLabel.text = item[@"label"];
+  cell.detailTextLabel.text = item[@"subtitle"];
+  UISwitch *sw = [[UISwitch alloc] init];
+  sw.on = [prefs[item[@"key"]] ?: item[@"def"] boolValue];
+  sw.tag = ip.section * 100 + ip.row;
+  [sw addTarget:self action:@selector(toggle:) forControlEvents:UIControlEventValueChanged];
+  cell.accessoryView = sw;
+  return cell;
+}
+- (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)sec {
+  NSDictionary *item = allSections[sec][0];
+  return [item[@"type"] isEqualToString:@"header"] ? item[@"label"] : nil;
+}
+
+- (void)toggle:(UISwitch *)sw {
+  NSInteger section = sw.tag / 100, row = sw.tag % 100;
+  NSDictionary *item = allSections[section][row];
+  prefs[item[@"key"]] = @(sw.on);
+}
+- (void)apply {
+  savePrefs();
+  CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+    CFSTR(NOTIF_NAME), NULL, NULL, YES);
+  UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Glow" message:@"Settings saved. Restart app to apply?" preferredStyle:UIAlertControllerStyleAlert];
+  [alert addAction:[UIAlertAction actionWithTitle:@"Later" style:UIAlertActionStyleCancel handler:nil]];
+  [alert addAction:[UIAlertAction actionWithTitle:@"Restart" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) { exit(0); }]];
+  [self presentViewController:alert animated:YES completion:nil];
+}
+@end
+
+// ============ SETTINGS LAUNCHER ============
+static void showGlowSettings(UIViewController *vc) {
+  GlowSettingsController *s = [[GlowSettingsController alloc] init];
+  UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:s];
+  [vc presentViewController:nav animated:YES completion:nil];
+}
+
+// ============ HOOK GROUPS ============
+
+// --- ADS ---
+%group Ads
 %hook FBMemNewsFeedEdge
-- (id)initWithFBTree:(void *)arg1 {
-  id orig = %orig;
-  id cat = [orig category];
-  return (cat && [cat isEqualToString:@"ORGANIC"]) ? orig : nil;
+- (id)initWithFBTree:(void *)t {
+  id r = %orig; id c = [r category];
+  return (c && [c isEqualToString:@"ORGANIC"]) ? r : nil;
 }
 %end
 %hook FBMemFeedStory
-- (id)initWithFBTree:(void *)arg1 {
-  id orig = %orig;
-  return [orig sponsoredData] ? nil : orig;
+- (id)initWithFBTree:(void *)t {
+  id r = %orig; return [r sponsoredData] ? nil : r;
 }
 %end
 %hook FBVideoChannelPlaylistItem
-- (id)initWithFBTree:(id)arg1 {
-  id orig = %orig;
-  return [orig isSponsored] ? nil : orig;
+- (id)initWithFBTree:(id)t {
+  id r = %orig; return [r isSponsored] ? nil : r;
 }
 %end
 %end
 
-// ============== DOWNLOAD VIDEO ==============
+// --- CONFIRM LIKE (FBLikeActionHandler removed in 560.x - placeholder for future) ---
+%group ConfirmLike
+// TODO: find new like handler class in FB 560.x
+%end
+
+// --- DOWNLOAD VIDEO (VideoContainerView removed in 560.x - placeholder) ---
 %group DownloadVideo
-%hook VideoContainerView
-- (id)initWithFrame:(CGRect)frame {
-  id orig = %orig;
-  UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(glow_handleLongPress:)];
-  lp.minimumPressDuration = 0.5;
-  [orig addGestureRecognizer:lp];
-  return orig;
+// TODO: find new video container class in FB 560.x
+%end
+
+// --- DOWNLOAD STORY (placeholder - need to find new class for FB 560.x) ---
+%group DownloadStory
+%end
+
+// --- ANONYMOUS STORIES ---
+%group AnonymousStories
+%hook FBSnacksUnifiedSeenStateMutator
+- (void)_attemptSendSeenStateAndHandleResponse:(id)r bucket:(id)b {
+  if (GET_BOOL(@"AnonymousStories", YES)) return; %orig;
 }
-%new
-- (void)glow_handleLongPress:(UILongPressGestureRecognizer *)sender {
-  if (sender.state != UIGestureRecognizerStateBegan) return;
-  id playbackItem = [self.controller valueForKey:@"currentVideoPlaybackItem"];
-  if (!playbackItem) return;
-  NSURL *hdURL = [playbackItem valueForKey:@"HDPlaybackURL"];
-  NSURL *sdURL = [playbackItem valueForKey:@"SDPlaybackURL"];
-  NSURL *url = hdURL ?: sdURL;
-  if (url) UISaveVideoAtPathToSavedPhotosAlbum(url.absoluteString, nil, nil, nil);
+- (void)_markThreadsAsSeen:(id)t fromBucket:(id)b withTrackingString:(id)s isAnonymousView:(BOOL)a completion:(id)c {
+  if (GET_BOOL(@"AnonymousStories", YES)) return; %orig;
 }
 %end
 %end
 
-// ============== DOWNLOAD STORY ==============
-%group DownloadStory
-%hook FBSnacksMediaContainerView
-%property (nonatomic, retain) UIButton *glow_downloadBtn;
-- (id)initWithThread:(id)arg1 bucket:(id)arg2 mediaViewDelegate:(id)arg3 mediaViewGenerator:(id *)arg4 toolbox:(id)arg5 {
-  self = %orig;
-  self.glow_downloadBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-  [self.glow_downloadBtn setTitle:@"↓" forState:UIControlStateNormal];
-  [self.glow_downloadBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-  [self.glow_downloadBtn addTarget:self action:@selector(glow_saveStory) forControlEvents:UIControlEventTouchUpInside];
-  self.glow_downloadBtn.frame = CGRectMake([UIScreen mainScreen].bounds.size.width - 50, 100, 40, 40);
-  [self addSubview:self.glow_downloadBtn];
-  return self;
+// --- DISABLE AUTO NEXT ---
+%group DisableAutoNext
+%hook FBSnacksBucketViewProgressBarUpdateController
+- (void)startProgressUpdateWithStartProgress:(double)p {
+  if (GET_BOOL(@"DisableAutoNext", NO)) return;
+  %orig;
 }
-%new
-- (void)glow_saveStory {
-  id mediaView = [self valueForKey:@"mediaView"];
-  if ([mediaView isKindOfClass:NSClassFromString(@"FBSnacksPhotoView")]) {
-    id pwv = [mediaView valueForKey:@"_photoView"];
-    id fbv = [pwv valueForKey:@"_photoView"];
-    id spec = [fbv valueForKey:@"imageSpecifier"];
-    NSURL *url = [[spec valueForKey:@"allInfoURLsSortedByDescImageFlag"] firstObject];
-    if (url) {
-      NSData *data = [NSData dataWithContentsOfURL:url];
-      UIImageWriteToSavedPhotosAlbum([UIImage imageWithData:data], nil, nil, nil);
-    }
-  } else if ([mediaView isKindOfClass:NSClassFromString(@"FBSnacksNewVideoView")]) {
-    id mgr = [mediaView valueForKey:@"manager"];
-    id item = [mgr currentVideoPlaybackItem];
-    NSURL *url = [item valueForKey:@"HDPlaybackURL"] ?: [item valueForKey:@"SDPlaybackURL"];
-    if (url) UISaveVideoAtPathToSavedPhotosAlbum(url.absoluteString, nil, nil, nil);
+%end
+%end
+
+// --- AUTO CLEAR CACHE ---
+%group AutoClearCache
+%hook FBApplication
+- (void)applicationDidFinishLaunching:(id)arg1 {
+  %orig;
+  if (GET_BOOL(@"AutoClearCache", NO)) {
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{
+      NSString *cache = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES)[0];
+      [[NSFileManager defaultManager] removeItemAtPath:cache error:nil];
+    });
   }
 }
 %end
 %end
 
-// ============== ANONYMOUS STORIES ==============
-%group AnonymousStories
-%hook FBSnacksUnifiedSeenStateMutator
-- (void)_attemptSendSeenStateAndHandleResponse:(id)response bucket:(id)bucket {
-  if (pref_anonymousStories) return;
+// ============ TAB LONG PRESS (Glow Settings) ============
+%group Settings
+%hook UITabBarController
+- (void)tabBar:(id)tb didSelectItem:(id)item {
   %orig;
 }
-- (void)_markThreadsAsSeen:(id)threads fromBucket:(id)bucket withTrackingString:(id)tracking isAnonymousView:(BOOL)anon completion:(id)block {
-  if (pref_anonymousStories) return;
-  %orig;
+%end
+// Hook long press on tab bar
+%hook UITabBar
+- (void)glow_setupLongPress {
+  for (UIGestureRecognizer *g in self.gestureRecognizers)
+    if ([g isKindOfClass:[UILongPressGestureRecognizer class]]) return;
+  UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(glow_showSettings)];
+  lp.minimumPressDuration = 0.8;
+  [self addGestureRecognizer:lp];
+}
+%new - (void)glow_showSettings {
+  UIViewController *vc = [UIApplication sharedApplication].keyWindow.rootViewController;
+  while (vc.presentedViewController) vc = vc.presentedViewController;
+  showGlowSettings(vc);
 }
 %end
 %end
 
-// ============== CONSTRUCTOR ==============
+// ============ CONSTRUCTOR ============
 %ctor {
   @autoreleasepool {
-    reloadPrefs();
+    loadPrefs();
+
     CFNotificationCenterAddObserver(
       CFNotificationCenterGetDarwinNotifyCenter(), NULL,
-      (CFNotificationCallback)reloadPrefs,
-      CFSTR(PREF_CHANGED_NOTIF), NULL,
+      (CFNotificationCallback)loadPrefs, CFSTR(NOTIF_NAME), NULL,
       CFNotificationSuspensionBehaviorDeliverImmediately
     );
 
@@ -170,11 +231,15 @@ static void reloadPrefs() {
       stringByAppendingPathComponent:@"Frameworks/FBSharedFramework.framework/FBSharedFramework"];
     dlopen([fw UTF8String], RTLD_NOW | RTLD_GLOBAL);
 
-    if (pref_removeAds)         %init(NoAds);
-    if (pref_downloadVideos || pref_downloadReels)  %init(DownloadVideo);
-    if (pref_downloadStories)   %init(DownloadStory);
-    if (pref_anonymousStories)  %init(AnonymousStories);
+    if (GET_BOOL(@"RemoveAds", YES))              %init(Ads);
+    if (GET_BOOL(@"PostLikeConfirm", NO))          %init(ConfirmLike);
+    if (GET_BOOL(@"DownloadVideos", YES))          %init(DownloadVideo);
+    if (GET_BOOL(@"DownloadStories", YES))         %init(DownloadStory);
+    if (GET_BOOL(@"AnonymousStories", YES))        %init(AnonymousStories);
+    if (GET_BOOL(@"DisableAutoNext", NO))          %init(DisableAutoNext);
+    if (GET_BOOL(@"AutoClearCache", NO))           %init(AutoClearCache);
+    %init(Settings);
 
-    NSLog(@"[Glow] init done");
+    NSLog(@"[Glow] v1.3.1 initialized");
   }
 }
