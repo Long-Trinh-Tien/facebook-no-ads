@@ -1,17 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <dlfcn.h>
 
-// Minimal test — welcome popup + settings UI only, NO hooks
-static void showSettings() {
-  dispatch_async(dispatch_get_main_queue(), ^{
-    UIViewController *vc = [UIApplication sharedApplication].keyWindow.rootViewController;
-    while (vc.presentedViewController) vc = vc.presentedViewController;
-    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Glow" message:@"Settings placeholder" preferredStyle:UIAlertControllerStyleAlert];
-    [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-    [vc presentViewController:a animated:YES completion:nil];
-  });
-}
-
 %ctor {
   @autoreleasepool {
     NSString *fw = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"Frameworks/FBSharedFramework.framework/FBSharedFramework"];
