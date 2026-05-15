@@ -47,7 +47,7 @@ static void saveP() { [P writeToFile:kP atomically:YES]; }
 - (UITableViewCell *)tableView:(UITableView *)t cellForRowAtIndexPath:(NSIndexPath *)p {
   id d = [self items][p.section][p.row]; UITableViewCell *c = [t dequeueReusableCellWithIdentifier:@"c"];
   if (!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"c"];
-  c.textLabel.text = d[@"l"]; c.selectionStyle = 0;
+  c.textLabel.text = d[@"l"]; c.selectionStyle = UITableViewCellSelectionStyleNone;
   UISwitch *sw = [[UISwitch alloc] init]; sw.on = PBOOL(d[@"k"], YES);
   sw.tag = p.section*100+p.row; [sw addTarget:self action:@selector(t:) forControlEvents:UIControlEventValueChanged];
   c.accessoryView = sw; return c;
@@ -60,7 +60,7 @@ static void saveP() { [P writeToFile:kP atomically:YES]; }
 
 static void showGlow() {
   dispatch_async(dispatch_get_main_queue(), ^{
-    id vc = UIApplication.sharedApplication.keyWindow.rootViewController;
+    UIViewController *vc = UIApplication.sharedApplication.keyWindow.rootViewController;
     while (vc.presentedViewController) vc = vc.presentedViewController;
     [vc presentViewController:[[UINavigationController alloc] initWithRootViewController:[GlowVC new]] animated:YES completion:nil];
   });
