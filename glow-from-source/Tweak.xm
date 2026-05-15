@@ -69,8 +69,8 @@ static void showWelcome() {
   if ([NSUserDefaults.standardUserDefaults boolForKey:@"gw"]) return;
   [NSUserDefaults.standardUserDefaults setBool:YES forKey:@"gw"];
   dispatch_async(dispatch_get_main_queue(), ^{
-    id a = [UIAlertController alertControllerWithTitle:@"Glow" message:@"Long press any tab for settings" preferredStyle:1];
-    [a addAction:[UIAlertAction actionWithTitle:@"OK" style:0 handler:nil]];
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Glow" message:@"Long press any tab for settings" preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
     [UIApplication.sharedApplication.keyWindow.rootViewController presentViewController:a animated:YES completion:nil];
   });
 }
