@@ -26,12 +26,15 @@ jobs:
           ls -la fb_extract/Payload/
           APP_DIR=$(ls fb_extract/Payload/)
           echo "APP_DIR=$APP_DIR" >> $GITHUB_ENV
-          ls -la "fb_extract/Payload/$APP_DIR/"
+          # Find the actual binary (might not match .app name)
+          BINARY=$(find "fb_extract/Payload/$APP_DIR" -maxdepth 1 -type f -perm +111 | head -1)
+          echo "BINARY=$BINARY" >> $GITHUB_ENV
+          ls -la "$BINARY"
+          file "$BINARY"
 
       - name: otool - architecture, headers, linked libs
         run: |
           set +e
-          BINARY="fb_extract/Payload/$APP_DIR/$APP_DIR"
           mkdir -p analysis_output
           echo "=== file ===" > analysis_output/file_info.txt
           file "$BINARY" >> analysis_output/file_info.txt
@@ -46,7 +49,6 @@ jobs:
         run: |
           set +e
           brew install class-dump 2>/dev/null || true
-          BINARY="fb_extract/Payload/$APP_DIR/$APP_DIR"
           mkdir -p classdump_output
           if command -v class-dump &>/dev/null; then
             class-dump -H -o classdump_output "$BINARY" 2>&1 || echo "class-dump FAILED"
@@ -59,7 +61,6 @@ jobs:
       - name: strings - search for key selectors/classes
         run: |
           set +e
-          BINARY="fb_extract/Payload/$APP_DIR/$APP_DIR"
           mkdir -p analysis_output
           strings "$BINARY" > analysis_output/strings_all.txt 2>&1
           echo "=== Seen-related ===" > analysis_output/strings_seen.txt
@@ -78,7 +79,6 @@ jobs:
       - name: nm - symbols
         run: |
           set +e
-          BINARY="fb_extract/Payload/$APP_DIR/$APP_DIR"
           mkdir -p analysis_output
           echo "=== nm -g (global symbols) ===" > analysis_output/nm_g.txt
           nm -arch arm64 -g "$BINARY" 2>&1 | grep -iE "(FB|snacks|seen|video|story)" | head -500 >> analysis_output/nm_g.txt 2>&1 || true
