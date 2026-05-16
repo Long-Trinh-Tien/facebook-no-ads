@@ -1,0 +1,80 @@
+name: Build Glow Clone (Xcode)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: qwen-glow
+
+      - name: Download original Glow deb
+        run: |
+          curl -sL "https://github.com/dayanch96/Glow/releases/download/v1.3.1/com.dvntm.glow_1.3.1_iphoneos-arm.deb" -o /tmp/glow_orig.deb
+          mkdir -p /tmp/glow_orig
+          cd /tmp/glow_orig
+          ar x /tmp/glow_orig.deb
+          tar xf data.tar.lzma 2>/dev/null || tar xf data.tar.gz 2>/dev/null
+
+      - name: Build Glow clone with Xcode clang
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "SDK: $SDK"
+
+          cd glow-from-source
+
+          # Compile with Xcode clang — same approach as original Glow
+          clang -arch arm64 \
+            -miphoneos-version-min=14.0 \
+            -isysroot "$SDK" \
+            -fobjc-arc \
+            -dynamiclib \
+            -framework UIKit -framework Foundation -framework AVFoundation -framework Photos -framework CoreGraphics -framework CoreServices -framework Security -framework SystemConfiguration \
+            -Wno-deprecated-declarations \
+            -o Glow.dylib \
+            Tweak.xm
+
+          echo "=== Built dylib ==="
+          file Glow.dylib
+          ls -la Glow.dylib
+          otool -l Glow.dylib | grep -A2 "LC_BUILD_VERSION" || true
+          otool -L Glow.dylib | head -20
+
+      - name: Create deb package
+        run: |
+          mkdir -p /tmp/deb_pkg/Library/MobileSubstrate/DynamicLibraries
+          mkdir -p "/tmp/deb_pkg/Library/Application Support/Glow.bundle"
+
+          cp glow-from-source/Glow.dylib /tmp/deb_pkg/Library/MobileSubstrate/DynamicLibraries/
+
+          # Filter plist — MUST be Glow.plist to match Glow.dylib
+          cat > /tmp/deb_pkg/Library/MobileSubstrate/DynamicLibraries/Glow.plist << 'PLIST'
+          { Filter = { Bundles = ("com.facebook.Facebook"); }; }
+          PLIST
+
+          # Copy bundle from original
+          cp -r /tmp/glow_orig/Library/Application\ Support/Glow.bundle/* "/tmp/deb_pkg/Library/Application Support/Glow.bundle/"
+
+          # Create control
+          mkdir -p /tmp/deb_pkg/DEBIAN
+          cat > /tmp/deb_pkg/DEBIAN/control << 'CTRL'
+          Package: com.dvntm.glow
+          Name: Glow for Facebook
+          Version: 1.3.1-clone
+          Architecture: iphoneos-arm
+          Description: Glow clone — rebuilt from source with Xcode toolchain
+          Maintainer: dvntm
+          Depends: mobilesubstrate (>= 0.9.5000)
+          CTRL
+
+          cd /tmp && dpkg-deb -b deb_pkg com.dvntm.glow_1.3.1-clone_iphoneos-arm.deb
+          ls -la /tmp/com.dvntm.glow_1.3.1-clone_iphoneos-arm.deb
+
+      - name: Upload deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: glow-clone-deb
+          path: /tmp/com.dvntm.glow_1.3.1-clone_iphoneos-arm.deb
