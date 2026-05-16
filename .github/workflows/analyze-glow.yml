@@ -36,22 +36,26 @@ jobs:
           ls -la classdump_output/ 2>/dev/null || echo "No classdump output"
 
       - name: nm -u (undefined symbols - imports from FB)
+        shell: bash
         run: |
+          set +e
           DYLD=/Users/runner/work/facebook-no-ads/facebook-no-ads/glow_extract/Library/MobileSubstrate/DynamicLibraries/Glow.dylib
           echo "=== nm -u (undefined symbols) ==="
-          nm -u "$DYLD" 2>&1 | head -500
+          nm -u "$DYLD" 2>&1
           echo ""
           echo "=== nm -m (mangled symbols) ==="
-          nm -m "$DYLD" 2>&1 | head -500
+          nm -m "$DYLD" 2>&1
           echo ""
           echo "=== nm -C (demangled) ==="
-          nm -C "$DYLD" 2>&1 | head -500
+          nm -C "$DYLD" 2>&1
 
       - name: otool -ov (ObjC runtime)
+        shell: bash
         run: |
+          set +e
           DYLD=/Users/runner/work/facebook-no-ads/facebook-no-ads/glow_extract/Library/MobileSubstrate/DynamicLibraries/Glow.dylib
           echo "=== otool -ov (ObjC class list) ==="
-          otool -ov "$DYLD" 2>&1 | head -2000
+          otool -ov "$DYLD" 2>&1
           echo ""
           echo "=== otool -L (linked libs) ==="
           otool -L "$DYLD" 2>&1
@@ -63,25 +67,29 @@ jobs:
           otool -l "$DYLD" 2>&1 | grep -A5 -E "(segname|sectname|sect_|LC_SEGMENT)"
 
       - name: strings - ObjC selectors
+        shell: bash
         run: |
+          set +e
           DYLD=/Users/runner/work/facebook-no-ads/facebook-no-ads/glow_extract/Library/MobileSubstrate/DynamicLibraries/Glow.dylib
           echo "=== ObjC selector strings ==="
-          strings "$DYLD" | grep -E "^[-+]\s*\[" | head -200
+          strings "$DYLD" | grep -E "^[-+]\s*\[" 
           echo ""
           echo "=== All FB class references in strings ==="
-          strings "$DYLD" | grep -iE "(fb|snacks|mem|fbvideo|fban|fbfeed|fbpay)" | sort -u | head -300
+          strings "$DYLD" | grep -iE "(fb|snacks|mem|fbvideo|fban|fbfeed|fbpay)" | sort -u
 
       - name: Save full output
+        shell: bash
         run: |
+          set +e
           DYLD=/Users/runner/work/facebook-no-ads/facebook-no-ads/glow_extract/Library/MobileSubstrate/DynamicLibraries/Glow.dylib
           mkdir -p analysis_output
-          nm -u "$DYLD" > analysis_output/nm_u.txt 2>&1
-          nm -C "$DYLD" > analysis_output/nm_C.txt 2>&1
-          otool -ov "$DYLD" > analysis_output/otool_ov.txt 2>&1
-          otool -L "$DYLD" > analysis_output/otool_L.txt 2>&1
-          strings "$DYLD" | sort > analysis_output/strings_all.txt 2>&1
-          strings "$DYLD" | grep -E "^[-+]\s*\[" > analysis_output/objc_selectors.txt 2>&1
-          strings "$DYLD" | grep -iE "fb|snacks|mem|fban" | sort -u > analysis_output/fb_refs.txt 2>&1
+          nm -u "$DYLD" > analysis_output/nm_u.txt 2>&1; echo "nm_u: $?"
+          nm -C "$DYLD" > analysis_output/nm_C.txt 2>&1; echo "nm_C: $?"
+          otool -ov "$DYLD" > analysis_output/otool_ov.txt 2>&1; echo "otool_ov: $?"
+          otool -L "$DYLD" > analysis_output/otool_L.txt 2>&1; echo "otool_L: $?"
+          strings "$DYLD" > analysis_output/strings_all.txt 2>&1; echo "strings: $?"
+          grep -E "^[-+]\s*\[" analysis_output/strings_all.txt > analysis_output/objc_selectors.txt 2>&1; echo "selectors: $?"
+          grep -iE "fb|snacks|mem|fban" analysis_output/strings_all.txt | sort -u > analysis_output/fb_refs.txt 2>&1; echo "fb_refs: $?"
           ls -la analysis_output/
 
       - name: Upload analysis artifacts
