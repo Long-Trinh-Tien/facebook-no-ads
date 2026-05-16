@@ -1,0 +1,4 @@
+/tmp/glow_clone/Library/MobileSubstrate/DynamicLibraries/Glow.dylib:
+Contents of (__DATA_CONST,__objc_imageinfo) section
+    version 0
+    flags   0x40
