@@ -875,77 +875,94 @@ static UIViewController *topVC() {
 }
 @end
 
-// ─── Hook: Old Seen (runtime resolved) ───
-// ─── Hook: Auto Next (runtime resolved) ───
-// ─── Hook: Tab Bar Height (runtime resolved) ───
-// ─── Hook: Confirm Like (runtime resolved) ───
-// ─── Hook: Download overlay (runtime resolved) ───
-
-// All runtime-resolved hooks are in %ctor below.
-// Static %hook groups for known FB classes:
-
-// ─── Hook: Ads ───
-%group Ads
-%hook FBMemFeedStory
-- (id)initWithFBTree:(id)tree {
-  if (PBOOL(@"RemoveAds", YES)) return nil;
-  return %orig;
-}
-%end
-%hook FBVideoChannelPlaylistItem
-- (id)initWithFBTree:(id)tree {
-  if (PBOOL(@"RemoveAds", YES)) return nil;
-  return %orig;
-}
-%end
-%end
-
-// ─── Hook: Pando Trees ───
-%group Pando
-%hook FBMemFeedStory
-- (id)initWithFBPandoTree:(id)tree {
-  if (PBOOL(@"RemovePYMK", YES) || PBOOL(@"RemoveRecs", YES) || PBOOL(@"RemoveReelsCarousel", YES)) return nil;
-  return %orig;
-}
-%end
-%hook FBMemStory
-- (id)initWithFBPandoTree:(id)tree {
-  if (PBOOL(@"RemovePYMK", YES) || PBOOL(@"RemoveRecs", YES) || PBOOL(@"RemoveReelsCarousel", YES)) return nil;
-  return %orig;
-}
-%end
-%hook FBMemVideo
-- (id)initWithFBPandoTree:(id)tree {
-  if (PBOOL(@"RemoveRecs", YES) || PBOOL(@"RemoveReelsCarousel", YES)) return nil;
-  return %orig;
-}
-%end
-%end
-
-// ─── Hook: Seen (FB 560.x) — GraphQL-based approach ───
-// FBSnacksUnifiedSeenStateMutator DOES NOT EXIST in FB 560.x
-// Seen mechanism moved to GraphQL: FBShortsSeenStateComponentFragmentUpdater, FBReuseNuxMarkSeenMutation
-%group Seen
-%hook FBStoryInlineViewerConfiguration
-- (BOOL)shouldDeferSeenStateUpdates {
-  if (PBOOL(@"AnonymousStories", YES)) return YES;
-  return %orig;
-}
-%end
-%end
-
 // ─── Constructor ───
 %ctor {
   @autoreleasepool {
     loadP();
 
-    NSString *fw = [[NSBundle mainBundle].bundlePath
-      stringByAppendingPathComponent:@"Frameworks/FBSharedFramework.framework/FBSharedFramework"];
-    dlopen([fw UTF8String], RTLD_NOW | RTLD_GLOBAL);
+    // ── Ads hook: FBMemFeedStory initWithFBTree: ──
+    {
+      static IMP orig_initWithFBTree_feed;
+      Class cls = NSClassFromString(@"FBMemFeedStory");
+      SEL sel = @selector(initWithFBTree:);
+      if (cls && [cls instancesRespondToSelector:sel]) {
+        IMP repl = imp_implementationWithBlock(^id(id self, SEL _cmd, id tree) {
+          if (PBOOL(@"RemoveAds", YES)) return nil;
+          return ((id(*)(id, SEL, id))orig_initWithFBTree_feed)(self, _cmd, tree);
+        });
+        MSHookMessageEx(cls, sel, repl, &orig_initWithFBTree_feed);
+      }
+    }
 
-    %init(Ads);
-    %init(Pando);
-    %init(Seen);
+    // ── Ads hook: FBVideoChannelPlaylistItem initWithFBTree: ──
+    {
+      static IMP orig_initWithFBTree_video;
+      Class cls = NSClassFromString(@"FBVideoChannelPlaylistItem");
+      SEL sel = @selector(initWithFBTree:);
+      if (cls && [cls instancesRespondToSelector:sel]) {
+        IMP repl = imp_implementationWithBlock(^id(id self, SEL _cmd, id tree) {
+          if (PBOOL(@"RemoveAds", YES)) return nil;
+          return ((id(*)(id, SEL, id))orig_initWithFBTree_video)(self, _cmd, tree);
+        });
+        MSHookMessageEx(cls, sel, repl, &orig_initWithFBTree_video);
+      }
+    }
+
+    // ── Pando hook: FBMemFeedStory initWithFBPandoTree: ──
+    {
+      static IMP orig_initWithPando_feed;
+      Class cls = NSClassFromString(@"FBMemFeedStory");
+      SEL sel = @selector(initWithFBPandoTree:);
+      if (cls && [cls instancesRespondToSelector:sel]) {
+        IMP repl = imp_implementationWithBlock(^id(id self, SEL _cmd, id tree) {
+          if (PBOOL(@"RemovePYMK", YES) || PBOOL(@"RemoveRecs", YES) || PBOOL(@"RemoveReelsCarousel", YES)) return nil;
+          return ((id(*)(id, SEL, id))orig_initWithPando_feed)(self, _cmd, tree);
+        });
+        MSHookMessageEx(cls, sel, repl, &orig_initWithPando_feed);
+      }
+    }
+
+    // ── Pando hook: FBMemStory initWithFBPandoTree: ──
+    {
+      static IMP orig_initWithPando_story;
+      Class cls = NSClassFromString(@"FBMemStory");
+      SEL sel = @selector(initWithFBPandoTree:);
+      if (cls && [cls instancesRespondToSelector:sel]) {
+        IMP repl = imp_implementationWithBlock(^id(id self, SEL _cmd, id tree) {
+          if (PBOOL(@"RemovePYMK", YES) || PBOOL(@"RemoveRecs", YES) || PBOOL(@"RemoveReelsCarousel", YES)) return nil;
+          return ((id(*)(id, SEL, id))orig_initWithPando_story)(self, _cmd, tree);
+        });
+        MSHookMessageEx(cls, sel, repl, &orig_initWithPando_story);
+      }
+    }
+
+    // ── Pando hook: FBMemVideo initWithFBPandoTree: ──
+    {
+      static IMP orig_initWithPando_video;
+      Class cls = NSClassFromString(@"FBMemVideo");
+      SEL sel = @selector(initWithFBPandoTree:);
+      if (cls && [cls instancesRespondToSelector:sel]) {
+        IMP repl = imp_implementationWithBlock(^id(id self, SEL _cmd, id tree) {
+          if (PBOOL(@"RemoveRecs", YES) || PBOOL(@"RemoveReelsCarousel", YES)) return nil;
+          return ((id(*)(id, SEL, id))orig_initWithPando_video)(self, _cmd, tree);
+        });
+        MSHookMessageEx(cls, sel, repl, &orig_initWithPando_video);
+      }
+    }
+
+    // ── Seen hook (FB 560.x): FBStoryInlineViewerConfiguration.shouldDeferSeenStateUpdates ──
+    {
+      static IMP orig_deferSeen;
+      Class cls = NSClassFromString(@"FBStoryInlineViewerConfiguration");
+      SEL sel = @selector(shouldDeferSeenStateUpdates);
+      if (cls && [cls instancesRespondToSelector:sel]) {
+        IMP repl = imp_implementationWithBlock(^BOOL(id self, SEL _cmd) {
+          if (PBOOL(@"AnonymousStories", YES)) return YES;
+          return ((BOOL(*)(id, SEL))orig_deferSeen)(self, _cmd);
+        });
+        MSHookMessageEx(cls, sel, repl, &orig_deferSeen);
+      }
+    }
 
     // ── Old Seen hooks (FB class removed in 560.x, runtime check) ──
     Class oldSeen = NSClassFromString(@"FBSnacksBucketsSeenStateManager");
