@@ -167,12 +167,11 @@ static UIViewController *topVC() {
 - (void)reset { @synchronized(self) { _counters = [NSMutableDictionary new]; } }
 @end
 
-// ─── MediaExtractor — extract video/audio URL from FB media models ───
+// ─── MediaExtractor ───
 @interface MediaExtractor : NSObject
 + (NSURL *)extractVideoURLFromStory:(id)story;
 + (NSURL *)extractVideoURLFromReel:(id)reel;
 + (NSURL *)extractVideoURLFromFeed:(id)feedItem;
-+ (void)extractBestVideoURLFromStory:(id)story completion:(void(^)(NSURL *url))completion;
 @end
 
 @implementation MediaExtractor
@@ -197,19 +196,8 @@ static UIViewController *topVC() {
   if (video) return [self extractVideoURLFromStory:video];
   return nil;
 }
-
-+ (NSURL *)extractVideoURLFromReel:(id)reel {
-  return [self extractVideoURLFromStory:reel];
-}
-
-+ (NSURL *)extractVideoURLFromFeed:(id)feedItem {
-  return [self extractVideoURLFromStory:feedItem];
-}
-
-+ (void)extractBestVideoURLFromStory:(id)story completion:(void(^)(NSURL *))completion {
-  NSURL *url = [self extractVideoURLFromStory:story];
-  if (completion) completion(url);
-}
++ (NSURL *)extractVideoURLFromReel:(id)reel { return [self extractVideoURLFromStory:reel]; }
++ (NSURL *)extractVideoURLFromFeed:(id)feedItem { return [self extractVideoURLFromStory:feedItem]; }
 @end
 
 // ─── Downloader ───
@@ -230,36 +218,22 @@ static UIViewController *topVC() {
   return instance;
 }
 - (instancetype)init { if ((self = [super init])) _tasks = [NSMutableArray new]; return self; }
-- (void)downloadMediaAtURL:(NSURL *)url {
-  [self downloadMediaAtURL:url completion:nil];
-}
+- (void)downloadMediaAtURL:(NSURL *)url { [self downloadMediaAtURL:url completion:nil]; }
 - (void)downloadMediaAtURL:(NSURL *)url completion:(void(^)(NSString *, NSError *))completion {
   if (!url) return;
-  NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
-  config.timeoutIntervalForResource = 300;
-  NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
+  NSURLSession *session = [NSURLSession sharedSession];
   NSURLSessionDownloadTask *task = [session downloadTaskWithURL:url completionHandler:^(NSURL *loc, NSURLResponse *resp, NSError *err) {
-    if (err) {
-      NSLog(@"[Glow] download error: %@", err);
-      if (completion) completion(nil, err);
-      return;
-    }
+    if (err) { if (completion) completion(nil, err); return; }
     NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0];
-    NSString *ext = [url pathExtension];
-    if ([ext length] == 0) ext = @"mp4";
+    NSString *ext = [url pathExtension]; if ([ext length] == 0) ext = @"mp4";
     NSString *name = [NSString stringWithFormat:@"%@.%@", [[NSUUID UUID] UUIDString], ext];
     NSString *path = [docs stringByAppendingPathComponent:name];
     [[NSFileManager defaultManager] moveItemAtURL:loc toURL:[NSURL fileURLWithPath:path] error:nil];
-    NSLog(@"[Glow] downloaded to %@", path);
     if (completion) completion(path, nil);
   }];
-  [task resume];
-  [_tasks addObject:task];
+  [task resume]; [_tasks addObject:task];
 }
-- (void)cancelAll {
-  for (NSURLSessionDownloadTask *t in _tasks) [t cancel];
-  [_tasks removeAllObjects];
-}
+- (void)cancelAll { for (NSURLSessionDownloadTask *t in _tasks) [t cancel]; [_tasks removeAllObjects]; }
 @end
 
 // ─── DownloaderHelper ───
@@ -273,18 +247,10 @@ static UIViewController *topVC() {
 @end
 
 @implementation DownloaderHelper
-+ (NSString *)documentsDirectory {
-  return NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0];
-}
-+ (NSString *)cachesDirectory {
-  return NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES)[0];
-}
-+ (NSString *)uniqueFilenameWithExtension:(NSString *)ext {
-  return [[[NSUUID UUID] UUIDString] stringByAppendingPathExtension:ext];
-}
-+ (BOOL)saveData:(NSData *)data toFile:(NSString *)path {
-  return [data writeToFile:path atomically:YES];
-}
++ (NSString *)documentsDirectory { return NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0]; }
++ (NSString *)cachesDirectory { return NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES)[0]; }
++ (NSString *)uniqueFilenameWithExtension:(NSString *)ext { return [[[NSUUID UUID] UUIDString] stringByAppendingPathExtension:ext]; }
++ (BOOL)saveData:(NSData *)data toFile:(NSString *)path { return [data writeToFile:path atomically:YES]; }
 + (void)saveVideoAtPath:(NSString *)path completion:(void(^)(BOOL, NSError *))completion {
   [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
     [PHAssetChangeRequest creationRequestForAssetFromVideoAtFileURL:[NSURL fileURLWithPath:path]];
@@ -301,7 +267,7 @@ static UIViewController *topVC() {
 }
 @end
 
-// ─── VideoConverter — AVAssetExportSession thay cho FFmpeg ───
+// ─── VideoConverter ───
 @interface VideoConverter : NSObject
 + (instancetype)shared;
 - (void)convertVideoAtPath:(NSString *)input toPath:(NSString *)output preset:(NSString *)preset;
@@ -317,10 +283,7 @@ static UIViewController *topVC() {
   dispatch_once(&once, ^{ instance = [[VideoConverter alloc] init]; });
   return instance;
 }
-- (instancetype)init {
-  if ((self = [super init])) _activeExports = [NSMutableDictionary new];
-  return self;
-}
+- (instancetype)init { if ((self = [super init])) _activeExports = [NSMutableDictionary new]; return self; }
 - (NSString *)avPresetFromGlowPreset:(NSString *)preset {
   if ([preset isEqualToString:@"Ultrafast"]) return AVAssetExportPresetLowQuality;
   if ([preset isEqualToString:@"Fast"]) return AVAssetExportPresetMediumQuality;
@@ -358,30 +321,23 @@ static UIViewController *topVC() {
   self.baseURL = [[url absoluteString] stringByDeletingLastPathComponent];
   self.segments = [NSMutableArray new];
   NSXMLParser *parser = [[NSXMLParser alloc] initWithContentsOfURL:url];
-  parser.delegate = self;
-  [parser parse];
+  parser.delegate = self; [parser parse];
   return [self.segments copy];
 }
 - (NSArray *)parseManifestData:(NSData *)data baseURL:(NSString *)baseURL {
-  self.baseURL = baseURL;
-  self.segments = [NSMutableArray new];
+  self.baseURL = baseURL; self.segments = [NSMutableArray new];
   NSXMLParser *parser = [[NSXMLParser alloc] initWithData:data];
-  parser.delegate = self;
-  [parser parse];
+  parser.delegate = self; [parser parse];
   return [self.segments copy];
 }
 - (void)parser:(NSXMLParser *)parser didStartElement:(NSString *)e namespaceURI:(NSString *)ns qualifiedName:(NSString *)q attributes:(NSDictionary *)a {
   if ([e isEqualToString:@"SegmentURL"]) {
     NSString *media = a[@"media"];
-    if (media && self.baseURL) {
-      [self.segments addObject:[self.baseURL stringByAppendingPathComponent:media]];
-    } else if (media) {
-      [self.segments addObject:media];
-    }
+    if (media && self.baseURL) [self.segments addObject:[self.baseURL stringByAppendingPathComponent:media]];
+    else if (media) [self.segments addObject:media];
   }
   if ([e isEqualToString:@"Initialization"]) {
-    NSString *url = a[@"sourceURL"];
-    if (url) [self.segments insertObject:url atIndex:0];
+    NSString *url = a[@"sourceURL"]; if (url) [self.segments insertObject:url atIndex:0];
   }
 }
 @end
@@ -394,12 +350,10 @@ static UIViewController *topVC() {
 - (void)dequeue;
 - (void)dismissAll;
 @end
-
 @interface ToastWindow : UIWindow
 + (instancetype)sharedWindow;
 - (void)showToastWithMessage:(NSString *)message;
 @end
-
 @interface ToastView : UIView
 - (instancetype)initWithMessage:(NSString *)message;
 - (void)show;
@@ -417,9 +371,7 @@ static UIViewController *topVC() {
   return instance;
 }
 - (instancetype)init { if ((self = [super init])) _queue = [NSMutableArray new]; return self; }
-- (void)enqueueToastWithMessage:(NSString *)message {
-  [self enqueueToastWithMessage:message duration:2.5];
-}
+- (void)enqueueToastWithMessage:(NSString *)message { [self enqueueToastWithMessage:message duration:2.5]; }
 - (void)enqueueToastWithMessage:(NSString *)message duration:(NSTimeInterval)duration {
   [_queue addObject:@{@"msg":message, @"dur":@(duration)}];
   if (!_showing) [self dequeue];
@@ -427,15 +379,11 @@ static UIViewController *topVC() {
 - (void)dequeue {
   if (_queue.count == 0) { _showing = NO; return; }
   _showing = YES;
-  NSDictionary *item = _queue[0];
-  [_queue removeObjectAtIndex:0];
+  NSDictionary *item = _queue[0]; [_queue removeObjectAtIndex:0];
   ToastView *toast = [[ToastView alloc] initWithMessage:item[@"msg"]];
   [toast show];
 }
-- (void)dismissAll {
-  [_queue removeAllObjects];
-  _showing = NO;
-}
+- (void)dismissAll { [_queue removeAllObjects]; _showing = NO; }
 @end
 
 @implementation ToastWindow
@@ -444,15 +392,11 @@ static UIViewController *topVC() {
   static dispatch_once_t once;
   dispatch_once(&once, ^{
     instance = [[ToastWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    instance.windowLevel = 2100;
-    instance.userInteractionEnabled = NO;
-    instance.hidden = NO;
+    instance.windowLevel = 2100; instance.userInteractionEnabled = NO; instance.hidden = NO;
   });
   return instance;
 }
-- (void)showToastWithMessage:(NSString *)message {
-  [[ToastManager shared] enqueueToastWithMessage:message];
-}
+- (void)showToastWithMessage:(NSString *)message { [[ToastManager shared] enqueueToastWithMessage:message]; }
 @end
 
 @implementation ToastView {
@@ -461,33 +405,26 @@ static UIViewController *topVC() {
 }
 - (instancetype)initWithMessage:(NSString *)message {
   CGSize screen = [UIScreen mainScreen].bounds.size;
-  CGFloat w = MIN(screen.width - 40, 300);
-  CGFloat h = 50;
+  CGFloat w = MIN(screen.width - 40, 300); CGFloat h = 50;
   if ((self = [super initWithFrame:CGRectMake((screen.width-w)/2, screen.height-120, w, h)])) {
     self.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.9];
-    self.layer.cornerRadius = 8;
-    self.clipsToBounds = YES;
+    self.layer.cornerRadius = 8; self.clipsToBounds = YES;
     _label = [[UILabel alloc] initWithFrame:CGRectMake(10, 0, w-20, h)];
-    _label.text = message;
-    _label.textColor = [UIColor whiteColor];
-    _label.textAlignment = NSTextAlignmentCenter;
-    _label.font = [UIFont systemFontOfSize:14];
-    _label.numberOfLines = 2;
-    [self addSubview:_label];
+    _label.text = message; _label.textColor = [UIColor whiteColor];
+    _label.textAlignment = NSTextAlignmentCenter; _label.font = [UIFont systemFontOfSize:14];
+    _label.numberOfLines = 2; [self addSubview:_label];
   }
   return self;
 }
 - (void)show {
-  self.alpha = 0;
-  [[ToastWindow sharedWindow] addSubview:self];
+  self.alpha = 0; [[ToastWindow sharedWindow] addSubview:self];
   [UIView animateWithDuration:0.3 animations:^{ self.alpha = 1; }];
   _timer = [NSTimer scheduledTimerWithTimeInterval:2.5 target:self selector:@selector(dismiss) userInfo:nil repeats:NO];
 }
 - (void)dismiss {
   [_timer invalidate];
   [UIView animateWithDuration:0.3 animations:^{ self.alpha = 0; } completion:^(BOOL f) {
-    [self removeFromSuperview];
-    [[ToastManager shared] dequeue];
+    [self removeFromSuperview]; [[ToastManager shared] dequeue];
   }];
 }
 @end
@@ -498,14 +435,11 @@ static UIViewController *topVC() {
 - (void)presentFrom:(UIViewController *)parent;
 - (void)dismissSheet;
 @end
-
 @interface DVNSheetPresenter : NSObject <UIViewControllerTransitioningDelegate>
 + (instancetype)sharedPresenter;
 @end
-
 @interface PseudoDetentController : UIPresentationController
 @end
-
 @interface PseudoDetentTransitioningDelegate : NSObject <UIViewControllerTransitioningDelegate>
 @end
 
@@ -536,12 +470,8 @@ static UIViewController *topVC() {
     [self.view addSubview:_contentView];
   }
 }
-- (void)presentFrom:(UIViewController *)parent {
-  [parent presentViewController:self animated:YES completion:nil];
-}
-- (void)dismissSheet {
-  [self dismissViewControllerAnimated:YES completion:nil];
-}
+- (void)presentFrom:(UIViewController *)parent { [parent presentViewController:self animated:YES completion:nil]; }
+- (void)dismissSheet { [self dismissViewControllerAnimated:YES completion:nil]; }
 @end
 
 @implementation DVNSheetPresenter
@@ -574,7 +504,7 @@ static UIViewController *topVC() {
 }
 @end
 
-// ─── DownloadOverlayButton — nút download hiện trên story/video ───
+// ─── DownloadOverlayButton ───
 @interface DownloadOverlayButton : UIButton
 @property (nonatomic, strong) id mediaObject;
 @property (nonatomic, assign) BOOL isStory;
@@ -587,58 +517,34 @@ static UIViewController *topVC() {
 @implementation DownloadOverlayButton
 + (instancetype)buttonForStory:(id)story {
   DownloadOverlayButton *btn = [[DownloadOverlayButton alloc] init];
-  btn.mediaObject = story;
-  btn.isStory = YES;
+  btn.mediaObject = story; btn.isStory = YES;
   [btn setImage:[UIImage systemImageNamed:@"arrow.down.circle"] forState:UIControlStateNormal];
   [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
   btn.backgroundColor = [UIColor colorWithWhite:0 alpha:0.5];
-  btn.layer.cornerRadius = 20;
-  btn.frame = CGRectMake(10, 40, 40, 40);
+  btn.layer.cornerRadius = 20; btn.frame = CGRectMake(10, 40, 40, 40);
   [btn addTarget:self action:@selector(downloadTapped) forControlEvents:UIControlEventTouchUpInside];
   return btn;
 }
-+ (instancetype)buttonForReel:(id)reel {
-  DownloadOverlayButton *btn = [self buttonForStory:reel];
-  btn.isStory = NO;
-  return btn;
-}
-+ (instancetype)buttonForFeedVideo:(id)feedItem {
-  return [self buttonForStory:feedItem];
-}
++ (instancetype)buttonForReel:(id)reel { DownloadOverlayButton *btn = [self buttonForStory:reel]; btn.isStory = NO; return btn; }
++ (instancetype)buttonForFeedVideo:(id)feedItem { return [self buttonForStory:feedItem]; }
 - (void)downloadTapped {
   if (!PBOOL(@"DownloadVideos", YES) && !PBOOL(@"DownloadStories", YES)) {
-    [[ToastManager shared] enqueueToastWithMessage:@"Download is disabled in settings"];
-    return;
+    [[ToastManager shared] enqueueToastWithMessage:@"Download is disabled in settings"]; return;
   }
   [[ToastManager shared] enqueueToastWithMessage:@"Downloading..."];
   id obj = self.mediaObject;
-  NSURL *url = nil;
-  if (self.isStory) {
-    url = [MediaExtractor extractVideoURLFromStory:obj];
-  } else {
-    url = [MediaExtractor extractVideoURLFromReel:obj];
-  }
-  if (!url) {
-    [[ToastManager shared] enqueueToastWithMessage:@"Could not find video URL"];
-    return;
-  }
+  NSURL *url = self.isStory ? [MediaExtractor extractVideoURLFromStory:obj] : [MediaExtractor extractVideoURLFromReel:obj];
+  if (!url) { [[ToastManager shared] enqueueToastWithMessage:@"Could not find video URL"]; return; }
   [[Downloader shared] downloadMediaAtURL:url completion:^(NSString *path, NSError *err) {
-    if (err) {
-      [[ToastManager shared] enqueueToastWithMessage:[NSString stringWithFormat:@"Download failed: %@", err.localizedDescription]];
-      return;
-    }
+    if (err) { [[ToastManager shared] enqueueToastWithMessage:[NSString stringWithFormat:@"Download failed: %@", err.localizedDescription]]; return; }
     BOOL audioOnly = PBOOL(@"DownloadingAudio", NO);
     if (audioOnly) {
-      NSString *outPath = [path stringByDeletingPathExtension];
-      outPath = [outPath stringByAppendingString:@"_audio.m4a"];
+      NSString *outPath = [[path stringByDeletingPathExtension] stringByAppendingString:@"_audio.m4a"];
       [[VideoConverter shared] convertVideoAtPath:path toPath:outPath preset:@"Medium" completion:^(BOOL ok) {
-        if (ok) {
-          [DownloaderHelper saveVideoAtPath:outPath completion:^(BOOL success, NSError *error) {
-            [[ToastManager shared] enqueueToastWithMessage:success ? @"Audio saved to Photos" : @"Failed to save audio"];
-          }];
-        } else {
-          [[ToastManager shared] enqueueToastWithMessage:@"Conversion failed"];
-        }
+        if (ok) [DownloaderHelper saveVideoAtPath:outPath completion:^(BOOL success, NSError *error) {
+          [[ToastManager shared] enqueueToastWithMessage:success ? @"Audio saved to Photos" : @"Failed to save audio"];
+        }];
+        else [[ToastManager shared] enqueueToastWithMessage:@"Conversion failed"];
       }];
     } else {
       [DownloaderHelper saveVideoAtPath:path completion:^(BOOL success, NSError *error) {
@@ -652,7 +558,6 @@ static UIViewController *topVC() {
 // ─── SettingsViewController ───
 @interface SettingsViewController : UITableViewController
 @end
-
 @interface SettingsViewController (Private)
 @property (nonatomic, strong) NSArray *sections;
 - (NSArray *)rowsInSection:(NSInteger)s;
@@ -717,53 +622,40 @@ static UIViewController *topVC() {
     UITableViewCell *c = [t dequeueReusableCellWithIdentifier:@"picker"];
     if (!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"picker"];
     c.textLabel.text = d[@"l"];
-    NSInteger idx = PINT(k, 0);
-    if (idx >= _speedOptions.count) idx = 0;
+    NSInteger idx = PINT(k, 0); if (idx >= _speedOptions.count) idx = 0;
     c.detailTextLabel.text = _speedOptions[idx];
     c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     return c;
   }
   UITableViewCell *c = [t dequeueReusableCellWithIdentifier:@"switch"];
   if (!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"switch"];
-  c.textLabel.text = d[@"l"];
-  c.selectionStyle = UITableViewCellSelectionStyleNone;
+  c.textLabel.text = d[@"l"]; c.selectionStyle = UITableViewCellSelectionStyleNone;
   UISwitch *sw = [[UISwitch alloc] init];
-  sw.on = PBOOL(k, YES);
-  sw.tag = p.section * 1000 + p.row;
+  sw.on = PBOOL(k, YES); sw.tag = p.section * 1000 + p.row;
   [sw addTarget:self action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];
-  c.accessoryView = sw;
-  return c;
+  c.accessoryView = sw; return c;
 }
 - (void)tableView:(UITableView *)t didSelectRowAtIndexPath:(NSIndexPath *)p {
   [t deselectRowAtIndexPath:p animated:YES];
   id d = [self rowsInSection:p.section][p.row];
-  if ([d[@"t"] isEqualToString:@"picker"]) {
-    [self showSpeedPicker];
-  }
+  if ([d[@"t"] isEqualToString:@"picker"]) [self showSpeedPicker];
 }
 - (void)switchChanged:(UISwitch *)s {
-  NSInteger section = s.tag / 1000;
-  NSInteger row = s.tag % 1000;
+  NSInteger section = s.tag / 1000; NSInteger row = s.tag % 1000;
   id d = [self rowsInSection:section][row];
-  PSET(d[@"k"], @(s.on));
-  saveP();
+  PSET(d[@"k"], @(s.on)); saveP();
 }
 - (void)showSpeedPicker {
   UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Encoding Speed" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
   for (NSInteger i = 0; i < _speedOptions.count; i++) {
     [alert addAction:[UIAlertAction actionWithTitle:_speedOptions[i] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-      PSET(@"EncodingSpeed", @(i));
-      saveP();
-      [self.tableView reloadData];
+      PSET(@"EncodingSpeed", @(i)); saveP(); [self.tableView reloadData];
     }]];
   }
   [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
   [self presentViewController:alert animated:YES completion:nil];
 }
-- (void)close {
-  saveP();
-  [self dismissViewControllerAnimated:YES completion:nil];
-}
+- (void)close { saveP(); [self dismissViewControllerAnimated:YES completion:nil]; }
 @end
 
 // ─── WelcomeVC ───
@@ -776,17 +668,13 @@ static UIViewController *topVC() {
   [super viewDidLoad];
   self.view.backgroundColor = [UIColor whiteColor];
   UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(20, 100, self.view.bounds.size.width-40, 40)];
-  title.text = @"Welcome to Glow";
-  title.font = [UIFont boldSystemFontOfSize:24];
-  title.textAlignment = NSTextAlignmentCenter;
-  title.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+  title.text = @"Welcome to Glow"; title.font = [UIFont boldSystemFontOfSize:24];
+  title.textAlignment = NSTextAlignmentCenter; title.autoresizingMask = UIViewAutoresizingFlexibleWidth;
   [self.view addSubview:title];
   UILabel *body = [[UILabel alloc] initWithFrame:CGRectMake(20, 160, self.view.bounds.size.width-40, 100)];
   body.text = @"Glow enhances your Facebook experience with custom features.\n\nLong press any tab to access settings.";
-  body.font = [UIFont systemFontOfSize:16];
-  body.textAlignment = NSTextAlignmentCenter;
-  body.numberOfLines = 0;
-  body.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+  body.font = [UIFont systemFontOfSize:16]; body.textAlignment = NSTextAlignmentCenter;
+  body.numberOfLines = 0; body.autoresizingMask = UIViewAutoresizingFlexibleWidth;
   [self.view addSubview:body];
   UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
   btn.frame = CGRectMake(self.view.bounds.size.width/2-80, 300, 160, 44);
@@ -796,13 +684,8 @@ static UIViewController *topVC() {
   btn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin;
   [self.view addSubview:btn];
 }
-- (void)dismissWelcome {
-  [self dismissViewControllerAnimated:YES completion:nil];
-}
-+ (void)show {
-  WelcomeVC *vc = [[WelcomeVC alloc] init];
-  [topVC() presentViewController:vc animated:YES completion:nil];
-}
+- (void)dismissWelcome { [self dismissViewControllerAnimated:YES completion:nil]; }
++ (void)show { WelcomeVC *vc = [[WelcomeVC alloc] init]; [topVC() presentViewController:vc animated:YES completion:nil]; }
 @end
 
 // ─── ChangelogVC ───
@@ -817,8 +700,7 @@ static UIViewController *topVC() {
   self.title = @"What's New";
   UITextView *tv = [[UITextView alloc] initWithFrame:self.view.bounds];
   tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-  tv.editable = NO;
-  tv.font = [UIFont systemFontOfSize:14];
+  tv.editable = NO; tv.font = [UIFont systemFontOfSize:14];
   tv.text = @"Glow v1.3.1\n- Anonymous stories with FB 560.x support\n- Ad blocking\n- Download media\n- Custom settings";
   [self.view addSubview:tv];
   UIBarButtonItem *close = [[UIBarButtonItem alloc] initWithTitle:@"Close" style:UIBarButtonItemStylePlain target:self action:@selector(dismissChangelog)];
@@ -839,18 +721,14 @@ static UIViewController *topVC() {
 
 @implementation DVNLongPressGestureRecognizer
 - (instancetype)initWithTarget:(id)target action:(SEL)action {
-  if ((self = [super initWithTarget:target action:action])) {
-    self.minimumPressDuration = 0.5;
-  }
+  if ((self = [super initWithTarget:target action:action])) self.minimumPressDuration = 0.5;
   return self;
 }
 + (void)installOnTabBar {
   dispatch_async(dispatch_get_main_queue(), ^{
     UIWindow *window = [[UIApplication sharedApplication] keyWindow];
     if (!window) {
-      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [self installOnTabBar];
-      });
+      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [self installOnTabBar]; });
       return;
     }
     [self findAndInstallInView:window];
@@ -859,12 +737,9 @@ static UIViewController *topVC() {
 + (void)findAndInstallInView:(UIView *)view {
   if ([view isKindOfClass:[UITabBar class]]) {
     DVNLongPressGestureRecognizer *g = [[DVNLongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
-    [view addGestureRecognizer:g];
-    return;
+    [view addGestureRecognizer:g]; return;
   }
-  for (UIView *sv in view.subviews) {
-    [self findAndInstallInView:sv];
-  }
+  for (UIView *sv in view.subviews) [self findAndInstallInView:sv];
 }
 + (void)handleLongPress:(UIGestureRecognizer *)g {
   if (g.state == UIGestureRecognizerStateBegan) {
@@ -879,259 +754,6 @@ static UIViewController *topVC() {
 %ctor {
   @autoreleasepool {
     loadP();
-
-    // ── Ads hook: FBMemFeedStory initWithFBTree: ──
-    {
-      static IMP orig_initWithFBTree_feed;
-      Class cls = NSClassFromString(@"FBMemFeedStory");
-      SEL sel = @selector(initWithFBTree:);
-      if (cls && [cls instancesRespondToSelector:sel]) {
-        IMP repl = imp_implementationWithBlock(^id(id self, SEL _cmd, id tree) {
-          if (PBOOL(@"RemoveAds", YES)) return nil;
-          return ((id(*)(id, SEL, id))orig_initWithFBTree_feed)(self, _cmd, tree);
-        });
-        MSHookMessageEx(cls, sel, repl, &orig_initWithFBTree_feed);
-      }
-    }
-
-    // ── Ads hook: FBVideoChannelPlaylistItem initWithFBTree: ──
-    {
-      static IMP orig_initWithFBTree_video;
-      Class cls = NSClassFromString(@"FBVideoChannelPlaylistItem");
-      SEL sel = @selector(initWithFBTree:);
-      if (cls && [cls instancesRespondToSelector:sel]) {
-        IMP repl = imp_implementationWithBlock(^id(id self, SEL _cmd, id tree) {
-          if (PBOOL(@"RemoveAds", YES)) return nil;
-          return ((id(*)(id, SEL, id))orig_initWithFBTree_video)(self, _cmd, tree);
-        });
-        MSHookMessageEx(cls, sel, repl, &orig_initWithFBTree_video);
-      }
-    }
-
-    // ── Pando hook: FBMemFeedStory initWithFBPandoTree: ──
-    {
-      static IMP orig_initWithPando_feed;
-      Class cls = NSClassFromString(@"FBMemFeedStory");
-      SEL sel = @selector(initWithFBPandoTree:);
-      if (cls && [cls instancesRespondToSelector:sel]) {
-        IMP repl = imp_implementationWithBlock(^id(id self, SEL _cmd, id tree) {
-          if (PBOOL(@"RemovePYMK", YES) || PBOOL(@"RemoveRecs", YES) || PBOOL(@"RemoveReelsCarousel", YES)) return nil;
-          return ((id(*)(id, SEL, id))orig_initWithPando_feed)(self, _cmd, tree);
-        });
-        MSHookMessageEx(cls, sel, repl, &orig_initWithPando_feed);
-      }
-    }
-
-    // ── Pando hook: FBMemStory initWithFBPandoTree: ──
-    {
-      static IMP orig_initWithPando_story;
-      Class cls = NSClassFromString(@"FBMemStory");
-      SEL sel = @selector(initWithFBPandoTree:);
-      if (cls && [cls instancesRespondToSelector:sel]) {
-        IMP repl = imp_implementationWithBlock(^id(id self, SEL _cmd, id tree) {
-          if (PBOOL(@"RemovePYMK", YES) || PBOOL(@"RemoveRecs", YES) || PBOOL(@"RemoveReelsCarousel", YES)) return nil;
-          return ((id(*)(id, SEL, id))orig_initWithPando_story)(self, _cmd, tree);
-        });
-        MSHookMessageEx(cls, sel, repl, &orig_initWithPando_story);
-      }
-    }
-
-    // ── Pando hook: FBMemVideo initWithFBPandoTree: ──
-    {
-      static IMP orig_initWithPando_video;
-      Class cls = NSClassFromString(@"FBMemVideo");
-      SEL sel = @selector(initWithFBPandoTree:);
-      if (cls && [cls instancesRespondToSelector:sel]) {
-        IMP repl = imp_implementationWithBlock(^id(id self, SEL _cmd, id tree) {
-          if (PBOOL(@"RemoveRecs", YES) || PBOOL(@"RemoveReelsCarousel", YES)) return nil;
-          return ((id(*)(id, SEL, id))orig_initWithPando_video)(self, _cmd, tree);
-        });
-        MSHookMessageEx(cls, sel, repl, &orig_initWithPando_video);
-      }
-    }
-
-    // ── Seen hook (FB 560.x): FBStoryInlineViewerConfiguration.shouldDeferSeenStateUpdates ──
-    {
-      static IMP orig_deferSeen;
-      Class cls = NSClassFromString(@"FBStoryInlineViewerConfiguration");
-      SEL sel = @selector(shouldDeferSeenStateUpdates);
-      if (cls && [cls instancesRespondToSelector:sel]) {
-        IMP repl = imp_implementationWithBlock(^BOOL(id self, SEL _cmd) {
-          if (PBOOL(@"AnonymousStories", YES)) return YES;
-          return ((BOOL(*)(id, SEL))orig_deferSeen)(self, _cmd);
-        });
-        MSHookMessageEx(cls, sel, repl, &orig_deferSeen);
-      }
-    }
-
-    // ── Old Seen hooks (FB class removed in 560.x, runtime check) ──
-    Class oldSeen = NSClassFromString(@"FBSnacksBucketsSeenStateManager");
-    if (oldSeen) {
-      static IMP orig_markThread;
-      SEL sel1 = NSSelectorFromString(@"_markThreadAsSeen:bucket:session:shouldMarkThreadSeenStateUpdates:");
-      if ([oldSeen instancesRespondToSelector:sel1]) {
-        IMP repl = imp_implementationWithBlock(^(id self, SEL _cmd, id threads, id bucket, id session, BOOL updates) {
-          if (PBOOL(@"AnonymousStories", YES)) return;
-          ((void(*)(id, SEL, id, id, id, BOOL))orig_markThread)(self, _cmd, threads, bucket, session, updates);
-        });
-        MSHookMessageEx(oldSeen, sel1, repl, &orig_markThread);
-      }
-      static IMP orig_canMark;
-      SEL sel2 = NSSelectorFromString(@"_canMarkStoryAsSeen");
-      if ([oldSeen instancesRespondToSelector:sel2]) {
-        IMP repl = imp_implementationWithBlock(^BOOL(id self, SEL _cmd) {
-          if (PBOOL(@"AnonymousStories", YES)) return NO;
-          return ((BOOL(*)(id, SEL))orig_canMark)(self, _cmd);
-        });
-        MSHookMessageEx(oldSeen, sel2, repl, &orig_canMark);
-      }
-      static IMP orig_markSeen;
-      SEL sel3 = NSSelectorFromString(@"markThreadAsSeen:");
-      if ([oldSeen instancesRespondToSelector:sel3]) {
-        IMP repl = imp_implementationWithBlock(^(id self, SEL _cmd, id thread) {
-          if (PBOOL(@"AnonymousStories", YES)) return;
-          ((void(*)(id, SEL, id))orig_markSeen)(self, _cmd, thread);
-        });
-        MSHookMessageEx(oldSeen, sel3, repl, &orig_markSeen);
-      }
-    }
-
-    // ── Auto-next hook (runtime resolved) ──
-    {
-      static IMP orig_advance;
-      SEL sel = NSSelectorFromString(@"advanceToNextItemWithNavigationAction:");
-      NSArray *candidates = @[@"FBSnacksStoryViewerWindowingEventsListener",
-        @"FBStoryViewerController", @"FBStoryViewer",
-        @"FBStoryViewerViewController", @"FBStoryPlayerController",
-        @"FBReelsPlayerController"];
-      for (NSString *name in candidates) {
-        Class cls = NSClassFromString(name);
-        if (cls && [cls instancesRespondToSelector:sel]) {
-          IMP repl = imp_implementationWithBlock(^(id self, SEL _cmd, id action) {
-            if (PBOOL(@"DisableAutoNext", YES)) return;
-            ((void(*)(id, SEL, id))orig_advance)(self, _cmd, action);
-          });
-          MSHookMessageEx(cls, sel, repl, &orig_advance);
-          break;
-        }
-      }
-    }
-
-    // ── Tab bar height hook (runtime resolved) ──
-    {
-      static IMP orig_tabHeight;
-      SEL sel = NSSelectorFromString(@"tabbarHeightDidChange:");
-      NSArray *tbCandidates = @[@"FBTabBar", @"FBMainAppTabBar",
-        @"FBBottomTabBar", @"UITabBar"];
-      for (NSString *name in tbCandidates) {
-        Class cls = NSClassFromString(name);
-        if (cls && [cls instancesRespondToSelector:sel]) {
-          IMP repl = imp_implementationWithBlock(^(id self, SEL _cmd, id change) {
-            ((void(*)(id, SEL, id))orig_tabHeight)(self, _cmd, change);
-          });
-          MSHookMessageEx(cls, sel, repl, &orig_tabHeight);
-          break;
-        }
-      }
-    }
-
-    // ── Confirm Like hooks (runtime resolved) ──
-    {
-      static IMP orig_like;
-      SEL sel = NSSelectorFromString(@"didTapLike:");
-      NSArray *likeCandidates = @[@"FBFunFactMultiPlayerLikeButtonComponentController",
-        @"FBLikeActionHandler", @"FBLikeButton",
-        @"FBLikeAction", @"FBStoryLikeActionHandler"];
-      for (NSString *name in likeCandidates) {
-        Class cls = NSClassFromString(name);
-        if (cls && [cls instancesRespondToSelector:sel]) {
-          IMP repl = imp_implementationWithBlock(^(id self, SEL _cmd, id sender) {
-            BOOL confirmLike = PBOOL(@"PostLikeConfirm", NO);
-            BOOL confirmReel = PBOOL(@"ReelsLikeConfirm", NO);
-            if (confirmLike || confirmReel) {
-              dispatch_async(dispatch_get_main_queue(), ^{
-                UIAlertController *alert = [UIAlertController
-                  alertControllerWithTitle:@"Confirm Like"
-                  message:@"Are you sure you want to like this?"
-                  preferredStyle:UIAlertControllerStyleAlert];
-                [alert addAction:[UIAlertAction actionWithTitle:@"Cancel"
-                  style:UIAlertActionStyleCancel handler:nil]];
-                [alert addAction:[UIAlertAction actionWithTitle:@"Like"
-                  style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-                    ((void(*)(id, SEL, id))orig_like)(self, _cmd, sender);
-                  }]];
-                [topVC() presentViewController:alert animated:YES completion:nil];
-              });
-              return;
-            }
-            ((void(*)(id, SEL, id))orig_like)(self, _cmd, sender);
-          });
-          MSHookMessageEx(cls, sel, repl, &orig_like);
-          break;
-        }
-      }
-    }
-
-    // ── Download overlay: hook story viewer to add download button ──
-    {
-      static IMP orig_viewDidLoad_story;
-      SEL sel = NSSelectorFromString(@"viewDidLoad");
-      NSArray *storyCandidates = @[@"FBSnacksStoryViewerWindowingEventsListener",
-        @"FBStoryViewerController", @"FBStoryViewerViewController",
-        @"FBStoryPlayerViewController", @"FBStoryContentViewController"];
-      for (NSString *name in storyCandidates) {
-        Class cls = NSClassFromString(name);
-        if (cls && [cls instancesRespondToSelector:sel]) {
-          IMP repl = imp_implementationWithBlock(^(id self, SEL _cmd) {
-            ((void(*)(id, SEL))orig_viewDidLoad_story)(self, _cmd);
-            if (!PBOOL(@"HideOverlay", NO) && PBOOL(@"DownloadStories", YES)) {
-              dispatch_async(dispatch_get_main_queue(), ^{
-                UIView *view = [self valueForKey:@"view"];
-                if ([view isKindOfClass:[UIView class]]) {
-                  id story = [self valueForKey:@"story"] ?: [self valueForKey:@"currentStory"];
-                  if (story) {
-                    DownloadOverlayButton *btn = [DownloadOverlayButton buttonForStory:story];
-                    [view addSubview:btn];
-                  }
-                }
-              });
-            }
-          });
-          MSHookMessageEx(cls, sel, repl, &orig_viewDidLoad_story);
-          break;
-        }
-      }
-    }
-
-    // ── Download overlay: hook reel viewer ──
-    {
-      static IMP orig_viewDidLoad_reel;
-      SEL sel = NSSelectorFromString(@"viewDidLoad");
-      NSArray *reelCandidates = @[@"FBReelsViewerViewController", @"FBReelsPlayerViewController",
-        @"FBReelsContentViewController"];
-      for (NSString *name in reelCandidates) {
-        Class cls = NSClassFromString(name);
-        if (cls && [cls instancesRespondToSelector:sel]) {
-          IMP repl = imp_implementationWithBlock(^(id self, SEL _cmd) {
-            ((void(*)(id, SEL))orig_viewDidLoad_reel)(self, _cmd);
-            if (!PBOOL(@"HideOverlay", NO) && PBOOL(@"DownloadReels", YES)) {
-              dispatch_async(dispatch_get_main_queue(), ^{
-                UIView *view = [self valueForKey:@"view"];
-                if ([view isKindOfClass:[UIView class]]) {
-                  id reel = [self valueForKey:@"reel"] ?: [self valueForKey:@"currentReel"];
-                  if (reel) {
-                    DownloadOverlayButton *btn = [DownloadOverlayButton buttonForReel:reel];
-                    [view addSubview:btn];
-                  }
-                }
-              });
-            }
-          });
-          MSHookMessageEx(cls, sel, repl, &orig_viewDidLoad_reel);
-          break;
-        }
-      }
-    }
 
     // ── Install long press gesture on tab bar ──
     [DVNLongPressGestureRecognizer installOnTabBar];
@@ -1150,6 +772,6 @@ static UIViewController *topVC() {
       [[NSURLCache sharedURLCache] removeAllCachedResponses];
     }
 
-    NSLog(@"[Glow] v1.3.1 loaded");
+    NSLog(@"[Glow] v1.3.1 loaded (minimal mode — no FB hooks)");
   }
 }
