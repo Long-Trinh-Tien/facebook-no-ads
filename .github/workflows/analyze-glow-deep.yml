@@ -1,0 +1,121 @@
+name: Analyze Glow.dylib Deep
+
+on:
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: qwen-glow
+
+      - name: Download original Glow v1.3.1 deb
+        run: |
+          curl -sL "https://github.com/dayanch96/Glow/releases/download/v1.3.1/com.dvntm.glow_1.3.1_iphoneos-arm.deb" -o glow_orig.deb
+          mkdir -p glow_orig_extract
+          cd glow_orig_extract
+          ar x ../glow_orig.deb
+          tar xf data.tar.* 2>/dev/null || tar xf data.tar.lzma 2>/dev/null || tar xf data.tar.gz 2>/dev/null
+          find . -name "*.dylib" -exec ls -la {} \;
+
+      - name: Download our rebuilt deb
+        run: |
+          curl -sL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts" \
+            -o artifacts.json || true
+          # Use latest build from our workflow
+          curl -sL "https://github.com/Long-Trinh-Tien/facebook-no-ads/releases/download/v1.3.1/com.dvntm.glow_1.3.1_iphoneos-arm.deb" -o glow_rebuilt.deb 2>/dev/null || true
+          # Or use from artifacts
+          ls -la glow_rebuilt.deb 2>/dev/null || echo "No rebuilt deb found, will use from workflow artifacts"
+
+      - name: otool -L (linked libraries)
+        run: |
+          DYLIB_ORIG=$(find glow_orig_extract -name "*.dylib" | head -1)
+          echo "=== ORIGINAL GLOW - otool -L ==="
+          otool -L "$DYLIB_ORIG" 2>&1
+          echo ""
+          echo "=== ORIGINAL GLOW - otool -l (key commands) ==="
+          otool -l "$DYLIB_ORIG" 2>&1 | grep -A3 -E "(LC_VERSION_MIN|LC_BUILD_VERSION|LC_DYLD_CHAINED|LC_DYLD_INFO|LC_MAIN|uuid)"
+
+      - name: nm - undefined symbols
+        run: |
+          DYLIB_ORIG=$(find glow_orig_extract -name "*.dylib" | head -1)
+          echo "=== ORIGINAL GLOW - nm -u (undefined/imports) ==="
+          nm -u "$DYLIB_ORIG" 2>&1 | sort
+          echo ""
+          echo "=== ORIGINAL GLOW - nm -m (defined symbols) ==="
+          nm -m "$DYLIB_ORIG" 2>&1 | grep -i "hook\|substrate\|objc\|class_add\|method_set\|NSClass\|NSSelector" | head -50
+
+      - name: strings - full analysis
+        run: |
+          DYLIB_ORIG=$(find glow_orig_extract -name "*.dylib" | head -1)
+          mkdir -p analysis_deep
+          strings "$DYLIB_ORIG" > analysis_deep/strings_all.txt
+          
+          echo "=== ObjC method signatures ==="
+          grep -E "^[-+]\s*\[" analysis_deep/strings_all.txt | sort -u > analysis_deep/objc_methods.txt
+          cat analysis_deep/objc_methods.txt
+          
+          echo ""
+          echo "=== FB class names ==="
+          grep -iE "^FB[A-Z]" analysis_deep/strings_all.txt | sort -u > analysis_deep/fb_classes.txt
+          cat analysis_deep/fb_classes.txt
+          
+          echo ""
+          echo "=== Substrate/hook symbols ==="
+          grep -iE "(hook|substrate|MSHook|class_addMethod|method_setImplementation|objc_getClass)" analysis_deep/strings_all.txt | sort -u > analysis_deep/hook_symbols.txt
+          cat analysis_deep/hook_symbols.txt
+          
+          echo ""
+          echo "=== Selector names ==="
+          grep -E "^[a-z][a-zA-Z]*:$" analysis_deep/strings_all.txt | sort -u > analysis_deep/selectors.txt
+          cat analysis_deep/selectors.txt
+          
+          echo ""
+          echo "=== Init/ctor patterns ==="
+          grep -iE "(init|ctor|load|initialize|main)" analysis_deep/strings_all.txt | head -30
+
+      - name: class-dump headers
+        run: |
+          brew install class-dump 2>/dev/null || true
+          DYLIB_ORIG=$(find glow_orig_extract -name "*.dylib" | head -1)
+          mkdir -p classdump_orig
+          if command -v class-dump &>/dev/null; then
+            class-dump "$DYLIB_ORIG" > classdump_orig/all.txt 2>&1
+            echo "class-dump exit: $?"
+          else
+            echo "class-dump not available"
+          fi
+          ls -la classdump_orig/ 2>/dev/null
+          head -100 classdump_orig/all.txt 2>/dev/null
+
+      - name: Compare with our rebuilt version
+        run: |
+          cd glow-from-source
+          make clean 2>/dev/null || true
+          make package 2>&1 | tail -5
+          DEB=$(find packages -name "*.deb" | head -1)
+          mkdir -p ../rebuilt_extract && cd ../rebuilt_extract
+          ar x ../glow-from-source/$DEB
+          tar xf data.tar.* 2>/dev/null || tar xf data.tar.lzma 2>/dev/null
+          DYLIB_REBUILD=$(find . -name "*.dylib" | head -1)
+          
+          echo "=== REBUILT GLOW - otool -L ==="
+          otool -L "$DYLIB_REBUILD" 2>&1
+          echo ""
+          echo "=== REBUILT GLOW - nm -u ==="
+          nm -u "$DYLIB_REBUILD" 2>&1 | sort
+          echo ""
+          echo "=== REBUILT GLOW - strings FB refs ==="
+          strings "$DYLIB_REBUILD" | grep -iE "^FB[A-Z]" | sort -u
+
+      - name: Upload all analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: glow-deep-analysis
+          path: |
+            analysis_deep/**
+            classdump_orig/**
+            rebuilt_extract/**
