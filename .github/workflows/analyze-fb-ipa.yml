@@ -1,0 +1,90 @@
+name: Analyze Facebook IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download facebook.ipa from Tailscale Funnel
+        run: |
+          curl -L -o facebook.ipa "https://tmy-tuf-1.danio-map.ts.net/facebook.ipa"
+          ls -lh facebook.ipa
+          file facebook.ipa
+
+      - name: Extract IPA
+        run: |
+          unzip -q facebook.ipa -d fb_extract
+          ls -la fb_extract/Payload/
+          APP_DIR=$(ls fb_extract/Payload/)
+          echo "APP_DIR=$APP_DIR" >> $GITHUB_ENV
+          ls -la "fb_extract/Payload/$APP_DIR/"
+
+      - name: otool - architecture, headers, linked libs
+        run: |
+          BINARY="fb_extract/Payload/$APP_DIR/$APP_DIR"
+          mkdir -p analysis_output
+          echo "=== file ===" > analysis_output/file_info.txt
+          file "$BINARY" >> analysis_output/file_info.txt
+          echo "=== otool -hv ===" > analysis_output/otool_hv.txt
+          otool -arch arm64 -hv "$BINARY" >> analysis_output/otool_hv.txt 2>&1
+          echo "=== otool -L ===" > analysis_output/otool_L.txt
+          otool -arch arm64 -L "$BINARY" >> analysis_output/otool_L.txt 2>&1
+          echo "=== otool -l (filtered) ===" > analysis_output/otool_l.txt
+          otool -arch arm64 -l "$BINARY" | grep -A2 -E "(segname|LC_SEGMENT|LC_DYLD)" >> analysis_output/otool_l.txt 2>&1
+
+      - name: class-dump ObjC headers
+        run: |
+          brew install class-dump 2>/dev/null || true
+          BINARY="fb_extract/Payload/$APP_DIR/$APP_DIR"
+          mkdir -p classdump_output
+          if command -v class-dump &>/dev/null; then
+            class-dump -H -o classdump_output "$BINARY" 2>&1 || echo "class-dump FAILED"
+            echo "class-dump headers: $(ls classdump_output/ | wc -l)"
+          else
+            pip3 install class-dump 2>&1 || true
+            python3 -m class_dump -H -o classdump_output "$BINARY" 2>&1 || echo "class-dump FAILED"
+          fi
+
+      - name: strings - search for key selectors/classes
+        run: |
+          BINARY="fb_extract/Payload/$APP_DIR/$APP_DIR"
+          mkdir -p analysis_output
+          strings "$BINARY" > analysis_output/strings_all.txt 2>&1
+          echo "=== Seen-related ===" > analysis_output/strings_seen.txt
+          strings "$BINARY" | grep -iE "(seen|snacks|mutator|bucket|markThread|markStory)" >> analysis_output/strings_seen.txt 2>&1
+          echo "=== Video/Media URL ===" > analysis_output/strings_video.txt
+          strings "$BINARY" | grep -iE "(videoURL|videoUrl|playableURL|streamURL|mediaURL|downloadURL|hdVideo|sdVideo)" >> analysis_output/strings_video.txt 2>&1
+          echo "=== Like/Action ===" > analysis_output/strings_like.txt
+          strings "$BINARY" | grep -iE "(likeAction|performLike|likeButton|likeHandler|FBLike)" >> analysis_output/strings_like.txt 2>&1
+          echo "=== Story Viewer ===" > analysis_output/strings_story.txt
+          strings "$BINARY" | grep -iE "(StoryViewer|StoryPlayer|StoryContent|ReelsViewer|ReelsPlayer)" >> analysis_output/strings_story.txt 2>&1
+          echo "=== FBMem/FBTree ===" > analysis_output/strings_mem.txt
+          strings "$BINARY" | grep -iE "(FBMem|FBTree|initWithFB|FBVideoChannel)" >> analysis_output/strings_mem.txt 2>&1
+          echo "=== All FB class strings ===" > analysis_output/strings_fb.txt
+          strings "$BINARY" | grep -iE "^FB[A-Z]" | sort -u >> analysis_output/strings_fb.txt 2>&1
+
+      - name: nm - symbols
+        run: |
+          BINARY="fb_extract/Payload/$APP_DIR/$APP_DIR"
+          mkdir -p analysis_output
+          echo "=== nm -g (global symbols) ===" > analysis_output/nm_g.txt
+          nm -arch arm64 -g "$BINARY" 2>&1 | grep -iE "(FB|snacks|seen|video|story)" | head -500 >> analysis_output/nm_g.txt 2>&1
+          echo "=== nm -u (undefined) ===" > analysis_output/nm_u.txt
+          nm -arch arm64 -u "$BINARY" 2>&1 | grep -iE "(FB|snacks)" | head -200 >> analysis_output/nm_u.txt 2>&1
+
+      - name: Upload analysis artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fb-ipa-analysis
+          path: analysis_output/**
+
+      - name: Upload class-dump headers
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fb-classdump-headers
+          path: classdump_output/**
