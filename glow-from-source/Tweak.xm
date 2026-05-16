@@ -804,12 +804,27 @@ static UIViewController *topVC() {
   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
     @try {
       UITabBar *tabBar = nil;
-      for (UIWindow *window in [UIApplication sharedApplication].windows) {
-        for (UIView *sub in window.subviews) {
-          if ([sub isKindOfClass:[UITabBar class]]) { tabBar = (UITabBar *)sub; break; }
+
+      // Modern iOS 16+ — use UIWindowScene instead of deprecated UIApplication.windows
+      if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+          if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+          UIWindowScene *ws = (UIWindowScene *)scene;
+          for (UIWindow *window in ws.windows) {
+            if ([window isKindOfClass:[UITabBar class]]) { tabBar = (UITabBar *)window; break; }
+            tabBar = [self findTabBarInView:window];
+            if (tabBar) break;
+          }
+          if (tabBar) break;
         }
-        if (tabBar) break;
       }
+
+      // Fallback: iterate keyWindow subviews
+      if (!tabBar) {
+        UIWindow *keyWin = [UIApplication sharedApplication].keyWindow;
+        if (keyWin) tabBar = [self findTabBarInView:keyWin];
+      }
+
       if (tabBar) {
         BOOL hasGlow = NO;
         for (UIGestureRecognizer *g in tabBar.gestureRecognizers) {
@@ -826,6 +841,15 @@ static UIViewController *topVC() {
       }
     } @catch (NSException *e) { NSLog(@"[Glow] gesture error: %@", e.reason); }
   });
+}
+
++ (UITabBar *)findTabBarInView:(UIView *)view {
+  if ([view isKindOfClass:[UITabBar class]]) return (UITabBar *)view;
+  for (UIView *sub in view.subviews) {
+    UITabBar *found = [self findTabBarInView:sub];
+    if (found) return found;
+  }
+  return nil;
 }
 + (void)handleLongPress:(UIGestureRecognizer *)g {
   if (g.state == UIGestureRecognizerStateBegan) {
@@ -983,15 +1007,17 @@ static void injectDownloadButton(UIViewController *playerVC, NSString *urlString
     // bookkeeping for our dylib (fixes iOS 16+ dyld3 closure race)
     _dyld_register_func_for_add_image(_glow_image_loaded);
 
-    // Delay init to match original Glow's 16.8MB loading time
-    // Original takes ~50-100ms for dyld to load → FB ready by the time %ctor runs
-    // Our clone is 560KB → loads instantly before FB is ready → crash
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    // Note: originally had 5s dispatch_after here for crash avoidance,
+    // but with fixIPA dylib the crash is already prevented.
+    // Running hooks immediately = matching original Glow behavior = features work.
 
     @try {
       NSString *fw = [[NSBundle mainBundle].bundlePath
         stringByAppendingPathComponent:@"Frameworks/FBSharedFramework.framework/FBSharedFramework"];
-      dlopen([fw UTF8String], RTLD_NOW | RTLD_GLOBAL);
+      void *handle = dlopen([fw UTF8String], RTLD_NOW | RTLD_GLOBAL);
+      if (!handle) {
+        NSLog(@"[Glow] dlopen error: %s", dlerror());
+      }
     } @catch (NSException *e) {
       NSLog(@"[Glow] dlopen error: %@", e.reason);
     }
@@ -1188,7 +1214,6 @@ static void injectDownloadButton(UIViewController *playerVC, NSString *urlString
       [[NSURLCache sharedURLCache] removeAllCachedResponses];
     }
 
-    NSLog(@"[Glow] v1.3.1 loaded (delayed init)");
-    });
+    NSLog(@"[Glow] v1.3.1 loaded");
   }
 }
