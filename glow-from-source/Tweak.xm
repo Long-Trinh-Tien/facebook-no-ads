@@ -332,13 +332,13 @@ static UIViewController *topVC() {
 - (void)convertVideoAtPath:(NSString *)input toPath:(NSString *)output preset:(NSString *)preset completion:(void(^)(BOOL))completion {
   AVURLAsset *asset = [AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:input] options:nil];
   NSString *avPreset = [self avPresetFromGlowPreset:preset ?: @"Medium"];
-  AVAssetExportSession *export = [[AVAssetExportSession alloc] initWithAsset:asset presetName:avPreset];
-  export.outputURL = [NSURL fileURLWithPath:output];
-  export.outputFileType = AVFileTypeMPEG4;
-  export.shouldOptimizeForNetworkUse = YES;
-  _activeExports[input] = export;
-  [export exportAsynchronouslyWithCompletionHandler:^{
-    BOOL ok = (export.status == AVAssetExportSessionStatusCompleted);
+  AVAssetExportSession *session = [[AVAssetExportSession alloc] initWithAsset:asset presetName:avPreset];
+  session.outputURL = [NSURL fileURLWithPath:output];
+  session.outputFileType = AVFileTypeMPEG4;
+  session.shouldOptimizeForNetworkUse = YES;
+  _activeExports[input] = session;
+  [session exportAsynchronouslyWithCompletionHandler:^{
+    BOOL ok = (session.status == AVAssetExportSessionStatusCompleted);
     [_activeExports removeObjectForKey:input];
     if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(ok); });
   }];
