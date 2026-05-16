@@ -30,6 +30,7 @@ jobs:
 
       - name: otool - architecture, headers, linked libs
         run: |
+          set +e
           BINARY="fb_extract/Payload/$APP_DIR/$APP_DIR"
           mkdir -p analysis_output
           echo "=== file ===" > analysis_output/file_info.txt
@@ -39,10 +40,11 @@ jobs:
           echo "=== otool -L ===" > analysis_output/otool_L.txt
           otool -arch arm64 -L "$BINARY" >> analysis_output/otool_L.txt 2>&1
           echo "=== otool -l (filtered) ===" > analysis_output/otool_l.txt
-          otool -arch arm64 -l "$BINARY" | grep -A2 -E "(segname|LC_SEGMENT|LC_DYLD)" >> analysis_output/otool_l.txt 2>&1
+          otool -arch arm64 -l "$BINARY" | grep -A2 -E "(segname|LC_SEGMENT|LC_DYLD)" >> analysis_output/otool_l.txt 2>&1 || true
 
       - name: class-dump ObjC headers
         run: |
+          set +e
           brew install class-dump 2>/dev/null || true
           BINARY="fb_extract/Payload/$APP_DIR/$APP_DIR"
           mkdir -p classdump_output
@@ -56,30 +58,32 @@ jobs:
 
       - name: strings - search for key selectors/classes
         run: |
+          set +e
           BINARY="fb_extract/Payload/$APP_DIR/$APP_DIR"
           mkdir -p analysis_output
           strings "$BINARY" > analysis_output/strings_all.txt 2>&1
           echo "=== Seen-related ===" > analysis_output/strings_seen.txt
-          strings "$BINARY" | grep -iE "(seen|snacks|mutator|bucket|markThread|markStory)" >> analysis_output/strings_seen.txt 2>&1
+          strings "$BINARY" | grep -iE "(seen|snacks|mutator|bucket|markThread|markStory)" >> analysis_output/strings_seen.txt 2>&1 || true
           echo "=== Video/Media URL ===" > analysis_output/strings_video.txt
-          strings "$BINARY" | grep -iE "(videoURL|videoUrl|playableURL|streamURL|mediaURL|downloadURL|hdVideo|sdVideo)" >> analysis_output/strings_video.txt 2>&1
+          strings "$BINARY" | grep -iE "(videoURL|videoUrl|playableURL|streamURL|mediaURL|downloadURL|hdVideo|sdVideo)" >> analysis_output/strings_video.txt 2>&1 || true
           echo "=== Like/Action ===" > analysis_output/strings_like.txt
-          strings "$BINARY" | grep -iE "(likeAction|performLike|likeButton|likeHandler|FBLike)" >> analysis_output/strings_like.txt 2>&1
+          strings "$BINARY" | grep -iE "(likeAction|performLike|likeButton|likeHandler|FBLike)" >> analysis_output/strings_like.txt 2>&1 || true
           echo "=== Story Viewer ===" > analysis_output/strings_story.txt
-          strings "$BINARY" | grep -iE "(StoryViewer|StoryPlayer|StoryContent|ReelsViewer|ReelsPlayer)" >> analysis_output/strings_story.txt 2>&1
+          strings "$BINARY" | grep -iE "(StoryViewer|StoryPlayer|StoryContent|ReelsViewer|ReelsPlayer)" >> analysis_output/strings_story.txt 2>&1 || true
           echo "=== FBMem/FBTree ===" > analysis_output/strings_mem.txt
-          strings "$BINARY" | grep -iE "(FBMem|FBTree|initWithFB|FBVideoChannel)" >> analysis_output/strings_mem.txt 2>&1
+          strings "$BINARY" | grep -iE "(FBMem|FBTree|initWithFB|FBVideoChannel)" >> analysis_output/strings_mem.txt 2>&1 || true
           echo "=== All FB class strings ===" > analysis_output/strings_fb.txt
-          strings "$BINARY" | grep -iE "^FB[A-Z]" | sort -u >> analysis_output/strings_fb.txt 2>&1
+          strings "$BINARY" | grep -iE "^FB[A-Z]" | sort -u >> analysis_output/strings_fb.txt 2>&1 || true
 
       - name: nm - symbols
         run: |
+          set +e
           BINARY="fb_extract/Payload/$APP_DIR/$APP_DIR"
           mkdir -p analysis_output
           echo "=== nm -g (global symbols) ===" > analysis_output/nm_g.txt
-          nm -arch arm64 -g "$BINARY" 2>&1 | grep -iE "(FB|snacks|seen|video|story)" | head -500 >> analysis_output/nm_g.txt 2>&1
+          nm -arch arm64 -g "$BINARY" 2>&1 | grep -iE "(FB|snacks|seen|video|story)" | head -500 >> analysis_output/nm_g.txt 2>&1 || true
           echo "=== nm -u (undefined) ===" > analysis_output/nm_u.txt
-          nm -arch arm64 -u "$BINARY" 2>&1 | grep -iE "(FB|snacks)" | head -200 >> analysis_output/nm_u.txt 2>&1
+          nm -arch arm64 -u "$BINARY" 2>&1 | grep -iE "(FB|snacks)" | head -200 >> analysis_output/nm_u.txt 2>&1 || true
 
       - name: Upload analysis artifacts
         uses: actions/upload-artifact@v4
