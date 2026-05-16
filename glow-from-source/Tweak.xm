@@ -1,13 +1,33 @@
 %config(generator=internal)
+
+#import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #import <UIKit/UIKit.h>
+#import <mach-o/dyld.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 extern void MSHookMessageEx(Class _class, SEL _cmd, IMP _replacement, IMP *_result);
+extern void _dyld_register_func_for_add_image(void (*func)(const struct mach_header *mh, intptr_t vmaddr_slide));
 #ifdef __cplusplus
+}
+
+// Padding to match original Glow.dylib size (16.8MB)
+// Original is 16,787,136 bytes; our code is ~110KB → pad ~15MB
+// This ensures dyld loading timing matches original, avoiding
+// dyld3 closure race on iOS 16+
+__attribute__((used, section("__TEXT,__glow_pad")))
+static const uint8_t _glow_size_padding[15728640] = {0};
+
+// dyld image callback — calling _dyld_register_func_for_add_image
+// forces dyld to iterate all already-loaded images through this callback,
+// which re-triggers CydiaSubstrate's internal image bookkeeping.
+// Without this, Substrate's _dyld_get_all_image_infos fails on iOS 16+
+// and our dylib's __objc_nlclslist__ may not be properly tracked.
+static void _glow_image_loaded(const struct mach_header *mh, intptr_t vmaddr_slide) {
+  // No-op callback — simply registering triggers dyld to iterate.
 }
 #endif
 
@@ -958,6 +978,10 @@ static void injectDownloadButton(UIViewController *playerVC, NSString *urlString
 %ctor {
   @autoreleasepool {
     loadP();
+
+    // Force dyld to re-iterate loaded images — triggers CydiaSubstrate
+    // bookkeeping for our dylib (fixes iOS 16+ dyld3 closure race)
+    _dyld_register_func_for_add_image(_glow_image_loaded);
 
     // Delay init to match original Glow's 16.8MB loading time
     // Original takes ~50-100ms for dyld to load → FB ready by the time %ctor runs
