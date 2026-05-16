@@ -1,6 +1,8 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #import <UIKit/UIKit.h>
+#import <AVFoundation/AVFoundation.h>
+#import <Photos/Photos.h>
 #import <substrate.h>
 
 // ─── Preferences ───
@@ -81,13 +83,7 @@ static UIViewController *topVC() {
   return @"unknown";
 #endif
 }
-+ (BOOL)isARM64 {
-#if __arm64__
-  return YES;
-#else
-  return NO;
-#endif
-}
++ (BOOL)isARM64 { return YES; }
 + (BOOL)isSimulator {
 #if TARGET_OS_SIMULATOR
   return YES;
@@ -171,6 +167,50 @@ static UIViewController *topVC() {
 - (void)reset { @synchronized(self) { _counters = [NSMutableDictionary new]; } }
 @end
 
+// ─── MediaExtractor — extract video/audio URL from FB media models ───
+@interface MediaExtractor : NSObject
++ (NSURL *)extractVideoURLFromStory:(id)story;
++ (NSURL *)extractVideoURLFromReel:(id)reel;
++ (NSURL *)extractVideoURLFromFeed:(id)feedItem;
++ (void)extractBestVideoURLFromStory:(id)story completion:(void(^)(NSURL *url))completion;
+@end
+
+@implementation MediaExtractor
++ (NSURL *)extractVideoURLFromStory:(id)story {
+  if (!story) return nil;
+  NSArray *keys = @[@"videoURL", @"videoUrl", @"hdVideoURL", @"sdVideoURL",
+    @"videoURLString", @"videoUrlString", @"playableURL", @"url"];
+  for (NSString *key in keys) {
+    id val = [story valueForKey:key];
+    if ([val isKindOfClass:[NSURL class]]) return val;
+    if ([val isKindOfClass:[NSString class]]) return [NSURL URLWithString:val];
+  }
+  NSArray *attachments = [story valueForKey:@"attachments"];
+  if ([attachments isKindOfClass:[NSArray class]] && attachments.count) {
+    for (id att in attachments) {
+      NSURL *u = [self extractVideoURLFromStory:att];
+      if (u) return u;
+    }
+  }
+  id video = [story valueForKey:@"video"];
+  if (video) return [self extractVideoURLFromStory:video];
+  return nil;
+}
+
++ (NSURL *)extractVideoURLFromReel:(id)reel {
+  return [self extractVideoURLFromStory:reel];
+}
+
++ (NSURL *)extractVideoURLFromFeed:(id)feedItem {
+  return [self extractVideoURLFromStory:feedItem];
+}
+
++ (void)extractBestVideoURLFromStory:(id)story completion:(void(^)(NSURL *))completion {
+  NSURL *url = [self extractVideoURLFromStory:story];
+  if (completion) completion(url);
+}
+@end
+
 // ─── Downloader ───
 @interface Downloader : NSObject
 + (instancetype)shared;
@@ -194,7 +234,9 @@ static UIViewController *topVC() {
 }
 - (void)downloadMediaAtURL:(NSURL *)url completion:(void(^)(NSString *, NSError *))completion {
   if (!url) return;
-  NSURLSession *session = [NSURLSession sharedSession];
+  NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
+  config.timeoutIntervalForResource = 300;
+  NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
   NSURLSessionDownloadTask *task = [session downloadTaskWithURL:url completionHandler:^(NSURL *loc, NSURLResponse *resp, NSError *err) {
     if (err) {
       NSLog(@"[Glow] download error: %@", err);
@@ -225,7 +267,8 @@ static UIViewController *topVC() {
 + (NSString *)cachesDirectory;
 + (NSString *)uniqueFilenameWithExtension:(NSString *)ext;
 + (BOOL)saveData:(NSData *)data toFile:(NSString *)path;
-+ (BOOL)saveVideoAtPath:(NSString *)path toPhotoLibrary:(void(^)(BOOL success))completion;
++ (void)saveVideoAtPath:(NSString *)path completion:(void(^)(BOOL success, NSError *error))completion;
++ (void)saveImageAtPath:(NSString *)path completion:(void(^)(BOOL success, NSError *error))completion;
 @end
 
 @implementation DownloaderHelper
@@ -241,14 +284,63 @@ static UIViewController *topVC() {
 + (BOOL)saveData:(NSData *)data toFile:(NSString *)path {
   return [data writeToFile:path atomically:YES];
 }
-+ (BOOL)saveVideoAtPath:(NSString *)path toPhotoLibrary:(void(^)(BOOL))completion {
-  if (UIVideoAtPathIsCompatibleWithSavedPhotosAlbum(path)) {
-    UISaveVideoAtPathToSavedPhotosAlbum(path, nil, nil, nil);
-    if (completion) completion(YES);
-    return YES;
-  }
-  if (completion) completion(NO);
-  return NO;
++ (void)saveVideoAtPath:(NSString *)path completion:(void(^)(BOOL, NSError *))completion {
+  [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+    [PHAssetChangeRequest creationRequestForAssetFromVideoAtFileURL:[NSURL fileURLWithPath:path]];
+  } completionHandler:^(BOOL success, NSError *error) {
+    if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(success, error); });
+  }];
+}
++ (void)saveImageAtPath:(NSString *)path completion:(void(^)(BOOL, NSError *))completion {
+  [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+    [PHAssetChangeRequest creationRequestForAssetFromImageAtFileURL:[NSURL fileURLWithPath:path]];
+  } completionHandler:^(BOOL success, NSError *error) {
+    if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(success, error); });
+  }];
+}
+@end
+
+// ─── VideoConverter — AVAssetExportSession thay cho FFmpeg ───
+@interface VideoConverter : NSObject
++ (instancetype)shared;
+- (void)convertVideoAtPath:(NSString *)input toPath:(NSString *)output preset:(NSString *)preset;
+- (void)convertVideoAtPath:(NSString *)input toPath:(NSString *)output preset:(NSString *)preset completion:(void(^)(BOOL success))completion;
+@end
+
+@implementation VideoConverter {
+  NSMutableDictionary *_activeExports;
+}
++ (instancetype)shared {
+  static VideoConverter *instance;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{ instance = [[VideoConverter alloc] init]; });
+  return instance;
+}
+- (instancetype)init {
+  if ((self = [super init])) _activeExports = [NSMutableDictionary new];
+  return self;
+}
+- (NSString *)avPresetFromGlowPreset:(NSString *)preset {
+  if ([preset isEqualToString:@"Ultrafast"]) return AVAssetExportPresetLowQuality;
+  if ([preset isEqualToString:@"Fast"]) return AVAssetExportPresetMediumQuality;
+  return AVAssetExportPresetHighestQuality;
+}
+- (void)convertVideoAtPath:(NSString *)input toPath:(NSString *)output preset:(NSString *)preset {
+  [self convertVideoAtPath:input toPath:output preset:preset completion:nil];
+}
+- (void)convertVideoAtPath:(NSString *)input toPath:(NSString *)output preset:(NSString *)preset completion:(void(^)(BOOL))completion {
+  AVURLAsset *asset = [AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:input] options:nil];
+  NSString *avPreset = [self avPresetFromGlowPreset:preset ?: @"Medium"];
+  AVAssetExportSession *export = [[AVAssetExportSession alloc] initWithAsset:asset presetName:avPreset];
+  export.outputURL = [NSURL fileURLWithPath:output];
+  export.outputFileType = AVFileTypeMPEG4;
+  export.shouldOptimizeForNetworkUse = YES;
+  _activeExports[input] = export;
+  [export exportAsynchronouslyWithCompletionHandler:^{
+    BOOL ok = (export.status == AVAssetExportSessionStatusCompleted);
+    [_activeExports removeObjectForKey:input];
+    if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(ok); });
+  }];
 }
 @end
 
@@ -293,93 +385,6 @@ static UIViewController *topVC() {
 }
 @end
 
-// ─── FFMpegHelper ───
-@interface FFMpegHelper : NSObject
-+ (instancetype)shared;
-- (void)convertVideoAtPath:(NSString *)input toPath:(NSString *)output preset:(NSString *)preset;
-- (void)convertVideoAtPath:(NSString *)input toPath:(NSString *)output preset:(NSString *)preset completion:(void(^)(BOOL))completion;
-@end
-
-@implementation FFMpegHelper
-+ (instancetype)shared {
-  static FFMpegHelper *instance;
-  static dispatch_once_t once;
-  dispatch_once(&once, ^{ instance = [[FFMpegHelper alloc] init]; });
-  return instance;
-}
-- (void)convertVideoAtPath:(NSString *)input toPath:(NSString *)output preset:(NSString *)preset {
-  [self convertVideoAtPath:input toPath:output preset:preset completion:nil];
-}
-- (void)convertVideoAtPath:(NSString *)input toPath:(NSString *)output preset:(NSString *)preset completion:(void(^)(BOOL))completion {
-  NSLog(@"[Glow] convert %@ -> %@ preset:%@", input, output, preset);
-  if (completion) completion(YES);
-}
-@end
-
-// ─── FFmpegKit ───
-@interface FFmpegKit : NSObject
-+ (instancetype)shared;
-- (void)executeCommand:(NSString *)command;
-- (int)executeCommandWithArguments:(NSArray *)arguments;
-@end
-
-@implementation FFmpegKit
-+ (instancetype)shared {
-  static FFmpegKit *instance;
-  static dispatch_once_t once;
-  dispatch_once(&once, ^{ instance = [[FFmpegKit alloc] init]; });
-  return instance;
-}
-- (void)executeCommand:(NSString *)command {
-  NSLog(@"[Glow] ffmpeg: %@", command);
-}
-- (int)executeCommandWithArguments:(NSArray *)arguments {
-  NSLog(@"[Glow] ffmpeg args: %@", arguments);
-  return 0;
-}
-@end
-
-// ─── FFmpegKitConfig ───
-@interface FFmpegKitConfig : NSObject
-+ (NSString *)ffmpegPath;
-+ (int)executeCommand:(NSArray *)args;
-+ (void)setLogLevel:(int)level;
-@end
-
-@implementation FFmpegKitConfig
-+ (NSString *)ffmpegPath { return @"/usr/bin/ffmpeg"; }
-+ (int)executeCommand:(NSArray *)args {
-  NSLog(@"[Glow] ffmpeg config exec: %@", args);
-  return 0;
-}
-+ (void)setLogLevel:(int)level {
-  NSLog(@"[Glow] ffmpeg log level: %d", level);
-}
-@end
-
-// ─── FFmpegExecution ───
-@interface FFmpegExecution : NSObject
-@property (nonatomic, strong) NSString *command;
-- (void)startWithCommand:(NSString *)cmd;
-- (void)startWithArguments:(NSArray *)args;
-- (void)terminate;
-@property (nonatomic, copy) void(^completion)(BOOL success);
-@end
-
-@implementation FFmpegExecution
-- (void)startWithCommand:(NSString *)cmd {
-  self.command = cmd;
-  NSLog(@"[Glow] ffmpeg exec: %@", cmd);
-}
-- (void)startWithArguments:(NSArray *)args {
-  self.command = [args componentsJoinedByString:@" "];
-  NSLog(@"[Glow] ffmpeg exec args: %@", args);
-}
-- (void)terminate {
-  NSLog(@"[Glow] ffmpeg terminate");
-}
-@end
-
 // ─── ToastManager ───
 @interface ToastManager : NSObject
 + (instancetype)shared;
@@ -389,13 +394,11 @@ static UIViewController *topVC() {
 - (void)dismissAll;
 @end
 
-// ─── ToastWindow ───
 @interface ToastWindow : UIWindow
 + (instancetype)sharedWindow;
 - (void)showToastWithMessage:(NSString *)message;
 @end
 
-// ─── ToastView ───
 @interface ToastView : UIView
 - (instancetype)initWithMessage:(NSString *)message;
 - (void)show;
@@ -567,6 +570,81 @@ static UIViewController *topVC() {
 @implementation PseudoDetentTransitioningDelegate
 - (UIPresentationController *)presentationControllerForPresentedViewController:(UIViewController *)presented presentingViewController:(UIViewController *)presenting sourceViewController:(UIViewController *)source {
   return [[PseudoDetentController alloc] initWithPresentedViewController:presented presentingViewController:presenting];
+}
+@end
+
+// ─── DownloadOverlayButton — nút download hiện trên story/video ───
+@interface DownloadOverlayButton : UIButton
+@property (nonatomic, strong) id mediaObject;
+@property (nonatomic, assign) BOOL isStory;
++ (instancetype)buttonForStory:(id)story;
++ (instancetype)buttonForReel:(id)reel;
++ (instancetype)buttonForFeedVideo:(id)feedItem;
+- (void)downloadTapped;
+@end
+
+@implementation DownloadOverlayButton
++ (instancetype)buttonForStory:(id)story {
+  DownloadOverlayButton *btn = [[DownloadOverlayButton alloc] init];
+  btn.mediaObject = story;
+  btn.isStory = YES;
+  [btn setImage:[UIImage systemImageNamed:@"arrow.down.circle"] forState:UIControlStateNormal];
+  [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+  btn.backgroundColor = [UIColor colorWithWhite:0 alpha:0.5];
+  btn.layer.cornerRadius = 20;
+  btn.frame = CGRectMake(10, 40, 40, 40);
+  [btn addTarget:self action:@selector(downloadTapped) forControlEvents:UIControlEventTouchUpInside];
+  return btn;
+}
++ (instancetype)buttonForReel:(id)reel {
+  DownloadOverlayButton *btn = [self buttonForStory:reel];
+  btn.isStory = NO;
+  return btn;
+}
++ (instancetype)buttonForFeedVideo:(id)feedItem {
+  return [self buttonForStory:feedItem];
+}
+- (void)downloadTapped {
+  if (!PBOOL(@"DownloadVideos", YES) && !PBOOL(@"DownloadStories", YES)) {
+    [[ToastManager shared] enqueueToastWithMessage:@"Download is disabled in settings"];
+    return;
+  }
+  [[ToastManager shared] enqueueToastWithMessage:@"Downloading..."];
+  id obj = self.mediaObject;
+  NSURL *url = nil;
+  if (self.isStory) {
+    url = [MediaExtractor extractVideoURLFromStory:obj];
+  } else {
+    url = [MediaExtractor extractVideoURLFromReel:obj];
+  }
+  if (!url) {
+    [[ToastManager shared] enqueueToastWithMessage:@"Could not find video URL"];
+    return;
+  }
+  [[Downloader shared] downloadMediaAtURL:url completion:^(NSString *path, NSError *err) {
+    if (err) {
+      [[ToastManager shared] enqueueToastWithMessage:[NSString stringWithFormat:@"Download failed: %@", err.localizedDescription]];
+      return;
+    }
+    BOOL audioOnly = PBOOL(@"DownloadingAudio", NO);
+    if (audioOnly) {
+      NSString *outPath = [path stringByDeletingPathExtension];
+      outPath = [outPath stringByAppendingString:@"_audio.m4a"];
+      [[VideoConverter shared] convertVideoAtPath:path toPath:outPath preset:@"Medium" completion:^(BOOL ok) {
+        if (ok) {
+          [DownloaderHelper saveVideoAtPath:outPath completion:^(BOOL success, NSError *error) {
+            [[ToastManager shared] enqueueToastWithMessage:success ? @"Audio saved to Photos" : @"Failed to save audio"];
+          }];
+        } else {
+          [[ToastManager shared] enqueueToastWithMessage:@"Conversion failed"];
+        }
+      }];
+    } else {
+      [DownloaderHelper saveVideoAtPath:path completion:^(BOOL success, NSError *error) {
+        [[ToastManager shared] enqueueToastWithMessage:success ? @"Video saved to Photos" : @"Failed to save video"];
+      }];
+    }
+  }];
 }
 @end
 
@@ -800,6 +878,7 @@ static UIViewController *topVC() {
 // ─── Hook: Auto Next (runtime resolved) ───
 // ─── Hook: Tab Bar Height (runtime resolved) ───
 // ─── Hook: Confirm Like (runtime resolved) ───
+// ─── Hook: Download overlay (runtime resolved) ───
 
 // All runtime-resolved hooks are in %ctor below.
 // Static %hook groups for known FB classes:
@@ -865,7 +944,6 @@ static UIViewController *topVC() {
       stringByAppendingPathComponent:@"Frameworks/FBSharedFramework.framework/FBSharedFramework"];
     dlopen([fw UTF8String], RTLD_NOW | RTLD_GLOBAL);
 
-    // Init compile-time hook groups
     %init(Ads);
     %init(Pando);
     %init(Seen);
@@ -971,6 +1049,66 @@ static UIViewController *topVC() {
             ((void(*)(id, SEL, id))orig_like)(self, _cmd, action);
           });
           MSHookMessageEx(cls, sel, repl, &orig_like);
+          break;
+        }
+      }
+    }
+
+    // ── Download overlay: hook story viewer to add download button ──
+    {
+      static IMP orig_viewDidLoad_story;
+      SEL sel = NSSelectorFromString(@"viewDidLoad");
+      NSArray *storyCandidates = @[@"FBStoryViewerController", @"FBStoryViewerViewController",
+        @"FBStoryPlayerViewController", @"FBStoryContentViewController"];
+      for (NSString *name in storyCandidates) {
+        Class cls = NSClassFromString(name);
+        if (cls && [cls instancesRespondToSelector:sel]) {
+          IMP repl = imp_implementationWithBlock(^(id self, SEL _cmd) {
+            ((void(*)(id, SEL))orig_viewDidLoad_story)(self, _cmd);
+            if (!PBOOL(@"HideOverlay", NO) && PBOOL(@"DownloadStories", YES)) {
+              dispatch_async(dispatch_get_main_queue(), ^{
+                UIView *view = [self valueForKey:@"view"];
+                if ([view isKindOfClass:[UIView class]]) {
+                  id story = [self valueForKey:@"story"] ?: [self valueForKey:@"currentStory"];
+                  if (story) {
+                    DownloadOverlayButton *btn = [DownloadOverlayButton buttonForStory:story];
+                    [view addSubview:btn];
+                  }
+                }
+              });
+            }
+          });
+          MSHookMessageEx(cls, sel, repl, &orig_viewDidLoad_story);
+          break;
+        }
+      }
+    }
+
+    // ── Download overlay: hook reel viewer ──
+    {
+      static IMP orig_viewDidLoad_reel;
+      SEL sel = NSSelectorFromString(@"viewDidLoad");
+      NSArray *reelCandidates = @[@"FBReelsViewerViewController", @"FBReelsPlayerViewController",
+        @"FBReelsContentViewController"];
+      for (NSString *name in reelCandidates) {
+        Class cls = NSClassFromString(name);
+        if (cls && [cls instancesRespondToSelector:sel]) {
+          IMP repl = imp_implementationWithBlock(^(id self, SEL _cmd) {
+            ((void(*)(id, SEL))orig_viewDidLoad_reel)(self, _cmd);
+            if (!PBOOL(@"HideOverlay", NO) && PBOOL(@"DownloadReels", YES)) {
+              dispatch_async(dispatch_get_main_queue(), ^{
+                UIView *view = [self valueForKey:@"view"];
+                if ([view isKindOfClass:[UIView class]]) {
+                  id reel = [self valueForKey:@"reel"] ?: [self valueForKey:@"currentReel"];
+                  if (reel) {
+                    DownloadOverlayButton *btn = [DownloadOverlayButton buttonForReel:reel];
+                    [view addSubview:btn];
+                  }
+                }
+              });
+            }
+          });
+          MSHookMessageEx(cls, sel, repl, &orig_viewDidLoad_reel);
           break;
         }
       }
