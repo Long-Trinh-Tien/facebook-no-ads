@@ -2,6 +2,11 @@ name: Analyze Facebook IPA
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - qwen-glow
+    paths:
+      - '.github/workflows/analyze-fb-ipa.yml'
 
 jobs:
   analyze:
