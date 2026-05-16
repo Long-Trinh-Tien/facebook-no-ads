@@ -777,6 +777,10 @@ static UIViewController *topVC() {
   return self;
 }
 + (void)installOnTabBar {
+  [self installOnTabBarWithRetry:3];
+}
++ (void)installOnTabBarWithRetry:(int)retries {
+  if (retries <= 0) { NSLog(@"[Glow] tab bar not found after max retries"); return; }
   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
     @try {
       UITabBar *tabBar = nil;
@@ -797,8 +801,8 @@ static UIViewController *topVC() {
           NSLog(@"[Glow] long press installed");
         }
       } else {
-        NSLog(@"[Glow] tab bar not found, retry...");
-        [self installOnTabBar];
+        NSLog(@"[Glow] tab bar not found, retry %d...", retries);
+        [self installOnTabBarWithRetry:retries - 1];
       }
     } @catch (NSException *e) { NSLog(@"[Glow] gesture error: %@", e.reason); }
   });
@@ -955,9 +959,18 @@ static void injectDownloadButton(UIViewController *playerVC, NSString *urlString
   @autoreleasepool {
     loadP();
 
-    NSString *fw = [[NSBundle mainBundle].bundlePath
-      stringByAppendingPathComponent:@"Frameworks/FBSharedFramework.framework/FBSharedFramework"];
-    dlopen([fw UTF8String], RTLD_NOW | RTLD_GLOBAL);
+    // Delay init to match original Glow's 16.8MB loading time
+    // Original takes ~50-100ms for dyld to load → FB ready by the time %ctor runs
+    // Our clone is 560KB → loads instantly before FB is ready → crash
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+
+    @try {
+      NSString *fw = [[NSBundle mainBundle].bundlePath
+        stringByAppendingPathComponent:@"Frameworks/FBSharedFramework.framework/FBSharedFramework"];
+      dlopen([fw UTF8String], RTLD_NOW | RTLD_GLOBAL);
+    } @catch (NSException *e) {
+      NSLog(@"[Glow] dlopen error: %@", e.reason);
+    }
 
     // Init compile-time hook groups — DISABLED for FB 560.x
     // %init(Ads);
@@ -1136,8 +1149,13 @@ static void injectDownloadButton(UIViewController *playerVC, NSString *urlString
     if (!PBOOL(@"hasLaunched", NO)) {
       PSET(@"hasLaunched", @YES);
       saveP();
-      dispatch_async(dispatch_get_main_queue(), ^{
-        [WelcomeVC show];
+      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        @try {
+          if ([[UIApplication sharedApplication] keyWindow].rootViewController)
+            [WelcomeVC show];
+        } @catch (NSException *e) {
+          NSLog(@"[Glow] welcome error: %@", e.reason);
+        }
       });
     }
 
@@ -1146,6 +1164,7 @@ static void injectDownloadButton(UIViewController *playerVC, NSString *urlString
       [[NSURLCache sharedURLCache] removeAllCachedResponses];
     }
 
-    NSLog(@"[Glow] v1.3.1 loaded");
+    NSLog(@"[Glow] v1.3.1 loaded (delayed init)");
+    });
   }
 }
