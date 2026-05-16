@@ -755,23 +755,6 @@ static UIViewController *topVC() {
   @autoreleasepool {
     loadP();
 
-    // ── Install long press gesture on tab bar ──
-    [DVNLongPressGestureRecognizer installOnTabBar];
-
-    // ── Show welcome on first launch ──
-    if (!PBOOL(@"hasLaunched", NO)) {
-      PSET(@"hasLaunched", @YES);
-      saveP();
-      dispatch_async(dispatch_get_main_queue(), ^{
-        [WelcomeVC show];
-      });
-    }
-
-    // ── Auto clear cache ──
-    if (PBOOL(@"AutoClearCache", NO)) {
-      [[NSURLCache sharedURLCache] removeAllCachedResponses];
-    }
-
-    NSLog(@"[Glow] v1.3.1 loaded (minimal mode — no FB hooks)");
+    NSLog(@"[Glow] v1.3.1 loaded (ultra-minimal — prefs only)");
   }
 }

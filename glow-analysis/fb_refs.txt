@@ -1,0 +1,148 @@
+         ->cannot do aligned memory accesses anymore
+  !!#!"#%'$&()+/)**+-/0--,-./121/.//02350/-...13561/----1357:2/-...1368;<20....2468<<=42////2469=>?B641110457:>@ADG853221468;?@BEHI964332578<?ACFIKL<9665479:=ACDHKMOR?<99869;<?CEGKNPRUY@=:997:;=@CEGKNPRUYZA=::97:<=@DFGKOQSVZ[[C?=<;9<=?BEFIMOQUXZ\^`D@>=<:;=@BCGJKNRTVZ]^`bEA?>=;;>@ADGHKOPSWY\`abdFB@?>=<?@BEFILMQTUY\]bcdfGCB@?>=?@CDFJKNQSVX[^_defhHDCA@@=?ACDGIKNOTUX[]abfghjIEDBAA??BCEGILMQRUXZ^_cehijmJFFCBB@?BCFGJKNPRVW[\`behjlloKGGDDCB@BDFGJKOOTTXZ]_begklnoqLHHEEDCABEFHJLNQSUXZ]_bdhimopqtNJJFFEEBBFFJJMNRRVW\\`affkkpqssv 
+ !"""%!"##&'$&'(*+/&(()+,//)***,-/00/..-.//0241//.//012450/.-...014561/.-.../145771/.----/14579:20/..../25689;=20/..../2568:<==421////02569;=??B522000/1367:;>@@CD64311101477:<>@ADEG86533313578;=?BBFGIK96543323588<=?BCFGILL<98655457::=?ADDHIKNOR=:9776568:;>@BEEIJLOPST?<;988679<<?ACFGKLNQRUVY@=<:9978:<=@BDFGKMORRVWZ[A=<:9978:==@BDGGKMORSVXZ[[C?><;;9:<>?BCEHIMNPSTXY\]]_C@?=<<::==?ACFFJKNPQUVY[]^_aDA@>=<;:==@ACEGIKNOSSWX[]_`acEAA>>=<;=>@ADDHHLLPQTVXZ\_`bbdFBB??>=<<?@BCEGIKMOQTUXY]]abddfGCC@@>><<@@CCFFJJNNRRVV[[__ddeeh 
+ !""$%$$%&&&'),+)().1/./136<>;768:=AB@?BINOPONNRWYZ]_`aadhfbbcc
+ !$()+...-./0234689;<=>?@AABCD#%&&)-..0/.-.//1125678:;<=>@ABCD&((),//0100/0002235789::;<<=>?@A0/..//025555666788:<<=>?@AAAAAAA1/--.-/1578:;<=>?@ABCDEDCBBCDEFG20..../2678;==?AABDEFGHGGHIIHHGG4200//02689=?@BDEFHJKKLNOMLJKLMN964432359:<@BDGIJLOQRSTSQPQRRQON=9776468;=>BDFILMORTVWXVVXWUSUVW?<:98679<>@CFGKNORUWYZ[]^[YZ\ZYWC?=<;99<?@BEGIMOQUWX\]^`_`a_]]^`D@?=<;:<=@ACGHKNOSUW[\_`acbcddb`EA@>==;;>?ACDHILNQTUYZ]`bcdfffgiFBA??>=<=?ABEFJJNORTWY[^`deggiiiGCC@@>><=@@CCGGKKOPTTYY^^bchhjjm 
+ ###""#'+--)'()*,07;?A;5447=>::?BBAFJFBADKMJJMLIIIILPYZRMPVTRRR
+ $''&')-39:50/37:BKQSRNIHJMSUSRYc`Z^acimi_Y\_^]\XYZ]_`aadhfbbcc
+--cross-prefix=arm64-ios-darwin- --sysroot=/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.2.sdk --prefix=/Users/dan/ffmpeg-kit-test/prebuilt/apple-ios-arm64/ffmpeg --pkg-config=/opt/homebrew/bin/pkg-config --enable-version3 --arch=aarch64 --cpu=armv8 --target-os=darwin --enable-neon --enable-asm --ar=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ar --cc=clang --cxx=clang++ --as='/Users/dan/ffmpeg-kit-test/.tmp/gas-preprocessor.pl -arch aarch64 -- clang -arch arm64 -target arm64-apple-ios12.1 -march=armv8-a+crc+crypto -mcpu=generic -DFFMPEG_KIT_ARM64 -Wno-unused-function -Wno-deprecated-declarations -fstrict-aliasing -fembed-bitcode -DIOS -DFFMPEG_KIT_BUILD_DATE=20250618 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.2.sdk -Oz -miphoneos-version-min=12.1 -I/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.2.sdk/usr/include' --ranlib=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ranlib --strip=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/strip --ranlib=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ranlib --strip=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/strip --nm=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/nm --disable-autodetect --enable-cross-compile --enable-pic --enable-inline-asm --enable-optimizations --enable-swscale --enable-static --disable-shared --enable-pthreads --disable-v4l2-m2m --disable-outdev=v4l2 --disable-outdev=fbdev --disable-indev=v4l2 --disable-indev=fbdev --enable-small --disable-openssl --disable-xmm-clobber-test --disable-debug --disable-neon-clobber-test --disable-programs --disable-postproc --disable-doc --disable-htmlpages --disable-manpages --disable-podpages --disable-txtpages --disable-sndio --disable-schannel --disable-securetransport --disable-xlib --disable-cuda --disable-cuvid --disable-nvenc --disable-vaapi --disable-vdpau --disable-appkit --disable-alsa --disable-cuda --disable-cuvid --disable-nvenc --disable-vaapi --disable-vdpau --enable-libdav1d --enable-libx264 --enable-gpl --enable-libx265 --enable-gpl --disable-sdl2 --disable-zlib --disable-audiotoolbox --disable-bzlib --disable-videotoolbox --disable-avfoundation --disable-iconv --disable-coreimage --disable-opencl
+!'-6BN*fBNZfr~Z
+!%'*1001234679<>?@BCDEFGHIJK#%&&)-..0/.-.//1125678:;<=>@ABCD0/..//025555666788:<<=>?@AAAAAAA20..../2678;==?AABDEFGHGGHIIHHGG964432359:<@BDGIJLOQRSTSQPQRRQON?<:98679<>@CFGKNORUWYZ[]^[YZ\ZYWD@?=<;:<=@ACGHKNOSUW[\_`acbcddb`FBA??>=<=?ABEFJJNORTWY[^`deggiii 
+./libavutil/mem_internal.h
+* avoids re-fetching edge pixels from global memory.  And it allows us to
+* fenc_img is an output image (area of memory referenced through a texture
+* Loads 33 macroblocks plus the pixels directly above them into local memory,
+* This allows all of the pixels functions to read pixels from local memory, and
+* This is a 4x replication of the lowres pixels, a trade-off between memory
+/* Adjust pointers into local memory buffers for this thread's data */
+/* OpenCL 1.2 finally added a memset command, but we're not targeting 1.2 */
+%sconfiguration: --cross-prefix=arm64-ios-darwin- --sysroot=/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.2.sdk --prefix=/Users/dan/ffmpeg-kit-test/prebuilt/apple-ios-arm64/ffmpeg --pkg-config=/opt/homebrew/bin/pkg-config --enable-version3 --arch=aarch64 --cpu=armv8 --target-os=darwin --enable-neon --enable-asm --ar=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ar --cc=clang --cxx=clang++ --as='/Users/dan/ffmpeg-kit-test/.tmp/gas-preprocessor.pl -arch aarch64 -- clang -arch arm64 -target arm64-apple-ios12.1 -march=armv8-a+crc+crypto -mcpu=generic -DFFMPEG_KIT_ARM64 -Wno-unused-function -Wno-deprecated-declarations -fstrict-aliasing -fembed-bitcode -DIOS -DFFMPEG_KIT_BUILD_DATE=20250618 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.2.sdk -Oz -miphoneos-version-min=12.1 -I/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.2.sdk/usr/include' --ranlib=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ranlib --strip=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/strip --ranlib=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ranlib --strip=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/strip --nm=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/nm --disable-autodetect --enable-cross-compile --enable-pic --enable-inline-asm --enable-optimizations --enable-swscale --enable-static --disable-shared --enable-pthreads --disable-v4l2-m2m --disable-outdev=v4l2 --disable-outdev=fbdev --disable-indev=v4l2 --disable-indev=fbdev --enable-small --disable-openssl --disable-xmm-clobber-test --disable-debug --disable-neon-clobber-test --disable-programs --disable-postproc --disable-doc --disable-htmlpages --disable-manpages --disable-podpages --disable-txtpages --disable-sndio --disable-schannel --disable-securetransport --disable-xlib --disable-cuda --disable-cuvid --disable-nvenc --disable-vaapi --disable-vdpau --disable-appkit --disable-alsa --disable-cuda --disable-cuvid --disable-nvenc --disable-vaapi --disable-vdpau --enable-libdav1d --enable-libx264 --enable-gpl --enable-libx265 --enable-gpl --disable-sdl2 --disable-zlib --disable-audiotoolbox --disable-bzlib --disable-videotoolbox --disable-avfoundation --disable-iconv --disable-coreimage --disable-opencl
+^\ZXVRNJFB>:6543210/.-,+*('%$#"! 
+^UfBzMiz
+<fBBf<
+2gfbo`iw
+6s?fBbEcJYG[I[NYVP\B]@f;g<h<u4{,
+9 B:9FBc:lB
+9(B?:FB
+9*B89FBX9
+Allocating buffer memory failed.
+av_crc_init(av_crc_table[AV_CRC_24_IEEE], 0, 24, 0x864CFB, sizeof(av_crc_table[AV_CRC_24_IEEE])) >= 0
+B:FBYm
+B(@(A(B2@2A2B<@<A<BF@FAFB
+b&pfB$dD
+B7:@B]:fB
+barrier( CLK_LOCAL_MEM_FENCE );
+Cannot allocate memory for the config info.
+Cannot allocate memory for the parameter sets.
+Cannot allocate memory.
+ClientChallenge: 9e26d33f2984236010ef6253fb1887f7
+clReleaseMemObject
+Completion bitmask memory allocation error
+Could not (re)allocate memory for rc_override.
+Could not alloc memory for stream options.
+Could not allocate memory
+Could not allocate memory for input frame
+Could not allocate memory for inter matrix.
+Could not allocate memory for intra matrix.
+could not allocate memory for output frame
+Could not allocate memory for output frame
+dav1d_mem_pool_pop
+dav1d_mem_pool_push
+Deallocating memory.
+EFbc
+Error allocating memory.
+Error opening memory stream
+Failed to allocate buffer memory.
+Failed to allocate memory
+Failed to allocate memory for extradata.
+Failed to allocate memory for m_relativeComplexity
+Failed to malloc memory for input data
+Failed to reallocate memory for output
+FBA Object Plane start
+FBA Object start
+FBdU
+fbhxh```
+fbhxh`bf
+FBTS
+fFBbT
+framemd5
+frefBpos.y += b;\
+GeogPrimeMeridianGeoKey
+GeogPrimeMeridianLongGeoKey
+guess_dc() is out of memory
+hmeMv
+I0FB
+I0FB3
+I4FB
+I4FB%
+illegal long ref in memory management control operation %d
+illegal memory management control operation %d
+indexmem
+initWithFBPandoTree:
+initWithFBTree:
+int2 frefBpos = qposB >> 2;
+isMemberOfClass:
+kernel void memset_int16( global int16_t *buf, int16_t value )
+libavutil/mem_internal.h
+max memory used for buffering real-time frames
+max memory used for timestamp index (per stream)
+mem.c
+mem.h
+mem.nt == &nt[256]
+mem.nt == &nt[64]
+mem.nwc[BL_128X128] == &root[1 + 4]
+mem.nwc[BL_32X32] == &root[1 + 4 + 16 + 64]
+mem.nwc[BL_32X32] == &root[1 + 4 + 16]
+mem.nwc[BL_64X64] == &root[1 + 4 + 16]
+mem.nwc[BL_64X64] == &root[1 + 4]
+memc_only
+memory allocation failure, aborting encode
+Memory deallocated.
+Memory error while parsing AU metadata.
+memory management control operations (H.264)
+memory_management_control_operation
+memset_int16
+Mode %d: RLE-FB invalid counter: %d
+MXM bitmask memory allocation error
+no mem for add keyframe index!
+No memory for peak data
+Not enough memory
+Not enough memory for analysis context.
+Not enough memory for applying filters.
+Not enough memory for buffering samples.
+Not enough memory for closed captions, skipping
+Not enough memory for configuration string
+Not enough memory for LPC context.
+Not enough memory to buffer audio. Skipping picture streams
+num_sfb invalid
+Out of memory
+Out of memory building report file name
+Out of memory for filename
+Out of memory in packet queue; skipping attached pictures
+out of memory parsing option '%s': '%s'
+Out of memory queueing an attached picture; skipping
+Out of memory while decoding SDP configuration.
+out of memory, unable to read INFO tag
+Out of memory.
+out-of-memory error. Skipping cover art block.
+Pixel buffer memory constraint violated
+QEMEM
+rludfb
+rnmnnmZbbmfba\ddef{u|bRPuspnmlkodsixhiSR_`mxHGahEJcfvu
+setsockopt(IP_ADD_MEMBERSHIP)
+setsockopt(IP_ADD_SOURCE_MEMBERSHIP)
+setsockopt(IP_DROP_MEMBERSHIP)
+setsockopt(IPV6_ADD_MEMBERSHIP)
+setsockopt(IPV6_DROP_MEMBERSHIP)
+Too many memory management control operations.
+uhd-bd: keyframeMin is always 1
+uhd-bd: reducing keyframeMax to %d
+uint vB = (read_imageui( fref_planes, sampler, frefBpos + (int2)(x, y)).s0 >> mask_shift1) & 0xFF;
+unable to allocate memory
+Unable to allocate memory
+Unable to allocate memory for extradata!
+unable to allocate memory for filename
+Unable to allocate memory for SEI payload
+Unable to allocate memory!
+v]KO>SA7[^@FbYunWa
+vB = (read_imageui( fref_planes, sampler, frefBpos + (int2)(X, idx) ).s0 >> mask_shift1) & 0xFF;\
