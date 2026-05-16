@@ -9,72 +9,70 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download original Glow deb from GitHub release
+      - name: Download original Glow from our release
         run: |
-          curl -sL -o /tmp/glow.deb \
-            "https://github.com/dayanch96/Glow/releases/download/v1.3.1/com.dayanch96.glow_1.3.1_iphoneos-arm.deb"
-          ls -la /tmp/glow.deb
-          file /tmp/glow.deb
+          gh release download glow-original --repo Long-Trinh-Tien/facebook-no-ads
+          ls -la glow.deb
+        env:
+          GH_TOKEN: ${{ github.token }}
 
-      - name: Extract dylib from deb
+      - name: Extract dylib
         run: |
           mkdir -p /tmp/glow_out
           cd /tmp/glow_out
-          ar x /tmp/glow.deb
-          ls -la
-          # Find data archive
-          for f in data.tar.*; do
-            echo "Extracting $f..."
-            tar xf "$f" 2>/dev/null && break
-          done
-          find . -name "*.dylib" 2>/dev/null
+          ar x ${{ github.workspace }}/glow.deb
+          # Handle lzma compression
+          if [ -f data.tar.lzma ]; then
+            brew install xz 2>/dev/null || true
+            lzma -d data.tar.lzma
+            tar xf data.tar
+          elif [ -f data.tar.xz ]; then
+            tar xf data.tar.xz
+          elif [ -f data.tar.gz ]; then
+            tar xf data.tar.gz
+          elif [ -f data.tar.zst ]; then
+            tar xf data.tar.zst
+          fi
+          GLOW=$(find /tmp/glow_out -name "Glow.dylib" 2>/dev/null | head -1)
+          echo "GLOW=$GLOW" >> $GITHUB_ENV
 
       - name: Install jtool2
         run: |
-          brew install jtool2 2>/dev/null || echo "brew failed, trying pip"
-          sudo pip3 install --quiet jtool2 2>/dev/null || true
+          brew install jtool2 2>/dev/null || true
+          which jtool2 || echo "jtool2 not found"
 
       - name: Full analysis
         run: |
-          GLOW=$(find /tmp/glow_out -name "*.dylib" 2>/dev/null | head -1)
-          if [ -z "$GLOW" ] || [ ! -f "$GLOW" ]; then
-            # Try alternative paths
-            GLOW=$(find /tmp/glow_out -name "glow*" 2>/dev/null | head -1)
-          fi
-          echo "GLOW dylib: $GLOW"
+          GLOW="${{ env.GLOW }}"
+          echo "Analyzing: $GLOW"
           ls -la "$GLOW"
           
           mkdir -p /tmp/results
           
-          # 1. Basic info
           file "$GLOW" > /tmp/results/fileinfo.txt
           otool -L "$GLOW" > /tmp/results/libraries.txt
           otool -l "$GLOW" > /tmp/results/loadcmds.txt
           
-          # 2. Symbols
-          nm -gU "$GLOW" > /tmp/results/exported_syms.txt
-          nm -u "$GLOW" | sort > /tmp/results/imported_syms.txt
-          nm "$GLOW" | grep _OBJC_CLASS > /tmp/results/objc_classes.txt
+          nm -gU "$GLOW" > /tmp/results/exported_syms.txt 2>&1
+          nm -u "$GLOW" | sort > /tmp/results/imported_syms.txt 2>&1
+          nm "$GLOW" | grep _OBJC_CLASS > /tmp/results/objc_classes.txt 2>&1
           
-          # 3. Strings
-          strings "$GLOW" > /tmp/results/strings.txt
-          strings "$GLOW" | grep -E '^[a-z].+:$' | sort -u > /tmp/results/selectors.txt
+          strings "$GLOW" > /tmp/results/strings.txt 2>&1
+          strings "$GLOW" | grep -E '^[a-z].+:$' | sort -u > /tmp/results/selectors.txt 2>&1
           
-          # 4. ObjC metadata
           jtool2 --objc "$GLOW" > /tmp/results/objc_dump.txt 2>&1 || true
           
-          # 5. Disassembly of __text section (first 5000 lines)
-          jtool2 -d __text "$GLOW" 2>/dev/null | head -5000 > /tmp/results/disasm.txt
+          jtool2 -d __text "$GLOW" 2>/dev/null | head -3000 > /tmp/results/disasm_header.txt
+          jtool2 -d __text "$GLOW" 2>/dev/null | tail -3000 > /tmp/results/disasm_tail.txt
           
-          # 6. Try class-dump
-          which class-dump && class-dump "$GLOW" > /tmp/results/classdump.txt 2>&1 || echo "class-dump not available" > /tmp/results/classdump.txt
+          jtool2 --analyze "$GLOW" 2>/dev/null > /tmp/results/analyze.txt || true
           
-          # 7. Check for MSHookMessageEx or any hooking mechanism
-          nm -u "$GLOW" | grep -i "hook\|substrate\|MSHook\|logos" > /tmp/results/hook_imports.txt || echo "none found" > /tmp/results/hook_imports.txt
+          nm -u "$GLOW" | grep -i "hook\|substrate\|MSHook\|logos\|method_set\|class_replace\|class_addMethod" \
+            > /tmp/results/hook_imports.txt 2>&1 || echo "none found" > /tmp/results/hook_imports.txt
           
-          echo "Analysis complete" > /tmp/results/complete.txt
+          echo "complete" > /tmp/results/complete.txt
 
-      - name: Upload analysis results
+      - name: Upload results
         uses: actions/upload-artifact@v4
         with:
           name: glow-original-analysis
