@@ -361,7 +361,6 @@ static UIViewController *topVC() {
 
 // ─── FFmpegExecution ───
 @interface FFmpegExecution : NSObject
-@property (nonatomic, strong) NSTask *task;
 @property (nonatomic, strong) NSString *command;
 - (void)startWithCommand:(NSString *)cmd;
 - (void)startWithArguments:(NSArray *)args;
@@ -379,9 +378,11 @@ static UIViewController *topVC() {
   NSLog(@"[Glow] ffmpeg exec args: %@", args);
 }
 - (void)terminate {
-  [self.task terminate];
+  NSLog(@"[Glow] ffmpeg terminate");
 }
 @end
+
+@class ToastManager;
 
 // ─── ToastWindow ───
 @interface ToastWindow : UIWindow
@@ -395,7 +396,7 @@ static UIViewController *topVC() {
   static dispatch_once_t once;
   dispatch_once(&once, ^{
     instance = [[ToastWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    instance.windowLevel = UIWindowLevelAlert + 100;
+    instance.windowLevel = 2100;
     instance.userInteractionEnabled = NO;
     instance.hidden = NO;
   });
