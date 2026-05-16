@@ -19,29 +19,27 @@ jobs:
           ar x /tmp/glow_orig.deb
           tar xf data.tar.lzma 2>/dev/null || tar xf data.tar.gz 2>/dev/null
 
-      - name: Build Glow clone with Xcode clang
+      - name: Setup Theos
+        uses: waruhachi/theos-action@v2.4.6
+
+      - name: Build Glow clone with Theos on macOS
         run: |
-          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          echo "SDK: $SDK"
-
           cd glow-from-source
+          make clean package FINALPACKAGE=1
+          echo "=== Built package ==="
+          ls -la packages/*.deb
 
-          # Compile with Xcode clang — same approach as original Glow
-          clang -arch arm64 \
-            -miphoneos-version-min=14.0 \
-            -isysroot "$SDK" \
-            -fobjc-arc \
-            -dynamiclib \
-            -framework UIKit -framework Foundation -framework AVFoundation -framework Photos -framework CoreGraphics -framework CoreServices -framework Security -framework SystemConfiguration \
-            -Wno-deprecated-declarations \
-            -o Glow.dylib \
-            Tweak.xm
-
-          echo "=== Built dylib ==="
-          file Glow.dylib
-          ls -la Glow.dylib
-          otool -l Glow.dylib | grep -A2 "LC_BUILD_VERSION" || true
-          otool -L Glow.dylib | head -20
+          # Extract and verify
+          DEB=$(find packages -name "*.deb" | head -1)
+          mkdir -p /tmp/verify_deb
+          cd /tmp/verify_deb
+          ar x /tmp/facebook-no-ads/glow-from-source/$DEB
+          tar xf data.tar.lzma 2>/dev/null || tar xf data.tar.gz 2>/dev/null
+          DYLIB=$(find . -name "*.dylib" | head -1)
+          echo "=== Dylib info ==="
+          file "$DYLIB"
+          otool -l "$DYLIB" | grep -A2 "LC_BUILD_VERSION" || true
+          otool -L "$DYLIB" | head -20
 
       - name: Create deb package
         run: |
