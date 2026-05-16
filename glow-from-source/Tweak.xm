@@ -1,9 +1,7 @@
-%config(generator=internal)
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #import <UIKit/UIKit.h>
-
-extern void MSHookMessageEx(Class _class, SEL _cmd, IMP _replacement, IMP *_result);
+#import <substrate.h>
 
 // ─── Preferences ───
 static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.dvntm.glowprefs.plist";
