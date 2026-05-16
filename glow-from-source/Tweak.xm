@@ -777,26 +777,31 @@ static UIViewController *topVC() {
   return self;
 }
 + (void)installOnTabBar {
-  dispatch_async(dispatch_get_main_queue(), ^{
-    UIWindow *window = [[UIApplication sharedApplication] keyWindow];
-    if (!window) {
-      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    @try {
+      UITabBar *tabBar = nil;
+      for (UIWindow *window in [UIApplication sharedApplication].windows) {
+        for (UIView *sub in window.subviews) {
+          if ([sub isKindOfClass:[UITabBar class]]) { tabBar = (UITabBar *)sub; break; }
+        }
+        if (tabBar) break;
+      }
+      if (tabBar) {
+        BOOL hasGlow = NO;
+        for (UIGestureRecognizer *g in tabBar.gestureRecognizers) {
+          if ([NSStringFromClass([g class]) containsString:@"DVN"]) { hasGlow = YES; break; }
+        }
+        if (!hasGlow) {
+          DVNLongPressGestureRecognizer *g = [[DVNLongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
+          [tabBar addGestureRecognizer:g];
+          NSLog(@"[Glow] long press installed");
+        }
+      } else {
+        NSLog(@"[Glow] tab bar not found, retry...");
         [self installOnTabBar];
-      });
-      return;
-    }
-    [self findAndInstallInView:window];
+      }
+    } @catch (NSException *e) { NSLog(@"[Glow] gesture error: %@", e.reason); }
   });
-}
-+ (void)findAndInstallInView:(UIView *)view {
-  if ([view isKindOfClass:[UITabBar class]]) {
-    DVNLongPressGestureRecognizer *g = [[DVNLongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
-    [view addGestureRecognizer:g];
-    return;
-  }
-  for (UIView *sv in view.subviews) {
-    [self findAndInstallInView:sv];
-  }
 }
 + (void)handleLongPress:(UIGestureRecognizer *)g {
   if (g.state == UIGestureRecognizerStateBegan) {
@@ -806,6 +811,84 @@ static UIViewController *topVC() {
   }
 }
 @end
+
+// ─── Download Button Injection (runtime resolved) ───
+@interface GlowDownloadTarget : NSObject
++ (instancetype)shared;
+- (void)downloadTapped:(UIButton *)btn;
+@end
+
+@implementation GlowDownloadTarget
++ (instancetype)shared {
+  static GlowDownloadTarget *inst;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{ inst = [[GlowDownloadTarget alloc] init]; });
+  return inst;
+}
+- (void)downloadTapped:(UIButton *)btn {
+  NSString *url = btn.accessibilityIdentifier;
+  if (!url) return;
+  
+  UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Download Video" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+  [alert addAction:[UIAlertAction actionWithTitle:@"Download" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+    startDownload(url);
+  }]];
+  [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+  [topVC() presentViewController:alert animated:YES completion:nil];
+}
+@end
+
+static void injectDownloadButton(id playerVC, NSString *urlString) {
+  if (!urlString || urlString.length == 0) return;
+  if (!PBOOL(@"DownloadVideos", YES) && !PBOOL(@"DownloadVideo", YES)) return;
+  
+  dispatch_async(dispatch_get_main_queue(), ^{
+    @try {
+      UIView *overlayView = nil;
+      for (UIView *sub in playerVC.view.subviews) {
+        if ([NSStringFromClass([sub class]) containsString:@"Overlay"] ||
+            [NSStringFromClass([sub class]) containsString:@"Control"]) {
+          overlayView = sub;
+          break;
+        }
+      }
+      if (!overlayView) overlayView = playerVC.view;
+      
+      UIButton *dlBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+      [dlBtn setTitle:@"⬇" forState:UIControlStateNormal];
+      dlBtn.titleLabel.font = [UIFont systemFontOfSize:20];
+      dlBtn.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.5];
+      dlBtn.layer.cornerRadius = 18;
+      dlBtn.frame = CGRectMake(overlayView.bounds.size.width - 50, overlayView.bounds.size.height - 100, 36, 36);
+      dlBtn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleTopMargin;
+      [dlBtn addTarget:[GlowDownloadTarget shared] action:@selector(downloadTapped:) forControlEvents:UIControlEventTouchUpInside];
+      dlBtn.accessibilityIdentifier = urlString;
+      [overlayView addSubview:dlBtn];
+    } @catch (NSException *e) { NSLog(@"[Glow] inject btn error: %@", e.reason); }
+  });
+}
+
+static void startDownload(NSString *urlString) {
+  if (!urlString) return;
+  NSURL *url = [NSURL URLWithString:urlString];
+  if (!url) return;
+  
+  NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:url
+    completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+      if (err) { NSLog(@"[Glow] download error: %@", err); return; }
+      NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+      NSString *path = [docs stringByAppendingPathComponent:[NSString stringWithFormat:@"glow_%lld.mp4", (long long)[NSDate timeIntervalSinceReferenceDate]]];
+      [data writeToFile:path atomically:YES];
+      NSLog(@"[Glow] saved: %@", path);
+      
+      dispatch_async(dispatch_get_main_queue(), ^{
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Download Complete" message:path preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [topVC() presentViewController:alert animated:YES completion:nil];
+      });
+    }];
+  [task resume];
+}
 
 // ─── Hook: Old Seen (runtime resolved) ───
 // ─── Hook: Auto Next (runtime resolved) ───
@@ -989,6 +1072,65 @@ static UIViewController *topVC() {
 
     // ── Install long press gesture on tab bar ──
     [DVNLongPressGestureRecognizer installOnTabBar];
+
+    // ── Download button: hook story viewer ──
+    {
+      static IMP orig_viewDidLoad;
+      NSArray *viewerCandidates = @[@"FBStoryViewerController", @"FBSnacksStoryViewerViewController",
+        @"FBStoryInlineViewerViewController", @"FBStoryViewer"];
+      for (NSString *name in viewerCandidates) {
+        Class cls = NSClassFromString(name);
+        if (cls && [cls instancesRespondToSelector:@selector(viewDidLoad)]) {
+          IMP repl = imp_implementationWithBlock(^(id self, SEL _cmd) {
+            ((void(*)(id, SEL))orig_viewDidLoad)(self, _cmd);
+            @try {
+              NSString *url = nil;
+              for (NSString *prop in @[@"videoURLString", @"playableURLString", @"hdPlayableURLString", @"mediaURLString"]) {
+                if ([self respondsToSelector:NSSelectorFromString(prop)]) {
+                  url = [self valueForKey:prop];
+                  if (url) break;
+                }
+              }
+              if (url && ![url hasPrefix:@"file://"]) {
+                injectDownloadButton(self, url);
+              }
+            } @catch (NSException *e) { NSLog(@"[Glow] story download error: %@", e.reason); }
+          });
+          MSHookMessageEx(cls, @selector(viewDidLoad), repl, &orig_viewDidLoad);
+          break;
+        }
+      }
+    }
+
+    // ── Download button: hook video player ──
+    {
+      static IMP orig_viewDidLoad_video;
+      NSArray *videoCandidates = @[@"FBVideoPlayerViewController", @"FBVideoPlayerController",
+        @"FBInlineVideoPlayerViewController", @"FBReelsPlayerViewController"];
+      for (NSString *name in videoCandidates) {
+        Class cls = NSClassFromString(name);
+        if (cls && [cls instancesRespondToSelector:@selector(viewDidLoad)]) {
+          IMP repl = imp_implementationWithBlock(^(id self, SEL _cmd) {
+            ((void(*)(id, SEL))orig_viewDidLoad_video)(self, _cmd);
+            @try {
+              NSString *url = nil;
+              for (NSString *prop in @[@"videoURLString", @"playableURLString", @"hdPlayableURLString",
+                @"dashPlayableURL", @"playableURL", @"mediaURLString"]) {
+                if ([self respondsToSelector:NSSelectorFromString(prop)]) {
+                  url = [self valueForKey:prop];
+                  if (url && ![url hasPrefix:@"file://"]) break;
+                }
+              }
+              if (url) {
+                injectDownloadButton(self, url);
+              }
+            } @catch (NSException *e) { NSLog(@"[Glow] video download error: %@", e.reason); }
+          });
+          MSHookMessageEx(cls, @selector(viewDidLoad), repl, &orig_viewDidLoad_video);
+          break;
+        }
+      }
+    }
 
     // ── Show welcome on first launch ──
     if (!PBOOL(@"hasLaunched", NO)) {
