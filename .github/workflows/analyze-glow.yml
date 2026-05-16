@@ -2,8 +2,6 @@ name: Analyze Original Glow Structure
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ master ]
 
 jobs:
   analyze:
@@ -11,125 +9,73 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download original Glow deb
+      - name: Download original Glow deb from GitHub release
         run: |
-          curl -sL "https://github.com/dayanch96/Glow/releases/download/v1.3.1/com.dayanch96.glow_1.3.1_iphoneos-arm.deb" \
-            -o /tmp/glow.deb || echo "FAILED: could not download original Glow"
+          curl -sL -o /tmp/glow.deb \
+            "https://github.com/dayanch96/Glow/releases/download/v1.3.1/com.dayanch96.glow_1.3.1_iphoneos-arm.deb"
           ls -la /tmp/glow.deb
+          file /tmp/glow.deb
 
-      - name: Install tools
+      - name: Extract dylib from deb
         run: |
-          if [ -f /tmp/glow.deb ]; then
-            # Extract the deb
-            mkdir -p /tmp/glow_extracted
-            cd /tmp/glow_extracted && ar x /tmp/glow.deb && ls -la
-            # Try to extract data.tar.*
-            for f in data.tar.*; do
-              tar xf "$f" 2>/dev/null && break
-            done
-          fi
-          which jtool2 || brew install jtool2 2>/dev/null || true
+          mkdir -p /tmp/glow_out
+          cd /tmp/glow_out
+          ar x /tmp/glow.deb
+          ls -la
+          # Find data archive
+          for f in data.tar.*; do
+            echo "Extracting $f..."
+            tar xf "$f" 2>/dev/null && break
+          done
+          find . -name "*.dylib" 2>/dev/null
 
-      - name: Extract dylib path
+      - name: Install jtool2
         run: |
-          find /tmp/glow_extracted -name "*.dylib" -o -name "tweak" 2>/dev/null
-          # Common paths
-          ls -la /tmp/glow_extracted/Library/MobileSubstrate/DynamicLibraries/ 2>/dev/null || echo "No DynamicLibraries found"
-          ls -la /tmp/glow_extracted/Library/ApplicationSupport/ 2>/dev/null || echo "No ApplicationSupport found"
+          brew install jtool2 2>/dev/null || echo "brew failed, trying pip"
+          sudo pip3 install --quiet jtool2 2>/dev/null || true
 
-      - name: Analyze with jtool2
+      - name: Full analysis
         run: |
-          GLOW=$(find /tmp/glow_extracted -name "*.dylib" 2>/dev/null | head -1)
+          GLOW=$(find /tmp/glow_out -name "*.dylib" 2>/dev/null | head -1)
           if [ -z "$GLOW" ] || [ ! -f "$GLOW" ]; then
-            echo "No dylib found, trying alternative paths"
-            find /tmp/glow_extracted -type f 2>/dev/null | head -20
-            exit 1
+            # Try alternative paths
+            GLOW=$(find /tmp/glow_out -name "glow*" 2>/dev/null | head -1)
           fi
-          
-          echo "=== FILE INFO ==="
-          file "$GLOW"
+          echo "GLOW dylib: $GLOW"
           ls -la "$GLOW"
           
-          echo "=== LOAD COMMANDS ==="
-          otool -L "$GLOW"
+          mkdir -p /tmp/results
           
-          echo "=== LINKED LIBRARIES ==="
-          otool -L "$GLOW"
+          # 1. Basic info
+          file "$GLOW" > /tmp/results/fileinfo.txt
+          otool -L "$GLOW" > /tmp/results/libraries.txt
+          otool -l "$GLOW" > /tmp/results/loadcmds.txt
           
-          echo "=== OBJC CLASSES & PROTOCOLS ==="
-          echo "Classes (runtime objects):"
-          nm "$GLOW" | grep "_OBJC_CLASS" | grep -v "\$_NS\|	_OBJC_CLASS_\$_\$" | sort -u
+          # 2. Symbols
+          nm -gU "$GLOW" > /tmp/results/exported_syms.txt
+          nm -u "$GLOW" | sort > /tmp/results/imported_syms.txt
+          nm "$GLOW" | grep _OBJC_CLASS > /tmp/results/objc_classes.txt
           
-          echo "=== IMPORTED SYMBOLS ==="
-          nm -u "$GLOW" | sort | uniq -c | sort -rn
+          # 3. Strings
+          strings "$GLOW" > /tmp/results/strings.txt
+          strings "$GLOW" | grep -E '^[a-z].+:$' | sort -u > /tmp/results/selectors.txt
           
-          echo "=== EXPORTED FUNCTIONS ==="
-          nm -gU "$GLOW" | sort
+          # 4. ObjC metadata
+          jtool2 --objc "$GLOW" > /tmp/results/objc_dump.txt 2>&1 || true
           
-          echo "=== SELECTORS USED ==="
-          strings "$GLOW" | grep -E '^[a-z].+:$' | sort -u
-
-      - name: Disassemble constructor
-        run: |
-          GLOW=$(find /tmp/glow_extracted -name "*.dylib" 2>/dev/null | head -1)
+          # 5. Disassembly of __text section (first 5000 lines)
+          jtool2 -d __text "$GLOW" 2>/dev/null | head -5000 > /tmp/results/disasm.txt
           
-          echo "=== CONSTRUCTOR FUNCTIONS ==="
-          # Find init functions 
-          nm "$GLOW" | grep -E "init|constructor|__mod_init"
+          # 6. Try class-dump
+          which class-dump && class-dump "$GLOW" > /tmp/results/classdump.txt 2>&1 || echo "class-dump not available" > /tmp/results/classdump.txt
           
-          echo "=== __mod_init_func section ==="
-          jtool2 -section __mod_init_func "$GLOW" 2>/dev/null || echo "jtool2 -section not available"
+          # 7. Check for MSHookMessageEx or any hooking mechanism
+          nm -u "$GLOW" | grep -i "hook\|substrate\|MSHook\|logos" > /tmp/results/hook_imports.txt || echo "none found" > /tmp/results/hook_imports.txt
           
-          echo "=== Main text disassembly (first 2000 lines) ==="
-          jtool2 -d __text "$GLOW" 2>/dev/null | head -2000
-
-      - name: Extract hooks from disassembly
-        run: |
-          GLOW=$(find /tmp/glow_extracted -name "*.dylib" 2>/dev/null | head -1)
-          
-          echo "=== MSHookMessageEx calls ==="
-          # Search for BL instructions that call MSHookMessageEx
-          jtool2 -d __text "$GLOW" 2>/dev/null | grep -i "MSHook\|hook\|substrate\|logos" | head -50
-          
-          echo "=== Look for MSHookMessageEx symbol ==="
-          nm "$GLOW" | grep -i "MSHook"
-          
-          echo "=== Undefined symbols matching hook ==="
-          nm -u "$GLOW" | grep -i "hook\|substrate"
-
-      - name: Dump ObjC classes with class-dump
-        run: |
-          GLOW=$(find /tmp/glow_extracted -name "*.dylib" 2>/dev/null | head -1)
-          
-          # Try class-dump if available
-          which class-dump 2>/dev/null || echo "class-dump not available"
-          which class-dump-z 2>/dev/null || echo "class-dump-z not available"
-          
-          # Try jtool2's objc dump
-          echo "=== jtool2 ObjC ==="
-          jtool2 --objc "$GLOW" 2>/dev/null | head -200
-          
-          echo "=== jtool2 ObjC all ==="
-          jtool2 --objc "$GLOW" 2>/dev/null | tail -500
-
-      - name: Save analysis artifacts
-        run: |
-          GLOW=$(find /tmp/glow_extracted -name "*.dylib" 2>/dev/null | head -1)
-          mkdir -p /tmp/analysis-output
-          
-          if [ -n "$GLOW" ]; then
-            otool -L "$GLOW" > /tmp/analysis-output/otool_L.txt 2>&1
-            otool -l "$GLOW" > /tmp/analysis-output/otool_l.txt 2>&1
-            nm -gU "$GLOW" > /tmp/analysis-output/nm_exported.txt 2>&1
-            nm -u "$GLOW" > /tmp/analysis-output/nm_imports.txt 2>&1
-            nm "$GLOW" | grep _OBJC_CLASS > /tmp/analysis-output/nm_ObjC_classes.txt 2>&1
-            strings "$GLOW" > /tmp/analysis-output/strings.txt 2>&1
-            jtool2 -d __text "$GLOW" > /tmp/analysis-output/jtool2_disasm.txt 2>&1 || true
-            jtool2 --objc "$GLOW" > /tmp/analysis-output/jtool2_objc.txt 2>&1 || true
-          fi
+          echo "Analysis complete" > /tmp/results/complete.txt
 
       - name: Upload analysis results
         uses: actions/upload-artifact@v4
         with:
           name: glow-original-analysis
-          path: /tmp/analysis-output/
+          path: /tmp/results/
