@@ -813,6 +813,28 @@ static UIViewController *topVC() {
 @end
 
 // ─── Download Button Injection (runtime resolved) ───
+static void startDownload(NSString *urlString) {
+  if (!urlString) return;
+  NSURL *url = [NSURL URLWithString:urlString];
+  if (!url) return;
+  
+  NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:url
+    completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+      if (err) { NSLog(@"[Glow] download error: %@", err); return; }
+      NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+      NSString *path = [docs stringByAppendingPathComponent:[NSString stringWithFormat:@"glow_%lld.mp4", (long long)[NSDate timeIntervalSinceReferenceDate]]];
+      [data writeToFile:path atomically:YES];
+      NSLog(@"[Glow] saved: %@", path);
+      
+      dispatch_async(dispatch_get_main_queue(), ^{
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Download Complete" message:path preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [topVC() presentViewController:alert animated:YES completion:nil];
+      });
+    }];
+  [task resume];
+}
+
 @interface GlowDownloadTarget : NSObject
 + (instancetype)shared;
 - (void)downloadTapped:(UIButton *)btn;
@@ -838,7 +860,7 @@ static UIViewController *topVC() {
 }
 @end
 
-static void injectDownloadButton(id playerVC, NSString *urlString) {
+static void injectDownloadButton(UIViewController *playerVC, NSString *urlString) {
   if (!urlString || urlString.length == 0) return;
   if (!PBOOL(@"DownloadVideos", YES) && !PBOOL(@"DownloadVideo", YES)) return;
   
@@ -866,28 +888,6 @@ static void injectDownloadButton(id playerVC, NSString *urlString) {
       [overlayView addSubview:dlBtn];
     } @catch (NSException *e) { NSLog(@"[Glow] inject btn error: %@", e.reason); }
   });
-}
-
-static void startDownload(NSString *urlString) {
-  if (!urlString) return;
-  NSURL *url = [NSURL URLWithString:urlString];
-  if (!url) return;
-  
-  NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:url
-    completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-      if (err) { NSLog(@"[Glow] download error: %@", err); return; }
-      NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-      NSString *path = [docs stringByAppendingPathComponent:[NSString stringWithFormat:@"glow_%lld.mp4", (long long)[NSDate timeIntervalSinceReferenceDate]]];
-      [data writeToFile:path atomically:YES];
-      NSLog(@"[Glow] saved: %@", path);
-      
-      dispatch_async(dispatch_get_main_queue(), ^{
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Download Complete" message:path preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-        [topVC() presentViewController:alert animated:YES completion:nil];
-      });
-    }];
-  [task resume];
 }
 
 // ─── Hook: Old Seen (runtime resolved) ───
@@ -1092,7 +1092,7 @@ static void startDownload(NSString *urlString) {
                 }
               }
               if (url && ![url hasPrefix:@"file://"]) {
-                injectDownloadButton(self, url);
+                injectDownloadButton((UIViewController *)self, url);
               }
             } @catch (NSException *e) { NSLog(@"[Glow] story download error: %@", e.reason); }
           });
@@ -1122,7 +1122,7 @@ static void startDownload(NSString *urlString) {
                 }
               }
               if (url) {
-                injectDownloadButton(self, url);
+                injectDownloadButton((UIViewController *)self, url);
               }
             } @catch (NSException *e) { NSLog(@"[Glow] video download error: %@", e.reason); }
           });
