@@ -16,8 +16,6 @@ jobs:
           cd /tmp/glow_orig
           ar x /tmp/glow_orig.deb
           tar xf data.tar.lzma 2>/dev/null || tar xf data.tar.gz 2>/dev/null
-          DYLIB_ORIG=$(find . -name "*.dylib" | head -1)
-          echo "Original: $DYLIB_ORIG"
 
       - name: Setup Theos and build clone
         uses: waruhachi/theos-action@v2.4.6
@@ -32,89 +30,54 @@ jobs:
           cd /tmp/glow_clone
           ar x "$GITHUB_WORKSPACE/glow-from-source/$DEB"
           tar xf data.tar.lzma 2>/dev/null || tar xf data.tar.gz 2>/dev/null
-          DYLIB_CLONE=$(find . -name "*.dylib" | head -1)
-          echo "Clone: $DYLIB_CLONE"
 
-      - name: Compare __mod_init_func (constructors)
+      - name: Full comparison
         run: |
           DYLIB_ORIG=$(find /tmp/glow_orig -name "*.dylib" | head -1)
           DYLIB_CLONE=$(find /tmp/glow_clone -name "*.dylib" | head -1)
           
-          echo "=== ORIGINAL __mod_init_func ==="
-          otool -l "$DYLIB_ORIG" | grep -A10 "__mod_init_func"
-          echo ""
-          echo "=== CLONE __mod_init_func ==="
-          otool -l "$DYLIB_CLONE" | grep -A10 "__mod_init_func"
-
-      - name: Compare TLV descriptors
-        run: |
-          DYLIB_ORIG=$(find /tmp/glow_orig -name "*.dylib" | head -1)
-          DYLIB_CLONE=$(find /tmp/glow_clone -name "*.dylib" | head -1)
+          mkdir -p /tmp/comparison
           
-          echo "=== ORIGINAL TLV ==="
-          otool -l "$DYLIB_ORIG" | grep -A10 "__thread_vars" || echo "No TLV"
-          otool -l "$DYLIB_ORIG" | grep "TLV" || echo "No TLV references"
-          echo ""
-          echo "=== CLONE TLV ==="
-          otool -l "$DYLIB_CLONE" | grep -A10 "__thread_vars" || echo "No TLV"
-          otool -l "$DYLIB_CLONE" | grep "TLV" || echo "No TLV references"
-
-      - name: Compare all load commands
-        run: |
-          DYLIB_ORIG=$(find /tmp/glow_orig -name "*.dylib" | head -1)
-          DYLIB_CLONE=$(find /tmp/glow_clone -name "*.dylib" | head -1)
+          echo "=== FILE INFO ===" > /tmp/comparison/report.txt
+          echo "Original: $(file "$DYLIB_ORIG")" >> /tmp/comparison/report.txt
+          echo "Clone: $(file "$DYLIB_CLONE")" >> /tmp/comparison/report.txt
+          echo "" >> /tmp/comparison/report.txt
           
-          echo "=== ORIGINAL load commands ==="
-          otool -l "$DYLIB_ORIG" 2>&1 | grep "cmd " | sort
-          echo ""
-          echo "=== CLONE load commands ==="
-          otool -l "$DYLIB_CLONE" 2>&1 | grep "cmd " | sort
-
-      - name: Compare symbols (undefined/imports)
-        run: |
-          DYLIB_ORIG=$(find /tmp/glow_orig -name "*.dylib" | head -1)
-          DYLIB_CLONE=$(find /tmp/glow_clone -name "*.dylib" | head -1)
+          echo "=== LOAD COMMANDS ===" >> /tmp/comparison/report.txt
+          echo "--- Original ---" >> /tmp/comparison/report.txt
+          otool -l "$DYLIB_ORIG" >> /tmp/comparison/orig_load.txt 2>&1
+          echo "--- Clone ---" >> /tmp/comparison/report.txt
+          otool -l "$DYLIB_CLONE" >> /tmp/comparison/clone_load.txt 2>&1
           
-          echo "=== ORIGINAL undefined ==="
-          nm -u "$DYLIB_ORIG" | sort > /tmp/orig_undef.txt
-          cat /tmp/orig_undef.txt
-          echo ""
-          echo "=== CLONE undefined ==="
-          nm -u "$DYLIB_CLONE" | sort > /tmp/clone_undef.txt
-          cat /tmp/clone_undef.txt
-          echo ""
-          echo "=== DIFF (in original but NOT in clone) ==="
-          comm -23 /tmp/orig_undef.txt /tmp/clone_undef.txt
-          echo ""
-          echo "=== DIFF (in clone but NOT in original) ==="
-          comm -13 /tmp/orig_undef.txt /tmp/clone_undef.txt
-
-      - name: Compare __const data
-        run: |
-          DYLIB_ORIG=$(find /tmp/glow_orig -name "*.dylib" | head -1)
-          DYLIB_CLONE=$(find /tmp/glow_clone -name "*.dylib" | head -1)
+          echo "=== LINKED LIBS ===" >> /tmp/comparison/report.txt
+          echo "--- Original ---" >> /tmp/comparison/report.txt
+          otool -L "$DYLIB_ORIG" >> /tmp/comparison/report.txt 2>&1
+          echo "--- Clone ---" >> /tmp/comparison/report.txt
+          otool -L "$DYLIB_CLONE" >> /tmp/comparison/report.txt 2>&1
           
-          echo "=== ORIGINAL __const ==="
-          otool -v -s __DATA __const "$DYLIB_ORIG" 2>&1 | head -50
-          echo ""
-          echo "=== CLONE __const ==="
-          otool -v -s __DATA __const "$DYLIB_CLONE" 2>&1 | head -50
-
-      - name: Compare __cfstring section
-        run: |
-          DYLIB_ORIG=$(find /tmp/glow_orig -name "*.dylib" | head -1)
-          DYLIB_CLONE=$(find /tmp/glow_clone -name "*.dylib" | head -1)
+          echo "=== UNDEFINED SYMBOLS ===" >> /tmp/comparison/report.txt
+          echo "--- Original ---" >> /tmp/comparison/report.txt
+          nm -u "$DYLIB_ORIG" | sort > /tmp/comparison/orig_undef.txt 2>&1
+          echo "--- Clone ---" >> /tmp/comparison/report.txt
+          nm -u "$DYLIB_CLONE" | sort > /tmp/comparison/clone_undef.txt 2>&1
           
-          echo "=== ORIGINAL __cfstring ==="
-          otool -v -s __DATA __cfstring "$DYLIB_ORIG" 2>&1 | head -50
+          echo "=== SYMBOLS IN ORIGINAL BUT NOT IN CLONE ===" >> /tmp/comparison/report.txt
+          comm -23 /tmp/comparison/orig_undef.txt /tmp/comparison/clone_undef.txt >> /tmp/comparison/report.txt 2>&1
+          echo "" >> /tmp/comparison/report.txt
+          echo "=== SYMBOLS IN CLONE BUT NOT IN ORIGINAL ===" >> /tmp/comparison/report.txt
+          comm -13 /tmp/comparison/orig_undef.txt /tmp/comparison/clone_undef.txt >> /tmp/comparison/report.txt 2>&1
+          
+          echo "=== OBJC SECTIONS ===" >> /tmp/comparison/report.txt
+          otool -ov "$DYLIB_ORIG" > /tmp/comparison/orig_objc.txt 2>&1
+          otool -ov "$DYLIB_CLONE" > /tmp/comparison/clone_objc.txt 2>&1
+          
+          cat /tmp/comparison/report.txt
           echo ""
-          echo "=== CLONE __cfstring ==="
-          otool -v -s __DATA __cfstring "$DYLIB_CLONE" 2>&1 | head -50
+          echo "=== FILES CREATED ==="
+          ls -la /tmp/comparison/
 
       - name: Upload comparison
         uses: actions/upload-artifact@v4
         with:
-          name: glow-vs-clone-comparison
-          path: |
-            /tmp/orig_undef.txt
-            /tmp/clone_undef.txt
+          name: glow-deep-comparison
+          path: /tmp/comparison/**
