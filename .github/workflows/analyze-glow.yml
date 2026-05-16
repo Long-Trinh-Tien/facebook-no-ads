@@ -1,7 +1,9 @@
-name: Analyze Glow.dylib
+name: Analyze Original Glow Structure
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ master ]
 
 jobs:
   analyze:
@@ -9,98 +11,125 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download original Glow arm64 deb
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Download original Glow deb
         run: |
-          curl -sL "https://github.com/dayanch96/Glow/releases/download/v1.3.1/com.dvntm.glow_1.3.1_iphoneos-arm.deb" -o glow.deb
-          mkdir -p glow_extract
-          cd glow_extract
-          ar x ../glow.deb
-          tar xf data.tar.*
-          find . -name "*.dylib"
+          curl -sL "https://github.com/dayanch96/Glow/releases/download/v1.3.1/com.dayanch96.glow_1.3.1_iphoneos-arm.deb" \
+            -o /tmp/glow.deb || echo "FAILED: could not download original Glow"
+          ls -la /tmp/glow.deb
 
-      - name: class-dump ObjC headers
+      - name: Install tools
         run: |
-          # Install class-dump
-          brew install class-dump 2>/dev/null || true
-          # Try class-dump
-          DYLD=/Users/runner/work/facebook-no-ads/facebook-no-ads/glow_extract/Library/MobileSubstrate/DynamicLibraries/Glow.dylib
-          if command -v class-dump &>/dev/null; then
-            class-dump -H -o classdump_output "$DYLD" 2>&1 || echo "class-dump FAILED"
-          else
-            # Use class-dump from brew or pip
-            pip3 install class-dump 2>&1 || true
-            python3 -m class_dump -H -o classdump_output "$DYLD" 2>&1 || echo "class-dump FAILED"
+          if [ -f /tmp/glow.deb ]; then
+            # Extract the deb
+            mkdir -p /tmp/glow_extracted
+            cd /tmp/glow_extracted && ar x /tmp/glow.deb && ls -la
+            # Try to extract data.tar.*
+            for f in data.tar.*; do
+              tar xf "$f" 2>/dev/null && break
+            done
           fi
-          ls -la classdump_output/ 2>/dev/null || echo "No classdump output"
+          which jtool2 || brew install jtool2 2>/dev/null || true
 
-      - name: nm -u (undefined symbols - imports from FB)
-        shell: bash
+      - name: Extract dylib path
         run: |
-          set +e
-          DYLD=/Users/runner/work/facebook-no-ads/facebook-no-ads/glow_extract/Library/MobileSubstrate/DynamicLibraries/Glow.dylib
-          echo "=== nm -u (undefined symbols) ==="
-          nm -u "$DYLD" 2>&1
-          echo ""
-          echo "=== nm -m (mangled symbols) ==="
-          nm -m "$DYLD" 2>&1
-          echo ""
-          echo "=== nm -C (demangled) ==="
-          nm -C "$DYLD" 2>&1
+          find /tmp/glow_extracted -name "*.dylib" -o -name "tweak" 2>/dev/null
+          # Common paths
+          ls -la /tmp/glow_extracted/Library/MobileSubstrate/DynamicLibraries/ 2>/dev/null || echo "No DynamicLibraries found"
+          ls -la /tmp/glow_extracted/Library/ApplicationSupport/ 2>/dev/null || echo "No ApplicationSupport found"
 
-      - name: otool -ov (ObjC runtime)
-        shell: bash
+      - name: Analyze with jtool2
         run: |
-          set +e
-          DYLD=/Users/runner/work/facebook-no-ads/facebook-no-ads/glow_extract/Library/MobileSubstrate/DynamicLibraries/Glow.dylib
-          echo "=== otool -ov (ObjC class list) ==="
-          otool -ov "$DYLD" 2>&1
-          echo ""
-          echo "=== otool -L (linked libs) ==="
-          otool -L "$DYLD" 2>&1
+          GLOW=$(find /tmp/glow_extracted -name "*.dylib" 2>/dev/null | head -1)
+          if [ -z "$GLOW" ] || [ ! -f "$GLOW" ]; then
+            echo "No dylib found, trying alternative paths"
+            find /tmp/glow_extracted -type f 2>/dev/null | head -20
+            exit 1
+          fi
+          
+          echo "=== FILE INFO ==="
+          file "$GLOW"
+          ls -la "$GLOW"
+          
+          echo "=== LOAD COMMANDS ==="
+          otool -L "$GLOW"
+          
+          echo "=== LINKED LIBRARIES ==="
+          otool -L "$GLOW"
+          
+          echo "=== OBJC CLASSES & PROTOCOLS ==="
+          echo "Classes (runtime objects):"
+          nm "$GLOW" | grep "_OBJC_CLASS" | grep -v "\$_NS\|	_OBJC_CLASS_\$_\$" | sort -u
+          
+          echo "=== IMPORTED SYMBOLS ==="
+          nm -u "$GLOW" | sort | uniq -c | sort -rn
+          
+          echo "=== EXPORTED FUNCTIONS ==="
+          nm -gU "$GLOW" | sort
+          
+          echo "=== SELECTORS USED ==="
+          strings "$GLOW" | grep -E '^[a-z].+:$' | sort -u
 
-      - name: otool -l (load commands)
+      - name: Disassemble constructor
         run: |
-          DYLD=/Users/runner/work/facebook-no-ads/facebook-no-ads/glow_extract/Library/MobileSubstrate/DynamicLibraries/Glow.dylib
-          echo "=== otool -l (load commands - LC_SEGMENT only) ==="
-          otool -l "$DYLD" 2>&1 | grep -A5 -E "(segname|sectname|sect_|LC_SEGMENT)"
+          GLOW=$(find /tmp/glow_extracted -name "*.dylib" 2>/dev/null | head -1)
+          
+          echo "=== CONSTRUCTOR FUNCTIONS ==="
+          # Find init functions 
+          nm "$GLOW" | grep -E "init|constructor|__mod_init"
+          
+          echo "=== __mod_init_func section ==="
+          jtool2 -section __mod_init_func "$GLOW" 2>/dev/null || echo "jtool2 -section not available"
+          
+          echo "=== Main text disassembly (first 2000 lines) ==="
+          jtool2 -d __text "$GLOW" 2>/dev/null | head -2000
 
-      - name: strings - ObjC selectors
-        shell: bash
+      - name: Extract hooks from disassembly
         run: |
-          set +e
-          DYLD=/Users/runner/work/facebook-no-ads/facebook-no-ads/glow_extract/Library/MobileSubstrate/DynamicLibraries/Glow.dylib
-          echo "=== ObjC selector strings ==="
-          strings "$DYLD" | grep -E "^[-+]\s*\[" 
-          echo ""
-          echo "=== All FB class references in strings ==="
-          strings "$DYLD" | grep -iE "(fb|snacks|mem|fbvideo|fban|fbfeed|fbpay)" | sort -u
+          GLOW=$(find /tmp/glow_extracted -name "*.dylib" 2>/dev/null | head -1)
+          
+          echo "=== MSHookMessageEx calls ==="
+          # Search for BL instructions that call MSHookMessageEx
+          jtool2 -d __text "$GLOW" 2>/dev/null | grep -i "MSHook\|hook\|substrate\|logos" | head -50
+          
+          echo "=== Look for MSHookMessageEx symbol ==="
+          nm "$GLOW" | grep -i "MSHook"
+          
+          echo "=== Undefined symbols matching hook ==="
+          nm -u "$GLOW" | grep -i "hook\|substrate"
 
-      - name: Save full output
-        shell: bash
+      - name: Dump ObjC classes with class-dump
         run: |
-          set +e
-          DYLD=/Users/runner/work/facebook-no-ads/facebook-no-ads/glow_extract/Library/MobileSubstrate/DynamicLibraries/Glow.dylib
-          mkdir -p analysis_output
-          nm -u "$DYLD" > analysis_output/nm_u.txt 2>&1; echo "nm_u: $?"
-          nm -C "$DYLD" > analysis_output/nm_C.txt 2>&1; echo "nm_C: $?"
-          otool -ov "$DYLD" > analysis_output/otool_ov.txt 2>&1; echo "otool_ov: $?"
-          otool -L "$DYLD" > analysis_output/otool_L.txt 2>&1; echo "otool_L: $?"
-          strings "$DYLD" > analysis_output/strings_all.txt 2>&1; echo "strings: $?"
-          grep -E "^[-+]\s*\[" analysis_output/strings_all.txt > analysis_output/objc_selectors.txt 2>&1; echo "selectors: $?"
-          grep -iE "fb|snacks|mem|fban" analysis_output/strings_all.txt | sort -u > analysis_output/fb_refs.txt 2>&1; echo "fb_refs: $?"
-          ls -la analysis_output/
+          GLOW=$(find /tmp/glow_extracted -name "*.dylib" 2>/dev/null | head -1)
+          
+          # Try class-dump if available
+          which class-dump 2>/dev/null || echo "class-dump not available"
+          which class-dump-z 2>/dev/null || echo "class-dump-z not available"
+          
+          # Try jtool2's objc dump
+          echo "=== jtool2 ObjC ==="
+          jtool2 --objc "$GLOW" 2>/dev/null | head -200
+          
+          echo "=== jtool2 ObjC all ==="
+          jtool2 --objc "$GLOW" 2>/dev/null | tail -500
 
-      - name: Upload analysis artifacts
+      - name: Save analysis artifacts
+        run: |
+          GLOW=$(find /tmp/glow_extracted -name "*.dylib" 2>/dev/null | head -1)
+          mkdir -p /tmp/analysis-output
+          
+          if [ -n "$GLOW" ]; then
+            otool -L "$GLOW" > /tmp/analysis-output/otool_L.txt 2>&1
+            otool -l "$GLOW" > /tmp/analysis-output/otool_l.txt 2>&1
+            nm -gU "$GLOW" > /tmp/analysis-output/nm_exported.txt 2>&1
+            nm -u "$GLOW" > /tmp/analysis-output/nm_imports.txt 2>&1
+            nm "$GLOW" | grep _OBJC_CLASS > /tmp/analysis-output/nm_ObjC_classes.txt 2>&1
+            strings "$GLOW" > /tmp/analysis-output/strings.txt 2>&1
+            jtool2 -d __text "$GLOW" > /tmp/analysis-output/jtool2_disasm.txt 2>&1 || true
+            jtool2 --objc "$GLOW" > /tmp/analysis-output/jtool2_objc.txt 2>&1 || true
+          fi
+
+      - name: Upload analysis results
         uses: actions/upload-artifact@v4
         with:
-          name: glow-analysis
-          path: analysis_output/**
-
-      - name: Upload class-dump headers
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: classdump-headers
-          path: classdump_output/**
+          name: glow-original-analysis
+          path: /tmp/analysis-output/
