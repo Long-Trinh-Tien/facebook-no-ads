@@ -813,59 +813,59 @@ static UIViewController *topVC() {
 // ─── Hook: Confirm Like (runtime resolved) ───
 
 // All runtime-resolved hooks are in %ctor below.
-// Static %hook groups for known FB classes:
+// Static %hook groups DISABLED — FB 560.x classes changed
 
 // ─── Hook: Ads ───
-%group Ads
-%hook FBMemFeedStory
-- (id)initWithFBTree:(id)tree {
-  if (PBOOL(@"RemoveAds", YES)) return nil;
-  return %orig;
-}
-%end
-%hook FBVideoChannelPlaylistItem
-- (id)initWithFBTree:(id)tree {
-  if (PBOOL(@"RemoveAds", YES)) return nil;
-  return %orig;
-}
-%end
-%end
+// %group Ads
+// %hook FBMemFeedStory
+// - (id)initWithFBTree:(id)tree {
+//   if (PBOOL(@"RemoveAds", YES)) return nil;
+//   return %orig;
+// }
+// %end
+// %hook FBVideoChannelPlaylistItem
+// - (id)initWithFBTree:(id)tree {
+//   if (PBOOL(@"RemoveAds", YES)) return nil;
+//   return %orig;
+// }
+// %end
+// %end
 
 // ─── Hook: Pando Trees ───
-%group Pando
-%hook FBMemFeedStory
-- (id)initWithFBPandoTree:(id)tree {
-  if (PBOOL(@"RemovePYMK", YES) || PBOOL(@"RemoveRecs", YES) || PBOOL(@"RemoveReelsCarousel", YES)) return nil;
-  return %orig;
-}
-%end
-%hook FBMemStory
-- (id)initWithFBPandoTree:(id)tree {
-  if (PBOOL(@"RemovePYMK", YES) || PBOOL(@"RemoveRecs", YES) || PBOOL(@"RemoveReelsCarousel", YES)) return nil;
-  return %orig;
-}
-%end
-%hook FBMemVideo
-- (id)initWithFBPandoTree:(id)tree {
-  if (PBOOL(@"RemoveRecs", YES) || PBOOL(@"RemoveReelsCarousel", YES)) return nil;
-  return %orig;
-}
-%end
-%end
+// %group Pando
+// %hook FBMemFeedStory
+// - (id)initWithFBPandoTree:(id)tree {
+//   if (PBOOL(@"RemovePYMK", YES) || PBOOL(@"RemoveRecs", YES) || PBOOL(@"RemoveReelsCarousel", YES)) return nil;
+//   return %orig;
+// }
+// %end
+// %hook FBMemStory
+// - (id)initWithFBPandoTree:(id)tree {
+//   if (PBOOL(@"RemovePYMK", YES) || PBOOL(@"RemoveRecs", YES) || PBOOL(@"RemoveReelsCarousel", YES)) return nil;
+//   return %orig;
+// }
+// %end
+// %hook FBMemVideo
+// - (id)initWithFBPandoTree:(id)tree {
+//   if (PBOOL(@"RemoveRecs", YES) || PBOOL(@"RemoveReelsCarousel", YES)) return nil;
+//   return %orig;
+// }
+// %end
+// %end
 
 // ─── Hook: Seen (FB 560.x) ───
-%group Seen
-%hook FBSnacksUnifiedSeenStateMutator
-- (void)_attemptSendSeenStateAndHandleResponse:(id)response bucket:(id)bucket {
-  if (PBOOL(@"AnonymousStories", YES)) return;
-  %orig;
-}
-- (void)_markThreadsAsSeen:(id)threads fromBucket:(id)bucket withTrackingString:(id)ts isAnonymousView:(BOOL)anon completion:(id)completion {
-  if (PBOOL(@"AnonymousStories", YES)) return;
-  %orig;
-}
-%end
-%end
+// %group Seen
+// %hook FBSnacksUnifiedSeenStateMutator
+// - (void)_attemptSendSeenStateAndHandleResponse:(id)response bucket:(id)bucket {
+//   if (PBOOL(@"AnonymousStories", YES)) return;
+//   %orig;
+// }
+// - (void)_markThreadsAsSeen:(id)threads fromBucket:(id)bucket withTrackingString:(id)ts isAnonymousView:(BOOL)anon completion:(id)completion {
+//   if (PBOOL(@"AnonymousStories", YES)) return;
+//   %orig;
+// }
+// %end
+// %end
 
 // ─── Constructor ───
 %ctor {
@@ -876,10 +876,10 @@ static UIViewController *topVC() {
       stringByAppendingPathComponent:@"Frameworks/FBSharedFramework.framework/FBSharedFramework"];
     dlopen([fw UTF8String], RTLD_NOW | RTLD_GLOBAL);
 
-    // Init compile-time hook groups
-    %init(Ads);
-    %init(Pando);
-    %init(Seen);
+    // Init compile-time hook groups — DISABLED for FB 560.x
+    // %init(Ads);
+    // %init(Pando);
+    // %init(Seen);
 
     // ── Old Seen hooks (FB class removed in 560.x, runtime check) ──
     Class oldSeen = NSClassFromString(@"FBSnacksBucketsSeenStateManager");
