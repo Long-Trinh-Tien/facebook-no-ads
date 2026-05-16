@@ -178,8 +178,9 @@ static UIViewController *topVC() {
 @implementation MediaExtractor
 + (NSURL *)extractVideoURLFromStory:(id)story {
   if (!story) return nil;
-  NSArray *keys = @[@"videoURL", @"videoUrl", @"hdVideoURL", @"sdVideoURL",
-    @"videoURLString", @"videoUrlString", @"playableURL", @"url"];
+  NSArray *keys = @[@"videoURLString", @"playableURLString", @"hdPlayableURLString",
+    @"dashPlayableURL", @"playableURL", @"mediaURLString",
+    @"videoURL", @"videoUrl", @"hdVideoURL", @"sdVideoURL", @"url"];
   for (NSString *key in keys) {
     id val = [story valueForKey:key];
     if ([val isKindOfClass:[NSURL class]]) return val;
@@ -921,16 +922,14 @@ static UIViewController *topVC() {
 %end
 %end
 
-// ─── Hook: Seen (FB 560.x) ───
+// ─── Hook: Seen (FB 560.x) — GraphQL-based approach ───
+// FBSnacksUnifiedSeenStateMutator DOES NOT EXIST in FB 560.x
+// Seen mechanism moved to GraphQL: FBShortsSeenStateComponentFragmentUpdater, FBReuseNuxMarkSeenMutation
 %group Seen
-%hook FBSnacksUnifiedSeenStateMutator
-- (void)_attemptSendSeenStateAndHandleResponse:(id)response bucket:(id)bucket {
-  if (PBOOL(@"AnonymousStories", YES)) return;
-  %orig;
-}
-- (void)_markThreadsAsSeen:(id)threads fromBucket:(id)bucket withTrackingString:(id)ts isAnonymousView:(BOOL)anon completion:(id)completion {
-  if (PBOOL(@"AnonymousStories", YES)) return;
-  %orig;
+%hook FBStoryInlineViewerConfiguration
+- (BOOL)shouldDeferSeenStateUpdates {
+  if (PBOOL(@"AnonymousStories", YES)) return YES;
+  return %orig;
 }
 %end
 %end
@@ -984,7 +983,8 @@ static UIViewController *topVC() {
     {
       static IMP orig_advance;
       SEL sel = NSSelectorFromString(@"advanceToNextItemWithNavigationAction:");
-      NSArray *candidates = @[@"FBStoryViewerController", @"FBStoryViewer",
+      NSArray *candidates = @[@"FBSnacksStoryViewerWindowingEventsListener",
+        @"FBStoryViewerController", @"FBStoryViewer",
         @"FBStoryViewerViewController", @"FBStoryPlayerController",
         @"FBReelsPlayerController"];
       for (NSString *name in candidates) {
@@ -1021,13 +1021,14 @@ static UIViewController *topVC() {
     // ── Confirm Like hooks (runtime resolved) ──
     {
       static IMP orig_like;
-      SEL sel = NSSelectorFromString(@"performLikeAction:");
-      NSArray *likeCandidates = @[@"FBLikeActionHandler", @"FBLikeButton",
+      SEL sel = NSSelectorFromString(@"didTapLike:");
+      NSArray *likeCandidates = @[@"FBFunFactMultiPlayerLikeButtonComponentController",
+        @"FBLikeActionHandler", @"FBLikeButton",
         @"FBLikeAction", @"FBStoryLikeActionHandler"];
       for (NSString *name in likeCandidates) {
         Class cls = NSClassFromString(name);
         if (cls && [cls instancesRespondToSelector:sel]) {
-          IMP repl = imp_implementationWithBlock(^(id self, SEL _cmd, id action) {
+          IMP repl = imp_implementationWithBlock(^(id self, SEL _cmd, id sender) {
             BOOL confirmLike = PBOOL(@"PostLikeConfirm", NO);
             BOOL confirmReel = PBOOL(@"ReelsLikeConfirm", NO);
             if (confirmLike || confirmReel) {
@@ -1040,13 +1041,13 @@ static UIViewController *topVC() {
                   style:UIAlertActionStyleCancel handler:nil]];
                 [alert addAction:[UIAlertAction actionWithTitle:@"Like"
                   style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-                    ((void(*)(id, SEL, id))orig_like)(self, _cmd, action);
+                    ((void(*)(id, SEL, id))orig_like)(self, _cmd, sender);
                   }]];
                 [topVC() presentViewController:alert animated:YES completion:nil];
               });
               return;
             }
-            ((void(*)(id, SEL, id))orig_like)(self, _cmd, action);
+            ((void(*)(id, SEL, id))orig_like)(self, _cmd, sender);
           });
           MSHookMessageEx(cls, sel, repl, &orig_like);
           break;
@@ -1058,7 +1059,8 @@ static UIViewController *topVC() {
     {
       static IMP orig_viewDidLoad_story;
       SEL sel = NSSelectorFromString(@"viewDidLoad");
-      NSArray *storyCandidates = @[@"FBStoryViewerController", @"FBStoryViewerViewController",
+      NSArray *storyCandidates = @[@"FBSnacksStoryViewerWindowingEventsListener",
+        @"FBStoryViewerController", @"FBStoryViewerViewController",
         @"FBStoryPlayerViewController", @"FBStoryContentViewController"];
       for (NSString *name in storyCandidates) {
         Class cls = NSClassFromString(name);
