@@ -382,12 +382,58 @@ static UIViewController *topVC() {
 }
 @end
 
-@class ToastManager;
+// ─── ToastManager ───
+@interface ToastManager : NSObject
++ (instancetype)shared;
+- (void)enqueueToastWithMessage:(NSString *)message;
+- (void)enqueueToastWithMessage:(NSString *)message duration:(NSTimeInterval)duration;
+- (void)dequeue;
+- (void)dismissAll;
+@end
 
 // ─── ToastWindow ───
 @interface ToastWindow : UIWindow
 + (instancetype)sharedWindow;
 - (void)showToastWithMessage:(NSString *)message;
+@end
+
+// ─── ToastView ───
+@interface ToastView : UIView
+- (instancetype)initWithMessage:(NSString *)message;
+- (void)show;
+- (void)dismiss;
+@end
+
+@implementation ToastManager {
+  NSMutableArray *_queue;
+  BOOL _showing;
+}
++ (instancetype)shared {
+  static ToastManager *instance;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{ instance = [[ToastManager alloc] init]; });
+  return instance;
+}
+- (instancetype)init { if ((self = [super init])) _queue = [NSMutableArray new]; return self; }
+- (void)enqueueToastWithMessage:(NSString *)message {
+  [self enqueueToastWithMessage:message duration:2.5];
+}
+- (void)enqueueToastWithMessage:(NSString *)message duration:(NSTimeInterval)duration {
+  [_queue addObject:@{@"msg":message, @"dur":@(duration)}];
+  if (!_showing) [self dequeue];
+}
+- (void)dequeue {
+  if (_queue.count == 0) { _showing = NO; return; }
+  _showing = YES;
+  NSDictionary *item = _queue[0];
+  [_queue removeObjectAtIndex:0];
+  ToastView *toast = [[ToastView alloc] initWithMessage:item[@"msg"]];
+  [toast show];
+}
+- (void)dismissAll {
+  [_queue removeAllObjects];
+  _showing = NO;
+}
 @end
 
 @implementation ToastWindow
@@ -405,13 +451,6 @@ static UIViewController *topVC() {
 - (void)showToastWithMessage:(NSString *)message {
   [[ToastManager shared] enqueueToastWithMessage:message];
 }
-@end
-
-// ─── ToastView ───
-@interface ToastView : UIView
-- (instancetype)initWithMessage:(NSString *)message;
-- (void)show;
-- (void)dismiss;
 @end
 
 @implementation ToastView {
@@ -448,47 +487,6 @@ static UIViewController *topVC() {
     [self removeFromSuperview];
     [[ToastManager shared] dequeue];
   }];
-}
-@end
-
-// ─── ToastManager ───
-@interface ToastManager : NSObject
-+ (instancetype)shared;
-- (void)enqueueToastWithMessage:(NSString *)message;
-- (void)enqueueToastWithMessage:(NSString *)message duration:(NSTimeInterval)duration;
-- (void)dequeue;
-- (void)dismissAll;
-@end
-
-@implementation ToastManager {
-  NSMutableArray *_queue;
-  BOOL _showing;
-}
-+ (instancetype)shared {
-  static ToastManager *instance;
-  static dispatch_once_t once;
-  dispatch_once(&once, ^{ instance = [[ToastManager alloc] init]; });
-  return instance;
-}
-- (instancetype)init { if ((self = [super init])) _queue = [NSMutableArray new]; return self; }
-- (void)enqueueToastWithMessage:(NSString *)message {
-  [self enqueueToastWithMessage:message duration:2.5];
-}
-- (void)enqueueToastWithMessage:(NSString *)message duration:(NSTimeInterval)duration {
-  [_queue addObject:@{@"msg":message, @"dur":@(duration)}];
-  if (!_showing) [self dequeue];
-}
-- (void)dequeue {
-  if (_queue.count == 0) { _showing = NO; return; }
-  _showing = YES;
-  NSDictionary *item = _queue[0];
-  [_queue removeObjectAtIndex:0];
-  ToastView *toast = [[ToastView alloc] initWithMessage:item[@"msg"]];
-  [toast show];
-}
-- (void)dismissAll {
-  [_queue removeAllObjects];
-  _showing = NO;
 }
 @end
 
