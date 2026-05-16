@@ -1,0 +1,98 @@
+name: Analyze Glow.dylib
+
+on:
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download original Glow arm64 deb
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -sL "https://github.com/dayanch96/Glow/releases/download/v1.3.1/com.dvntm.glow_1.3.1_iphoneos-arm.deb" -o glow.deb
+          mkdir -p glow_extract
+          cd glow_extract
+          ar x ../glow.deb
+          tar xf data.tar.*
+          find . -name "*.dylib"
+
+      - name: class-dump ObjC headers
+        run: |
+          # Install class-dump
+          brew install class-dump 2>/dev/null || true
+          # Try class-dump
+          DYLD=/Users/runner/work/facebook-no-ads/facebook-no-ads/glow_extract/Library/MobileSubstrate/DynamicLibraries/Glow.dylib
+          if command -v class-dump &>/dev/null; then
+            class-dump -H -o classdump_output "$DYLD" 2>&1 || echo "class-dump FAILED"
+          else
+            # Use class-dump from brew or pip
+            pip3 install class-dump 2>&1 || true
+            python3 -m class_dump -H -o classdump_output "$DYLD" 2>&1 || echo "class-dump FAILED"
+          fi
+          ls -la classdump_output/ 2>/dev/null || echo "No classdump output"
+
+      - name: nm -u (undefined symbols - imports from FB)
+        run: |
+          DYLD=/Users/runner/work/facebook-no-ads/facebook-no-ads/glow_extract/Library/MobileSubstrate/DynamicLibraries/Glow.dylib
+          echo "=== nm -u (undefined symbols) ==="
+          nm -u "$DYLD" 2>&1 | head -500
+          echo ""
+          echo "=== nm -m (mangled symbols) ==="
+          nm -m "$DYLD" 2>&1 | head -500
+          echo ""
+          echo "=== nm -C (demangled) ==="
+          nm -C "$DYLD" 2>&1 | head -500
+
+      - name: otool -ov (ObjC runtime)
+        run: |
+          DYLD=/Users/runner/work/facebook-no-ads/facebook-no-ads/glow_extract/Library/MobileSubstrate/DynamicLibraries/Glow.dylib
+          echo "=== otool -ov (ObjC class list) ==="
+          otool -ov "$DYLD" 2>&1 | head -2000
+          echo ""
+          echo "=== otool -L (linked libs) ==="
+          otool -L "$DYLD" 2>&1
+
+      - name: otool -l (load commands)
+        run: |
+          DYLD=/Users/runner/work/facebook-no-ads/facebook-no-ads/glow_extract/Library/MobileSubstrate/DynamicLibraries/Glow.dylib
+          echo "=== otool -l (load commands - LC_SEGMENT only) ==="
+          otool -l "$DYLD" 2>&1 | grep -A5 -E "(segname|sectname|sect_|LC_SEGMENT)"
+
+      - name: strings - ObjC selectors
+        run: |
+          DYLD=/Users/runner/work/facebook-no-ads/facebook-no-ads/glow_extract/Library/MobileSubstrate/DynamicLibraries/Glow.dylib
+          echo "=== ObjC selector strings ==="
+          strings "$DYLD" | grep -E "^[-+]\s*\[" | head -200
+          echo ""
+          echo "=== All FB class references in strings ==="
+          strings "$DYLD" | grep -iE "(fb|snacks|mem|fbvideo|fban|fbfeed|fbpay)" | sort -u | head -300
+
+      - name: Save full output
+        run: |
+          DYLD=/Users/runner/work/facebook-no-ads/facebook-no-ads/glow_extract/Library/MobileSubstrate/DynamicLibraries/Glow.dylib
+          mkdir -p analysis_output
+          nm -u "$DYLD" > analysis_output/nm_u.txt 2>&1
+          nm -C "$DYLD" > analysis_output/nm_C.txt 2>&1
+          otool -ov "$DYLD" > analysis_output/otool_ov.txt 2>&1
+          otool -L "$DYLD" > analysis_output/otool_L.txt 2>&1
+          strings "$DYLD" | sort > analysis_output/strings_all.txt 2>&1
+          strings "$DYLD" | grep -E "^[-+]\s*\[" > analysis_output/objc_selectors.txt 2>&1
+          strings "$DYLD" | grep -iE "fb|snacks|mem|fban" | sort -u > analysis_output/fb_refs.txt 2>&1
+          ls -la analysis_output/
+
+      - name: Upload analysis artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: glow-analysis
+          path: analysis_output/**
+
+      - name: Upload class-dump headers
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: classdump-headers
+          path: classdump_output/**
