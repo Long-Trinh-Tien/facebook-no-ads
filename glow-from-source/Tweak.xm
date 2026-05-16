@@ -3,7 +3,13 @@
 #import <dlfcn.h>
 #import <UIKit/UIKit.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 extern void MSHookMessageEx(Class _class, SEL _cmd, IMP _replacement, IMP *_result);
+#ifdef __cplusplus
+}
+#endif
 
 // ─── Preferences ───
 static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.dvntm.glowprefs.plist";
