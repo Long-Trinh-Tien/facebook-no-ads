@@ -1,29 +1,50 @@
-// STAGE 0v3 — Injection Proof via Documents
-// POSIX write to Documents/glow_alive.txt (readable via Files app)
-// NO UIKit, NO ObjC, NO dispatch_async
+// STAGE 1v6 — method_exchangeImplementations test
+// Swap NSString.length with NSString.hash
+// Sau swap: [@"test" length] trả về hash, [@"test" hash] trả về 4
+// KHÔNG imp_implementationWithBlock, KHÔNG MSHookMessageEx
+// Verify qua file write (confirmed safe từ STAGE 0v3)
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/stat.h>
+#include <objc/runtime.h>
 
 __attribute__((constructor))
 static void glow_init(void) {
+  // Get home path for file write
   const char *home = getenv("HOME");
-  if (!home) return;
-  
   char path[512];
-  snprintf(path, sizeof(path), "%s/Documents/glow_alive.txt", home);
+  snprintf(path, sizeof(path), "%s/Documents/glow_hook.txt", home);
   
-  // Ensure Documents dir exists (create if not)
-  char dir[512];
-  snprintf(dir, sizeof(dir), "%s/Documents", home);
-  mkdir(dir, 0755);
+  // Get methods and swap
+  Method lenM = class_getInstanceMethod([NSString class], @selector(length));
+  Method hashM = class_getInstanceMethod([NSString class], @selector(hash));
   
   FILE *f = fopen(path, "w");
-  if (f) {
-    fprintf(f, "GLOW_ALIVE\n");
+  if (!f) return;
+  
+  if (!lenM || !hashM) {
+    fprintf(f, "FAIL: methods not found\n");
     fclose(f);
+    return;
   }
+  
+  // Record before swap
+  NSUInteger beforeLen = [@"test" length];
+  NSUInteger beforeHash = [@"test" hash];
+  
+  // Swap!
+  method_exchangeImplementations(lenM, hashM);
+  
+  // Record after swap
+  NSUInteger afterLen = [@"test" length];
+  NSUInteger afterHash = [@"test" hash];
+  
+  // Swap back (so app doesn't break)
+  method_exchangeImplementations(lenM, hashM);
+  
+  fprintf(f, "Before: length=%lu hash=%lu\n", (unsigned long)beforeLen, (unsigned long)beforeHash);
+  fprintf(f, "After:  length=%lu hash=%lu\n", (unsigned long)afterLen, (unsigned long)afterHash);
+  fprintf(f, "If length=hash and hash=4 -> method_exchangeImplementations WORKS\n");
+  fclose(f);
 }
