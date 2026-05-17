@@ -225,26 +225,8 @@ static void injectDownloadBtn(UIView *target, NSString *urlStr) {
   });
 }
 
-// ─── Timer View Scan ───
-@interface GlowMediaScanner : NSObject
-+ (void)scanView:(UIView *)view depth:(int)depth;
-+ (void)scanAllWindows;
-@end
-@implementation GlowMediaScanner
-+ (void)scanView:(UIView *)view depth:(int)depth {
-  if (depth > 10 || !view) return;
-  const char *name = class_getName([view class]);
-  if (strstr(name, "Story") || strstr(name, "Reel") || strstr(name, "Snacks")) {
-    if (!strstr(name, "Cell") && !strstr(name, "Collection") && !strstr(name, "Tray")) {
-      id responder = view;
-      while (responder && ![responder isKindOfClass:[UIViewController class]])
-        responder = [responder nextResponder];
-      if (responder) {
-        NSString *url = [MediaExtractor extractVideoURL:responder];
-        if (url) {
-          NSLog(@"[Glow-SCAN] Video URL on %s: %@", name, url);
-          injectDownloadBtn(view, url);
-        }
+// ─── Timer View Scan — DISABLED (gây crash iOS 16+ khi login) ───
+// Sẽ thay thế bằng viewDidLoad hook + class_getName pattern sau khi có class names từ log
       }
     }
   }
@@ -280,7 +262,8 @@ static void setupAllHooks(void) {
       if (fw) dlopen([fw UTF8String], RTLD_NOW | RTLD_GLOBAL);
     } @catch (NSException *e) { GlowLog(@" dlopen error: %@", e.reason); }
     enumerateFBClasses();
-    startScannerTimer();
+    // Timer scanner DISABLED — gây crash khi login trên iOS 16+
+    // Download buttons sẽ dùng viewDidLoad hook + class_getName sau khi có class names
     if (PBOOL(@"AutoClearCache", NO)) [[NSURLCache sharedURLCache] removeAllCachedResponses];
     if (!PBOOL(@"hasLaunched", NO)) {
       PSET(@"hasLaunched", @YES); saveP();
