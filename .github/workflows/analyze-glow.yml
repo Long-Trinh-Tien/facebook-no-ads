@@ -19,23 +19,22 @@ jobs:
 
       - name: Install tools
         run: |
-          brew install class-dump jtool2 2>/dev/null || true
-          pip3 install dsdump 2>/dev/null || true
+          brew install jtool2 2>/dev/null || true
 
-      - name: RE-1: ObjC class-dump
+      - name: RE-1: ObjC class-dump via jtool2
         run: |
           mkdir -p /tmp/results
           GLOW=/tmp/glow/Glow.dylib
 
-          # class-dump to headers
-          class-dump -H "$GLOW" -o /tmp/results/headers/ 2>&1 || echo "class-dump header fail"
-          class-dump "$GLOW" > /tmp/results/objc_class_dump.txt 2>&1 || true
-          
           # jtool2 ObjC dump
-          jtool2 --objc "$GLOW" > /tmp/results/jtool2_objc.txt 2>&1 || true
+          jtool2 --objc "$GLOW" > /tmp/results/objc_dump.txt 2>&1 || true
           
-          # Count classes
-          grep "@interface\|@protocol" /tmp/results/objc_class_dump.txt | head -40 > /tmp/results/class_list.txt
+          # Try dsdump if available via pip
+          pip3 install dsdump 2>/dev/null && dsdump "$GLOW" > /tmp/results/dsdump.txt 2>&1 || true
+          
+          # Fallback: parse ObjC class list from nm
+          echo "=== ObjC Classes (from nm) ===" > /tmp/results/class_list.txt
+          nm "$GLOW" | grep '_OBJC_CLASS_\$' | grep -v '_NS\|_UI\|_PH\|_AV\|_CA\|_LS\|_OBJC_CLASS_\$_\$' | sort >> /tmp/results/class_list.txt
 
       - name: RE-2: ObjC metadata extraction
         run: |
