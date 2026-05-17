@@ -104,22 +104,43 @@ static UIViewController *topVC(void) {
   for (UIView *s in v.subviews) { UITabBar *f = [self findInView:s]; if (f) return f; }
   return nil;
 }
-+ (void)install {
++ (UITabBar *)findTabBar {
   UITabBar *tb = nil;
+  // Try all windows/scenes
   if (@available(iOS 13, *)) {
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
       if (![s isKindOfClass:[UIWindowScene class]]) continue;
-      for (UIWindow *w in [(UIWindowScene *)s windows]) { tb = [self findInView:w]; if (tb) break; }
+      for (UIWindow *w in [(UIWindowScene *)s windows]) {
+        tb = [self findInView:w]; if (tb) break;
+        // Also check root VC's tabBar
+        if (w.rootViewController && [w.rootViewController isKindOfClass:[UITabBarController class]])
+          tb = [(UITabBarController *)w.rootViewController tabBar];
+        if (tb) break;
+      }
       if (tb) break;
     }
   }
-  if (!tb) tb = [self findInView:UIApplication.sharedApplication.keyWindow];
+  if (!tb) {
+    tb = [self findInView:UIApplication.sharedApplication.keyWindow];
+    // Check root VC
+    UIViewController *root = UIApplication.sharedApplication.keyWindow.rootViewController;
+    if (!tb && [root isKindOfClass:[UITabBarController class]])
+      tb = [(UITabBarController *)root tabBar];
+  }
+  return tb;
+}
++ (void)installWithRetry:(int)retries {
+  UITabBar *tb = [self findTabBar];
   if (tb) {
     for (UIGestureRecognizer *g in tb.gestureRecognizers)
       if ([NSStringFromClass(g.class) containsString:@"Glow"]) return;
     [tb addGestureRecognizer:[[GlowLongPress alloc] initWithTarget:self action:@selector(hLP:)]];
+  } else if (retries > 0) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+      dispatch_get_main_queue(), ^{ [self installWithRetry:retries - 1]; });
   }
 }
++ (void)install { [self installWithRetry:3]; }
 + (void)hLP:(UIGestureRecognizer *)g {
   if (g.state == UIGestureRecognizerStateBegan) {
     UINavigationController *n = [[UINavigationController alloc] initWithRootViewController:[[SettingsViewController alloc] init]];
