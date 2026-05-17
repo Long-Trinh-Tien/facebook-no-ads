@@ -1,7 +1,9 @@
-name: Deep Glow.dylib RE
+name: Analyze Glow Original
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ "analyze" ]
 
 jobs:
   analyze:
@@ -9,134 +11,125 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download Glow.dylib from release
+      - name: Find Glow dylib
         run: |
-          gh release download glow-original --repo Long-Trinh-Tien/facebook-no-ads \
-            --pattern 'Glow.dylib' --dir /tmp/glow
-          ls -la /tmp/glow/Glow.dylib
-        env:
-          GH_TOKEN: ${{ github.token }}
+          # Download the original dylib artifact
+          find . -name "Glow_original.dylib" -type f 2>/dev/null || true
 
       - name: Install tools
         run: |
           brew install jtool2 2>/dev/null || true
-          # Install dsdump for ObjC class dump
-          pip3 install dsdump 2>/dev/null || true
 
-      - name: RE-1 ObjC class-dump
+      - name: Phase A — Imports (nm)
         run: |
-          mkdir -p /tmp/results
-          GLOW=/tmp/glow/Glow.dylib
-
-          # 1. dsdump (best for ObjC/Swift)
-          which dsdump && dsdump "$GLOW" > /tmp/results/dsdump.txt 2>&1 || echo "no dsdump"
-
-          # 2. jtool2 ObjC dump (try different flags)
-          jtool2 --objc "$GLOW" > /tmp/results/jtool2_objc.txt 2>&1 || true
-          jtool2 -arch arm64 -d objc "$GLOW" > /tmp/results/jtool2_objc_v2.txt 2>&1 || true
+          DYLIB=$(find /tmp -name "Glow_original.dylib" 2>/dev/null || find . -name "Glow_original.dylib" 2>/dev/null)
+          if [ -z "$DYLIB" ]; then
+            ls -la /tmp/*.dylib
+            exit 1
+          fi
           
-          # 3. nm class list (fallback)
-          nm "$GLOW" | grep _OBJC_CLASS_ | grep -v '_\$_\$\|_NS\|_UI\|_PH\|_AV\|_CA\|_LS' > /tmp/results/class_list.txt
+          echo "=== SIZE ==="
+          ls -la "$DYLIB"
+          
+          echo ""
+          echo "=== FAT HEADERS ==="
+          lipo -info "$DYLIB" 2>/dev/null || echo "not fat"
+          
+          echo ""
+          echo "=== ALL IMPORTS (nm -gU) ==="
+          nm -gU "$DYLIB" | sort > /tmp/imports.txt
+          cat /tmp/imports.txt
+          
+          echo ""
+          echo "=== EXPORTS (nm -g) ==="
+          nm -g "$DYLIB" | sort > /tmp/exports.txt
+          head -50 /tmp/exports.txt
+          
+          echo ""
+          echo "=== OBJC CLASSES (nm) ==="
+          nm "$DYLIB" | grep -E "OBJC_CLASS" | sort -u
 
-      - name: RE-2 ObjC metadata
+      - name: Phase A — Section analysis (otool)
         run: |
-          GLOW=/tmp/glow/Glow.dylib
-          otool -oV "$GLOW" > /tmp/results/otool_ov.txt 2>&1 || true
-          otool -v -s __TEXT __objc_methtype "$GLOW" > /tmp/results/methtypes.txt 2>&1 || true
-          otool -v -s __DATA_CONST __cfstring "$GLOW" > /tmp/results/cfstrings.txt 2>&1 || true
-          otool -v -s __DATA __objc_const "$GLOW" > /tmp/results/objc_const.txt 2>&1 || true
-          otool -v -s __DATA __objc_selrefs "$GLOW" > /tmp/results/selrefs.txt 2>&1 || true
+          DYLIB=$(find /tmp -name "Glow_original.dylib" 2>/dev/null || find . -name "Glow_original.dylib" 2>/dev/null)
+          
+          echo "=== LOAD COMMANDS ==="
+          otool -l "$DYLIB" | head -200
+          
+          echo ""
+          echo "=== SECTIONS ==="
+          otool -l "$DYLIB" | grep -E "(sectname|segname|size|addr|offset)" | head -80
+          
+          echo ""
+          echo "=== LINKED LIBRARIES ==="
+          otool -L "$DYLIB"
 
-      - name: RE-3 Constructor disassembly
+      - name: Phase A — Constructors (otool -ov)
         run: |
-          GLOW=/tmp/glow/Glow.dylib
+          DYLIB=$(find /tmp -name "Glow_original.dylib" 2>/dev/null || find . -name "Glow_original.dylib" 2>/dev/null)
           
-          # Find constructor address from __init_offsets
-          CTOR=$(python3 -c "
-          import struct
-          with open('$GLOW', 'rb') as f:
-              f.seek(0xb1c0)
-              val = struct.unpack('<I', f.read(4))[0]
-              print(f'{0x4000 + val:x}')
-          ")
-          echo "Constructor at: 0x$CTOR" > /tmp/results/ctor_info.txt
+          echo "=== MOD_INIT_FUNC ==="
+          otool -l "$DYLIB" | grep -A5 "mod_init_func"
           
-          # Disassemble constructor using otool -tV (the whole function)
-          # Get the function length from disassembly and extract it
-          FULL_DISASM=$(otool -tV "$GLOW" 2>/dev/null)
-          echo "$FULL_DISASM" | awk '/^'$CTOR':/,/ret|blr|^[0-9a-f]+:/' | head -200 > /tmp/results/ctor_disasm.txt
+          echo ""
+          echo "=== OBJC IMAGE INFO ==="
+          otool -ov "$DYLIB" | head -50
           
-          echo "Full disassembly size: $(echo "$FULL_DISASM" | wc -l) lines" > /tmp/results/disasm_stats.txt
-          
-          # Also try jtool2 for the constructor specifically
-          jtool2 -d __text "$GLOW" 2>/dev/null | grep -A 300 "0x$CTOR" | head -200 > /tmp/results/ctor_jtool2.txt
+          echo ""
+          echo "=== ALL OBJC METHODS ==="
+          otool -ov "$DYLIB" | grep -E "(Method name|Instance method|Class method|0x[0-9a-f]+)" | head -100
 
-      - name: RE-4 List all Glow-specific methods with addresses
+      - name: Phase A — ObjC class list
         run: |
-          GLOW=/tmp/glow/Glow.dylib
+          DYLIB=$(find /tmp -name "Glow_original.dylib" 2>/dev/null || find . -name "Glow_original.dylib" 2>/dev/null)
           
-          python3 << 'PYEOF'
-          import subprocess
+          echo "=== ALL OBJC CLASSES ==="
+          otool -ov "$DYLIB" | grep -E "Contents of.*class" | head -200
           
-          GLOW = '/tmp/glow/Glow.dylib'
-          
-          # Get full disassembly
-          result = subprocess.run(['otool', '-tV', GLOW], capture_output=True, text=True, timeout=120)
-          disasm = result.stdout
-          
-          # Get nm output for Glow's own symbols
-          result2 = subprocess.run(['nm', GLOW], capture_output=True, text=True, timeout=30)
-          
-          # Parse nm for Glow's own methods (no UIKit/Foundation)
-          methods = []
-          for line in result2.stdout.split('\n'):
-              parts = line.strip().split()
-              if len(parts) < 3: continue
-              addr_str, sym_type, name = parts[0], parts[1], ' '.join(parts[2:])
-              if sym_type != 'T': continue
-              if '-[' in name and not any(x in name for x in ['UIView', 'UIButton', 'UIViewController', 'NSObject', 'NSString', 'UIColor', 'UIFont', 'UIScreen', 'UITable']):
-                  # Get the function disassembly
-                  addr = int(addr_str, 16)
-                  in_func = False
-                  func_lines = []
-                  for line2 in disasm.split('\n'):
-                      stripped = line2.strip()
-                      if stripped.startswith(addr_str):
-                          in_func = True
-                      if in_func:
-                          func_lines.append(stripped)
-                          if len(func_lines) > 60:
-                              break
-                  
-                  methods.append((addr, name, func_lines))
-          
-          with open('/tmp/results/glow_methods.txt', 'w') as f:
-              for addr, name, lines in methods:
-                  f.write(f"0x{addr:x} {name}\n")
-          
-          # Also write disassembly for methods
-          with open('/tmp/results/glow_methods_disasm.txt', 'w') as f:
-              for addr, name, lines in methods:
-                  f.write(f"\n{'='*60}\n")
-                  f.write(f"0x{addr:x} {name}\n")
-                  f.write(f"{'='*60}\n")
-                  for line in lines[:50]:
-                      f.write(line + '\n')
-          
-          print(f"Found {len(methods)} Glow-specific methods")
-          for addr, name, _ in methods[:20]:
-              print(f"  0x{addr:x} {name}")
-          PYEOF
+          echo ""
+          echo "=== CLASS NAMES ==="
+          otool -ov "$DYLIB" | grep "class name" | sort -u
 
-      - name: RE-5 Extract FB selectors
+      - name: Phase A — Strings dump
         run: |
-          GLOW=/tmp/glow/Glow.dylib
+          DYLIB=$(find /tmp -name "Glow_original.dylib" 2>/dev/null || find . -name "Glow_original.dylib" 2>/dev/null)
           
-          echo "=== FB selectors ===" > /tmp/results/fb_selectors.txt
-          strings "$GLOW" | grep -E "^(_canMark|MarkStory|_markThread|storyBucket|initWithFB|initWithPando|tabbarHeight|performLike|advanceTo|downloadMedia|extractURL|buttonFor|videoURL|playableURL|mediaObject|isStory|setIsStory)" | sort -u >> /tmp/results/fb_selectors.txt
+          echo "=== FB-CLASS STRINGS ==="
+          strings "$DYLIB" | grep -iE "(FBAssets|FBFeed|FBAds|FBNativeAd|FBAd|FBActivity|FBPando|FBTree|FBFriend|FBStory|FBVideo|FBPhoto|FBComment|FBReaction|FBGroup|FBPage|FBPost|FBProfile|FBInFeed|FBStoryView|FBMedia)" | sort -u | head -50
+          
+          echo ""
+          echo "=== UIKIT STRINGS ==="
+          strings "$DYLIB" | grep -iE "(tabBar|navigationBar|navBar|statusBar|UIWindow|UIView|UIAlert|UIButton|UILabel|UITableView)" | sort -u | head -50
+          
+          echo ""
+          echo "=== GLOW-SPECIFIC ==="
+          strings "$DYLIB" | grep -iE "(glow|Glow|GLOW)" | sort -u | head -50
 
-      - name: Upload results
+      - name: Phase A — Full output save
+        run: |
+          DYLIB=$(find /tmp -name "Glow_original.dylib" 2>/dev/null || find . -name "Glow_original.dylib" 2>/dev/null)
+          
+          mkdir -p /tmp/glow_analysis
+          nm -gU "$DYLIB" > /tmp/glow_analysis/imported_syms.txt 2>&1
+          nm -g "$DYLIB" > /tmp/glow_analysis/exported_syms.txt 2>&1
+          otool -ov "$DYLIB" > /tmp/glow_analysis/otool_ov_full.txt 2>&1
+          otool -L "$DYLIB" > /tmp/glow_analysis/otool_L.txt 2>&1
+          otool -l "$DYLIB" > /tmp/glow_analysis/otool_l_full.txt 2>&1
+          strings "$DYLIB" > /tmp/glow_analysis/strings_full.txt 2>&1
+          strings "$DYLIB" | grep "^_OBJC_CLASS_\|^_OBJC_METACLASS_" > /tmp/glow_analysis/objc_classes.txt 2>&1
+          jtool2 -S "$DYLIB" > /tmp/glow_analysis/jtool2_S.txt 2>&1 || echo "jtool2 failed"
+          
+          tar czf /tmp/glow_analysis.tar.gz -C /tmp glow_analysis/
+          echo "Analysis saved to /tmp/glow_analysis.tar.gz"
+
+      - name: Upload analysis
         uses: actions/upload-artifact@v4
         with:
-          name: glow-deep-re
-          path: /tmp/results/
+          name: glow-analysis
+          path: /tmp/glow_analysis.tar.gz
+
+      - name: Upload deploy artifact for download
+        uses: actions/upload-artifact@v4
+        with:
+          name: glow-analysis-flat
+          path: /tmp/glow_analysis/
