@@ -170,6 +170,7 @@ static UIViewController *topVC() {
   UIView *_glowContentView;
   UIView *_dimmingView;
   UIView *_containerView;
+  PseudoDetentTransitioningDelegate *_transitionDelegate;
 }
 - (instancetype)initWithContentView:(UIView *)view;
 @end
@@ -179,7 +180,7 @@ static UIViewController *topVC() {
 
 @implementation DVNSheetController
 - (instancetype)initWithContentView:(UIView *)view {
-  if ((self = [super init])) { _glowContentView = view; self.modalPresentationStyle = UIModalPresentationCustom; self.transitioningDelegate = [PseudoDetentTransitioningDelegate new]; }
+  if ((self = [super init])) { _glowContentView = view; self.modalPresentationStyle = UIModalPresentationCustom; _transitionDelegate = [[PseudoDetentTransitioningDelegate alloc] init]; self.transitioningDelegate = _transitionDelegate; }
   return self;
 }
 - (void)viewDidLoad {
