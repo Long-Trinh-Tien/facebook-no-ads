@@ -217,6 +217,10 @@ jobs:
               'FBSnacksSurfaceAwareSeenStateWriter',
           ]
           
+          # Read the binary file to compute selector addresses from relative offsets
+          with open(FWS, 'rb') as f:
+              fb_data = f.read()
+          
           with open('/tmp/results/resolved_selectors.txt', 'w') as out:
               for target in target_classes:
                   out.write(f"\n{'='*60}\n")
@@ -228,33 +232,79 @@ jobs:
                   if idx < 0:
                       idx = otool_content.find(target)
                   if idx < 0:
-                      out.write("  (class not found in otool output)\n")
+                      out.write("  (class not found)\n")
                       continue
                   
                   # Find baseMethods section
                   block_start = otool_content.find('baseMethods', idx)
                   if block_start < 0:
-                      out.write("  (no baseMethods found)\n")
+                      out.write("  (no baseMethods)\n")
                       continue
                   
-                  # Parse method entries
-                  block = otool_content[block_start:block_start+500]
-                  out.write(f"  Raw block: {block[:200]}\n\n")
+                  # Parse: entsize + count
+                  entsize_match = re.search(r'entsize\s+(\d+)\s+\(relative\)', otool_content[block_start:block_start+200])
+                  count_match = re.search(r'count\s+(\d+)', otool_content[block_start:block_start+200])
+                  if not entsize_match or not count_match:
+                      out.write("  (could not parse method list header)\n")
+                      continue
                   
-                  # The format is:
-                  #   name    0xRELATIVE (0xABSOLUTE)
-                  # We need the ABSOLUTE address (inside parentheses)
-                  # Find all method entries: name RELATIVE (ABSOLUTE)
-                  method_entries = re.findall(r'name\s+0x[0-9a-f]+\s+\(0x([0-9a-f]+)\)', block)
-                  method_types = re.findall(r'types\s+0x[0-9a-f]+\s+\(0x[0-9a-f]+\)\s+(.+?)$', block, re.MULTILINE)
+                  entsize = int(entsize_match.group(1))
+                  count = int(count_match.group(1))
                   
-                  for i, abs_addr_str in enumerate(method_entries):
-                      abs_addr = int(abs_addr_str, 16)
-                      # Find the selector string for this address
-                      sel_name = selectors.get(abs_addr, f"UNKNOWN_0x{abs_addr:x}")
-                      type_enc = method_types[i] if i < len(method_types) else "?"
-                      out.write(f"  [{i}] 0x{abs_addr:x} -> {sel_name}\n")
-                      out.write(f"       type: {type_enc}\n")
+                  # Find the method list address (VM address)
+                  # The format: baseMethods 0xADDRESS
+                  addr_match = re.search(r'baseMethods\s+0x([0-9a-f]+)', otool_content[block_start:block_start+100])
+                  if not addr_match:
+                      out.write(f"  (could not find method list addr)\n")
+                      continue
+                  
+                  ml_addr = int(addr_match.group(1), 16)
+                  
+                  # Find the file offset for this VM address
+                  # For simplicity: if __TEXT sections have file_offset = vmaddr
+                  # But we need to find the correct segment mapping
+                  # Look up __TEXT segment: the __objc_methname file offset may differ
+                  
+                  out.write(f"  Method list at VM: 0x{ml_addr:x}, {count} methods\n\n")
+                  
+                  # Parse each method entry from otool output
+                  # Find all name/type/imp groups after baseMethods
+                  lines_after = otool_content[block_start:block_start+count*120]
+                  method_blocks = re.findall(
+                      r'name\s+0x[0-9a-f]+\s+\(0x[0-9a-f]+\)\s+'
+                      r'types\s+0x[0-9a-f]+\s+\(0x[0-9a-f]+\)\s+(.+?)$\s+'
+                      r'imp\s+0x[0-9a-f]+\s+\(0x[0-9a-f]+\)',
+                      lines_after, re.MULTILINE)
+                  
+                  # Parse relative offsets from otool
+                  rel_offsets = re.findall(r'name\s+0x([0-9a-f]+)\s+', lines_after)
+                  type_strs = re.findall(r'types\s+0x[0-9a-f]+\s+\(0x[0-9a-f]+\)\s+(.+?)$', lines_after, re.MULTILINE)
+                  
+                  for i in range(min(count, 20)):
+                      if i >= len(rel_offsets) or i >= len(type_strs):
+                          out.write(f"  [{i}] (truncated)\n")
+                          continue
+                      
+                      rel_val = int(rel_offsets[i], 16)
+                      type_str = type_strs[i]
+                      
+                      # The RELATIVE offset in otool output is relative to __objc_methname base
+                      # selector_addr = methname_base + rel_val
+                      name_addr = methname_base + rel_val
+                      
+                      # Look up in selectors dictionary
+                      sel_name = selectors.get(name_addr, f"UNKNOWN_0x{name_addr:x}")
+                      
+                      # Try nearby addresses if not found directly
+                      if sel_name.startswith('UNKNOWN'):
+                          for delta in range(-64, 65):
+                              candidate = name_addr + delta
+                              if candidate in selectors:
+                                  sel_name = f"{selectors[candidate]} (offset {delta:+d})"
+                                  break
+                      
+                      out.write(f"  [{i}] offset=0x{rel_val:x} addr=0x{name_addr:x} -> {sel_name}\n")
+                      out.write(f"       type: {type_str}\n")
           
           print("Selector resolution complete")
           PYEOF
