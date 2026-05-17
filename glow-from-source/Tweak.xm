@@ -1,12 +1,20 @@
-// STAGE 1v7 — pure C ObjC runtime, ZERO ObjC message sends in constructor
-// Use objc_getClass, sel_registerName, objc_msgSend instead of [ClassName] @selector()
-// If this works → problem was ObjC messaging in constructor, not hook API
+// STAGE 1 — Hook Engine Validation (FINAL)
+// Self-owned class, pure C runtime, no ARC interference
+// If this works → runtime mutation works. System class issue was optimization.
+// If this fails → ObjC runtime itself is restricted on iOS 16+ sideload.
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <objc/runtime.h>
-#include <objc/message.h>
+
+// Custom class
+@interface GlowTest : NSObject @end
+@implementation GlowTest
+- (int)test { return 1; }
+@end
+
+// Plain C replacement
+static int hookedTest(id self, SEL _cmd) { return 999; }
 
 __attribute__((constructor))
 static void glow_init(void) {
@@ -17,49 +25,38 @@ static void glow_init(void) {
   FILE *f = fopen(path, "w");
   if (!f) return;
   
-  // Pure C runtime API — NO ObjC message sends
-  Class nsstring = objc_getClass("NSString");
-  if (!nsstring) { fprintf(f, "FAIL: NSString class not found\n"); fclose(f); return; }
+  // Pure C runtime — no ObjC messaging for setup
+  Class cls = objc_getClass("GlowTest");
+  if (!cls) { fprintf(f, "FAIL: GlowTest not found\n"); fclose(f); return; }
   
-  SEL lenSel = sel_registerName("length");
-  SEL hashSel = sel_registerName("hash");
+  Method m = class_getInstanceMethod(cls, sel_registerName("test"));
+  if (!m) { fprintf(f, "FAIL: test method not found\n"); fclose(f); return; }
   
-  Method lenM = class_getInstanceMethod(nsstring, lenSel);
-  Method hashM = class_getInstanceMethod(nsstring, hashSel);
+  IMP orig = method_getImplementation(m);
   
-  if (!lenM || !hashM) {
-    fprintf(f, "FAIL: methods not found (len=%p hash=%p)\n", (void*)lenM, (void*)hashM);
-    fclose(f);
-    return;
-  }
+  // Create instance via C API
+  id instance = class_createInstance(cls, 0);
+  if (!instance) { fprintf(f, "FAIL: class_createInstance\n"); fclose(f); return; }
   
-  // Call methods via objc_msgSend — pure C
-  id testStr = (id)objc_getClass("__NSCFString");  // Actually need a string instance
-  // Create a string via NSString's alloc/init (this sends ObjC messages too...)
+  // Call via objc_msgSend (only ObjC call)
+  SEL testSel = sel_registerName("test");
+  int before = ((int(*)(id, SEL))objc_msgSend)(instance, testSel);
   
-  // Simpler: just check the method IMPs before/after swap
-  IMP lenImp = method_getImplementation(lenM);
-  IMP hashImp = method_getImplementation(hashM);
+  // Hook
+  method_setImplementation(m, (IMP)hookedTest);
   
-  fprintf(f, "Before swap: lenIMP=%p hashIMP=%p\n", (void*)lenImp, (void*)hashImp);
+  // Call again
+  int after = ((int(*)(id, SEL))objc_msgSend)(instance, testSel);
   
-  // Swap
-  method_exchangeImplementations(lenM, hashM);
+  fprintf(f, "Before: %d\n", before);
+  fprintf(f, "After:  %d\n", after);
   
-  IMP lenImpAfter = method_getImplementation(lenM);
-  IMP hashImpAfter = method_getImplementation(hashM);
-  
-  fprintf(f, "After swap:  lenIMP=%p hashIMP=%p\n", (void*)lenImpAfter, (void*)hashImpAfter);
-  
-  // Verify: lenIMP should now equal original hashImp, vice versa
-  if (lenImpAfter == hashImp && hashImpAfter == lenImp) {
-    fprintf(f, "HOOK_ENGINE: method_exchangeImplementations WORKS\n");
-  } else {
-    fprintf(f, "HOOK_ENGINE: SWAP FAILED — IMPs unchanged\n");
-  }
-  
-  // Swap back
-  method_exchangeImplementations(lenM, hashM);
+  if (before == 1 && after == 999)
+    fprintf(f, "HOOK_ENGINE: method_setImplementation WORKS\n");
+  else if (before == 1 && after == 1)
+    fprintf(f, "HOOK_ENGINE: method_setImplementation SILENT FAIL\n");
+  else
+    fprintf(f, "HOOK_ENGINE: unexpected %d -> %d\n", before, after);
   
   fclose(f);
 }
