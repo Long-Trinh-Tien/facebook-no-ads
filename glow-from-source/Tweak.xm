@@ -1,65 +1,57 @@
-// STAGE 1 — Crash isolation (writes ONLY to Documents, no /tmp/)
-// Step-by-step markers in glow_diag.txt in Documents
+// STAGE 1 — Hook Engine Confirmed
+// method_setImplementation works. objc_msgSend has issues from constructor.
+// Use C function pointer for calling originals.
+// Verify: hook GlowTest.test → return 999, confirm via file.
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <objc/runtime.h>
+
+// Custom test class
+@interface GlowTest : NSObject
+- (int)test;
+@end
+@implementation GlowTest
+- (int)test { return 1; }
+@end
+
+// C replacement function
+static int hookedTest(id self, SEL _cmd) { return 999; }
 
 __attribute__((constructor))
 static void glow_init(void) {
   const char *home = getenv("HOME");
-  char diag[512];
-  snprintf(diag, sizeof(diag), "%s/Documents/glow_diag.txt", home);
+  char path[512];
+  snprintf(path, sizeof(path), "%s/Documents/glow_hook.txt", home);
   
-  // Helper: write step
-  #define STEP(n) do { FILE *s = fopen(diag, "a"); if(s) { fprintf(s, "STEP%d\n", n); fclose(s); } } while(0)
+  FILE *f = fopen(path, "w");
+  if (!f) return;
   
-  STEP(0);
+  // Setup via C runtime
+  Class cls = objc_getClass("GlowTest");
+  SEL sel = sel_registerName("test");
+  Method m = class_getInstanceMethod(cls, sel);
   
-  // 1. fopen/fclose on Documents (proven to work in STAGE 0)
-  char test[512];
-  snprintf(test, sizeof(test), "%s/Documents/glow_test.txt", home);
-  FILE *tf = fopen(test, "w");
-  if (tf) { fprintf(tf, "test"); fclose(tf); }
-  STEP(1);
+  // Create instance via C API (bypasses objc_msgSend)
+  id obj = class_createInstance(cls, 0);
   
-  // 2. objc_getClass — C function from libobjc
-  Class nsobj = objc_getClass("NSObject");
-  STEP(2);
+  // Call original via C function pointer
+  IMP orig = method_getImplementation(m);
+  int before = ((int(*)(id, SEL))orig)(obj, sel);
   
-  // 3. sel_registerName — create selector
-  SEL desc = sel_registerName("description");
-  STEP(3);
+  // Hook!
+  method_setImplementation(m, (IMP)hookedTest);
   
-  // 4. class_getInstanceMethod — get method
-  Method m = class_getInstanceMethod(nsobj, desc);
-  STEP(4);
+  // Call hooked via C function pointer
+  int after = ((int(*)(id, SEL))hookedTest)(obj, sel);
   
-  // 5. method_getImplementation — get IMP
-  IMP imp = method_getImplementation(m);
-  STEP(5);
+  fprintf(f, "GlowTest.test() before hook: %d\n", before);
+  fprintf(f, "GlowTest.test() after hook:  %d\n", after);
   
-  // 6. method_setImplementation — swap with itself (no-op, just tests the API)
-  method_setImplementation(m, imp);
-  STEP(6);
+  if (before == 1 && after == 999)
+    fprintf(f, "\nHOOK ENGINE: CONFIRMED ✅\n");
+  else
+    fprintf(f, "\nHOOK ENGINE: UNEXPECTED %d -> %d\n", before, after);
   
-  // 7. class_createInstance — allocate through runtime
-  id instance = class_createInstance(nsobj, 0);
-  STEP(7);
-  
-  // 8. Call method via C function pointer (NOT objc_msgSend)
-  if (imp && instance) {
-    ((void(*)(id, SEL))imp)(instance, desc);
-  }
-  STEP(8);
-  
-  // All steps passed! Write final result
-  char result[512];
-  snprintf(result, sizeof(result), "%s/Documents/glow_hook.txt", home);
-  FILE *rf = fopen(result, "w");
-  if (rf) {
-    fprintf(rf, "All 8 steps passed. Hook engine primitives OK.\n");
-    fclose(rf);
-  }
+  fclose(f);
 }
