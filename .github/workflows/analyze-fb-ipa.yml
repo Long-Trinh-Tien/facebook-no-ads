@@ -31,7 +31,7 @@ jobs:
           unzip -o /tmp/fb/facebook.ipa -d /tmp/fb/extracted/
           mkdir -p /tmp/results
 
-      - name: RE-5: Analyze FB main binary (strings + selectors)
+      - name: "RE-5 Analyze FB main binary (strings + selectors)"
         if: hashFiles('/tmp/fb/extracted') != ''
         run: |
           FB=/tmp/fb/extracted/Payload/Facebook.app/Facebook
@@ -62,7 +62,7 @@ jobs:
           echo "=== Story/Reel classes ==="
           grep -E "Story|Reel|Snack|Bucket|Seen" /tmp/results/fb_classnames.txt | sort -u | head -30
 
-      - name: RE-6: Analyze FBSharedFramework
+      - name: "RE-6 Analyze FBSharedFramework"
         if: hashFiles('/tmp/fb/extracted') != ''
         run: |
           FWS=/tmp/fb/extracted/Payload/Facebook.app/Frameworks/FBSharedFramework.framework/FBSharedFramework

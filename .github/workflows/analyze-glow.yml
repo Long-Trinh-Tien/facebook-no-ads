@@ -21,7 +21,7 @@ jobs:
         run: |
           brew install jtool2 2>/dev/null || true
 
-      - name: RE-1: ObjC class-dump via jtool2
+      - name: "RE-1 ObjC class-dump via jtool2"
         run: |
           mkdir -p /tmp/results
           GLOW=/tmp/glow/Glow.dylib
@@ -36,7 +36,7 @@ jobs:
           echo "=== ObjC Classes (from nm) ===" > /tmp/results/class_list.txt
           nm "$GLOW" | grep '_OBJC_CLASS_\$' | grep -v '_NS\|_UI\|_PH\|_AV\|_CA\|_LS\|_OBJC_CLASS_\$_\$' | sort >> /tmp/results/class_list.txt
 
-      - name: RE-2: ObjC metadata extraction
+      - name: "RE-2 ObjC metadata extraction"
         run: |
           GLOW=/tmp/glow/Glow.dylib
 
@@ -55,7 +55,7 @@ jobs:
           # Selectors
           otool -v -s __DATA __objc_selrefs "$GLOW" > /tmp/results/selrefs.txt 2>&1 || true
 
-      - name: RE-3: Find %ctor and key functions
+      - name: "RE-3 Find %ctor and key functions"
         run: |
           GLOW=/tmp/glow/Glow.dylib
           
@@ -83,7 +83,7 @@ jobs:
               print(f'Constructor at: 0x{ctor_addr:x} (in __text)')
           "
 
-      - name: RE-4: Disassemble key functions
+      - name: "RE-4 Disassemble key functions"
         run: |
           GLOW=/tmp/glow/Glow.dylib
 
@@ -138,7 +138,7 @@ jobs:
               print(f"  0x{addr:x} {name}")
           PYEOF
 
-      - name: RE-5: Disassemble each Glow method
+      - name: "RE-5 Disassemble each Glow method"
         run: |
           GLOW=/tmp/glow/Glow.dylib
           
@@ -185,7 +185,7 @@ jobs:
                   out.write('\n')
           PYEOF
 
-      - name: RE-6: Extract FB-related strings and selectors
+      - name: "RE-6 Extract FB-related strings and selectors"
         run: |
           GLOW=/tmp/glow/Glow.dylib
           
