@@ -1,63 +1,65 @@
-// STAGE 1 — Step-by-step crash isolation
-// Writes progress markers to file so we know EXACTLY where it crashes
+// STAGE 1 — Crash isolation (writes ONLY to Documents, no /tmp/)
+// Step-by-step markers in glow_diag.txt in Documents
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <objc/runtime.h>
-
-#define LOG(fmt, ...) do { FILE *l = fopen("/tmp/glow_diag.txt", "a"); if(l) { fprintf(l, fmt "\n", ##__VA_ARGS__); fclose(l); } } while(0)
 
 __attribute__((constructor))
 static void glow_init(void) {
-  // Step 0: basic C works
-  LOG("STEP0: alive");
-  
-  // Step 1: getenv + path
   const char *home = getenv("HOME");
-  LOG("STEP1: home=%s", home ? home : "NULL");
+  char diag[512];
+  snprintf(diag, sizeof(diag), "%s/Documents/glow_diag.txt", home);
   
-  // Step 2: fopen + fclose
-  FILE *f = fopen("/tmp/glow_step2.txt", "w");
-  if (f) { fprintf(f, "ok"); fclose(f); }
-  LOG("STEP2: fopen=%s", f ? "ok" : "FAIL");
+  // Helper: write step
+  #define STEP(n) do { FILE *s = fopen(diag, "a"); if(s) { fprintf(s, "STEP%d\n", n); fclose(s); } } while(0)
   
-  // Step 3: objc_getClass
-  Class ns = objc_getClass("NSObject");
-  LOG("STEP3: NSObject=%p", (void*)ns);
+  STEP(0);
   
-  // Step 4: sel_registerName
-  SEL sel = sel_registerName("description");
-  LOG("STEP4: description=%p", (void*)sel);
+  // 1. fopen/fclose on Documents (proven to work in STAGE 0)
+  char test[512];
+  snprintf(test, sizeof(test), "%s/Documents/glow_test.txt", home);
+  FILE *tf = fopen(test, "w");
+  if (tf) { fprintf(tf, "test"); fclose(tf); }
+  STEP(1);
   
-  // Step 5: class_getInstanceMethod
-  Method m = class_getInstanceMethod(ns, sel);
-  LOG("STEP5: method=%p", (void*)m);
+  // 2. objc_getClass — C function from libobjc
+  Class nsobj = objc_getClass("NSObject");
+  STEP(2);
   
-  // Step 6: method_getImplementation
+  // 3. sel_registerName — create selector
+  SEL desc = sel_registerName("description");
+  STEP(3);
+  
+  // 4. class_getInstanceMethod — get method
+  Method m = class_getInstanceMethod(nsobj, desc);
+  STEP(4);
+  
+  // 5. method_getImplementation — get IMP
   IMP imp = method_getImplementation(m);
-  LOG("STEP6: imp=%p", (void*)imp);
+  STEP(5);
   
-  // Step 7: method_setImplementation (same IMP, no change)
-  IMP old = method_setImplementation(m, imp);
-  LOG("STEP7: setImplementation old=%p", (void*)old);
+  // 6. method_setImplementation — swap with itself (no-op, just tests the API)
+  method_setImplementation(m, imp);
+  STEP(6);
   
-  // Step 8: try calling via C function pointer
-  if (imp) {
-    // Call directly without objc_msgSend
-    id instance = ((id(*)(Class, SEL))imp)((id)ns, sel);
-    LOG("STEP8: instance=%p", (void*)instance);
+  // 7. class_createInstance — allocate through runtime
+  id instance = class_createInstance(nsobj, 0);
+  STEP(7);
+  
+  // 8. Call method via C function pointer (NOT objc_msgSend)
+  if (imp && instance) {
+    ((void(*)(id, SEL))imp)(instance, desc);
   }
+  STEP(8);
   
-  // Step 9: class_createInstance
-  id obj = class_createInstance(ns, 0);
-  LOG("STEP9: created=%p", (void*)obj);
-  
-  // Final: write to Documents
-  char path[512];
-  snprintf(path, sizeof(path), "%s/Documents/glow_hook.txt", home);
-  f = fopen(path, "w");
-  if (f) {
-    fprintf(f, "All steps passed. See /tmp/glow_diag.txt for details.\n");
-    fclose(f);
+  // All steps passed! Write final result
+  char result[512];
+  snprintf(result, sizeof(result), "%s/Documents/glow_hook.txt", home);
+  FILE *rf = fopen(result, "w");
+  if (rf) {
+    fprintf(rf, "All 8 steps passed. Hook engine primitives OK.\n");
+    fclose(rf);
   }
 }
