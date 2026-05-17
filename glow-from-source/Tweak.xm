@@ -2,6 +2,7 @@
 
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
+#import <dlfcn.h>
 #import <UIKit/UIKit.h>
 #import <mach-o/dyld.h>
 
@@ -132,6 +133,19 @@ static UIViewController *topVC() {
           ((void(*)(id, SEL))orig_vdl)(self, _cmd);
           NSLog(@"[Glow] viewDidLoad: %s", class_getName([self class]));
         }), &orig_vdl);
+    }
+
+    // Test: dlopen FBSharedFramework
+    @try {
+      NSString *fwPath = [[NSBundle mainBundle].bundlePath
+        stringByAppendingPathComponent:@"Frameworks/FBSharedFramework.framework/FBSharedFramework"];
+      if (fwPath) {
+        void *h = dlopen([fwPath UTF8String], RTLD_NOW | RTLD_GLOBAL);
+        NSLog(@"[Glow] dlopen: %p err=%s", h, h ? "" : (dlerror() ?: "none"));
+        if (h) dlclose(h);
+      }
+    } @catch (NSException *e) {
+      NSLog(@"[Glow] dlopen exception: %@", e.reason);
     }
 
     // Tab bar long press
