@@ -6,6 +6,14 @@
 #import <UIKit/UIKit.h>
 #import <Photos/Photos.h>
 #import <mach-o/dyld.h>
+#import <os/log.h>
+
+static os_log_t glowLogOS(void) {
+  static os_log_t log;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{ log = os_log_create("com.glow.debug", "Glow"); });
+  return log;
+}
 
 extern "C" void _dyld_register_func_for_add_image(void (*func)(const struct mach_header *mh, intptr_t vmaddr_slide));
 
@@ -70,10 +78,11 @@ static void GlowLog(NSString *format, ...) {
   NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
   va_end(args);
   
-  // Always NSLog (visible via Xcode device console)
+  // Always NSLog + os_log (visible via Xcode/Console/terminal)
   NSLog(@"[Glow] %@", msg);
+  os_log_info(glowLogOS(), "%{public}@", msg);
   
-  // Also write to file via NSFileHandle
+  // Also write to file via NSFileHandle (accessible via Files app)
   @try {
     if (!_logFH) {
       NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
