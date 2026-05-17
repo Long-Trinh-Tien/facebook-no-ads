@@ -2,17 +2,14 @@
 
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
-#import <dlfcn.h>
 #import <UIKit/UIKit.h>
 #import <Photos/Photos.h>
 #import <mach-o/dyld.h>
 
-extern "C" void MSHookMessageEx(Class _class, SEL _cmd, IMP _replacement, IMP *_result);
 extern "C" void _dyld_register_func_for_add_image(void (*func)(const struct mach_header *mh, intptr_t vmaddr_slide));
 
 __attribute__((used, section("__TEXT,__glow_pad")))
 static const uint8_t _glow_size_padding[15728640] = {0};
-
 static void _glow_image_loaded(const struct mach_header *mh, intptr_t vmaddr_slide) {}
 
 static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.dvntm.glowprefs.plist";
@@ -28,17 +25,34 @@ static void loadP() {
 }
 static void saveP() { [P writeToFile:kPrefsPath atomically:YES]; }
 
-static UIViewController *topVC() {
-  UIViewController *root = [[[UIApplication sharedApplication] keyWindow] rootViewController];
+// ─── verifyTypeEncoding helper for Phase 2+ ───
+static BOOL verifyTypeEncoding(Class cls, SEL sel, const char *expected) {
+  Method m = class_getInstanceMethod(cls, sel);
+  if (!m) { NSLog(@"[Glow] SKIP: method not found %s %s", class_getName(cls), sel_getName(sel)); return NO; }
+  const char *actual = method_getTypeEncoding(m);
+  if (!actual || !expected) return NO;
+  if (strcmp(actual, expected) == 0) return YES;
+  NSLog(@"[Glow] TYPE ENCODING MISMATCH %s %s: exp=%s got=%s", class_getName(cls), sel_getName(sel), expected, actual);
+  return NO;
+}
+
+static UIViewController *topVC(void) {
+  UIViewController *root = nil;
+  if (@available(iOS 13.0, *)) {
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+      if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+      UIWindow *keyWin = [(UIWindowScene *)scene keyWindow];
+      if (keyWin) { root = keyWin.rootViewController; break; }
+    }
+  }
+  if (!root) root = [[[UIApplication sharedApplication] keyWindow] rootViewController];
   while (root.presentedViewController) root = root.presentedViewController;
   return root;
 }
 
-// ─── Settings ───
+// ─── Settings VC (5 sections, matching original Glow) ───
 @interface GlowSettingsVC : UITableViewController @end
-@implementation GlowSettingsVC {
-  NSArray *_sections;
-}
+@implementation GlowSettingsVC { NSArray *_sections; }
 - (instancetype)init {
   if ((self = [super initWithStyle:UITableViewStyleGrouped])) {
     self.title = @"Glow";
@@ -46,15 +60,24 @@ static UIViewController *topVC() {
       @{@"title": @"Download", @"items": @[
         @{@"l": @"Videos", @"k": @"DownloadVideos", @"d": @YES},
         @{@"l": @"Stories", @"k": @"DownloadStories", @"d": @YES},
-        @{@"l": @"Reels", @"k": @"DownloadReels", @"d": @YES}]},
+        @{@"l": @"Reels", @"k": @"DownloadReels", @"d": @YES},
+        @{@"l": @"All Formats", @"k": @"AllFormats", @"d": @NO},
+        @{@"l": @"Encoding Speed", @"k": @"EncodingSpeed", @"d": @0}]},
       @{@"title": @"Privacy", @"items": @[
-        @{@"l": @"Anonymous Stories", @"k": @"AnonymousStories", @"d": @YES}]},
+        @{@"l": @"Anonymous Stories", @"k": @"AnonymousStories", @"d": @YES},
+        @{@"l": @"Mark as Seen", @"k": @"MarkAsSeen", @"d": @NO}]},
       @{@"title": @"Content", @"items": @[
         @{@"l": @"Remove Ads", @"k": @"RemoveAds", @"d": @YES},
-        @{@"l": @"Remove PYMK", @"k": @"RemovePYMK", @"d": @YES}]},
+        @{@"l": @"Remove PYMK", @"k": @"RemovePYMK", @"d": @YES},
+        @{@"l": @"Remove Recs", @"k": @"RemoveRecs", @"d": @YES},
+        @{@"l": @"Remove Reels Carousel", @"k": @"RemoveReelsCarousel", @"d": @NO}]},
       @{@"title": @"Interaction", @"items": @[
         @{@"l": @"Confirm Like", @"k": @"PostLikeConfirm", @"d": @NO},
-        @{@"l": @"Disable Auto Next", @"k": @"DisableAutoNext", @"d": @NO}]}];
+        @{@"l": @"Confirm Reels Like", @"k": @"ReelsLikeConfirm", @"d": @NO},
+        @{@"l": @"Disable Auto Next", @"k": @"DisableAutoNext", @"d": @NO}]},
+      @{@"title": @"UI", @"items": @[
+        @{@"l": @"Hide Overlay", @"k": @"HideOverlay", @"d": @NO},
+        @{@"l": @"Auto Clear Cache", @"k": @"AutoClearCache", @"d": @NO}]}];
   }
   return self;
 }
@@ -120,175 +143,61 @@ static UIViewController *topVC() {
 }
 @end
 
-// ─── MediaExtractor ───
-@interface MediaExtractor : NSObject
-+ (NSString *)extractVideoURL:(id)obj;
-@end
-@implementation MediaExtractor
-+ (NSString *)extractVideoURL:(id)obj {
-  if (!obj) return nil;
-  for (NSString *prop in @[@"videoURLString", @"playableURLString", @"hdPlayableURLString",
-                           @"dashPlayableURL", @"playableURL", @"mediaURLString",
-                           @"hdVideoURL", @"sdVideoURL"]) {
-    SEL sel = NSSelectorFromString(prop);
-    if ([obj respondsToSelector:sel]) {
-      NSString *val = [obj valueForKey:prop];
-      if (val && ![val hasPrefix:@"file://"]) return val;
+// ─── setupAllHooks — called after app launch + 2s delay ───
+static void setupAllHooks(void) {
+  @autoreleasepool {
+    // dlopen FBSharedFramework (safe now — post-app-launch)
+    @try {
+      NSString *fw = [[NSBundle mainBundle].bundlePath
+        stringByAppendingPathComponent:@"Frameworks/FBSharedFramework.framework/FBSharedFramework"];
+      if (fw) dlopen([fw UTF8String], RTLD_NOW | RTLD_GLOBAL);
+    } @catch (NSException *e) { NSLog(@"[Glow] dlopen error: %@", e.reason); }
+
+    // Phase 2+: seen fix, download, ad blocking, auto-next, like confirm
+    // Will be added in subsequent phases
+
+    // Auto clear cache
+    if (PBOOL(@"AutoClearCache", NO))
+      [[NSURLCache sharedURLCache] removeAllCachedResponses];
+
+    // Welcome on first launch
+    if (!PBOOL(@"hasLaunched", NO)) {
+      PSET(@"hasLaunched", @YES); saveP();
+      UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Glow v1.3.1"
+        message:@"Phase 1 — no-crash foundation.\nTab bar → Settings works." preferredStyle:UIAlertControllerStyleAlert];
+      [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+      UIViewController *root = [[[UIApplication sharedApplication] keyWindow] rootViewController];
+      if (root) [root presentViewController:a animated:YES completion:nil];
     }
+
+    NSLog(@"[Glow] Phase 1 — setupAllHooks complete");
   }
-  return nil;
-}
-@end
-
-// ─── Download Button Injection ───
-@interface GlowDownloadTarget : NSObject @end
-@implementation GlowDownloadTarget
-+ (instancetype)shared {
-  static GlowDownloadTarget *inst;
-  static dispatch_once_t once;
-  dispatch_once(&once, ^{ inst = [[GlowDownloadTarget alloc] init]; });
-  return inst;
-}
-- (void)downloadTapped:(UIButton *)btn {
-  NSString *url = btn.accessibilityIdentifier;
-  if (!url) return;
-  NSURLSessionDownloadTask *task = [[NSURLSession sharedSession] downloadTaskWithURL:[NSURL URLWithString:url]
-    completionHandler:^(NSURL *loc, NSURLResponse *resp, NSError *err) {
-      if (err) { NSLog(@"[Glow] download error: %@", err); return; }
-      [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
-        [PHAssetCreationRequest creationRequestForAssetFromVideoAtFileURL:loc];
-      } completionHandler:^(BOOL success, NSError *e) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-          UIAlertController *a = [UIAlertController alertControllerWithTitle:success ? @"Saved!" : @"Failed"
-            message:nil preferredStyle:UIAlertControllerStyleAlert];
-          [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-          [[[[UIApplication sharedApplication] keyWindow] rootViewController] presentViewController:a animated:YES completion:nil];
-        });
-      }];
-    }];
-  [task resume];
-}
-@end
-
-static void injectDownloadBtn(UIView *target, NSString *urlStr) {
-  if (!urlStr.length) return;
-  dispatch_async(dispatch_get_main_queue(), ^{
-    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-    [btn setTitle:@"⬇" forState:UIControlStateNormal];
-    btn.titleLabel.font = [UIFont systemFontOfSize:20];
-    btn.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.5];
-    btn.layer.cornerRadius = 18;
-    btn.frame = CGRectMake(target.bounds.size.width - 50, target.bounds.size.height - 100, 36, 36);
-    btn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleTopMargin;
-    [btn addTarget:[GlowDownloadTarget shared] action:@selector(downloadTapped:) forControlEvents:UIControlEventTouchUpInside];
-    btn.accessibilityIdentifier = urlStr;
-    [target addSubview:btn];
-  });
 }
 
-// ─── Constructor ───
+// ─── Constructor — MINIMAL, defer EVERYTHING ───
 %ctor {
   @autoreleasepool {
     loadP();
     _dyld_register_func_for_add_image(_glow_image_loaded);
 
-    // 1. viewDidLoad: pattern match + seen fix + download
-    {
-      static IMP orig_vdl;
-      MSHookMessageEx([UIViewController class], @selector(viewDidLoad),
-        imp_implementationWithBlock(^(UIViewController *self, SEL _cmd) {
-          ((void(*)(UIViewController *, SEL))orig_vdl)(self, _cmd);
+    // Defer ALL hooks to after app launch + 2s
+    // Pattern from uYouPlus/YTLite/iHide: minimal %ctor, defer everything
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [[NSNotificationCenter defaultCenter]
+        addObserverForName:UIApplicationDidFinishLaunchingNotification
+        object:nil queue:[NSOperationQueue mainQueue]
+        usingBlock:^(NSNotification *note) {
+          // Tab bar (works without FB classes)
+          [GlowTabBar install];
 
-          const char *name = class_getName([self class]);
-          if (!name) return;
+          // All hooks after 2s delay
+          dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+            dispatch_get_main_queue(), ^{
+              setupAllHooks();
+          });
+        }];
+    });
 
-          // Seen fix for story viewers
-          if (PBOOL(@"AnonymousStories", YES) && strstr(name, "Story")) {
-            static dispatch_once_t once;
-            dispatch_once(&once, ^{
-              SEL seenSels[] = {
-                NSSelectorFromString(@"_canMarkStoryAsSeen"),
-                NSSelectorFromString(@"MarkStoryAsSeen"),
-              };
-              for (int i = 0; i < 2; i++) {
-                if ([self respondsToSelector:seenSels[i]]) {
-                  Method m = class_getInstanceMethod([self class], seenSels[i]);
-                  if (m) {
-                    IMP origImp = method_getImplementation(m);
-                    method_setImplementation(m, imp_implementationWithBlock(^(id s, SEL c) {
-                      if (!PBOOL(@"AnonymousStories", YES))
-                        ((void(*)(id, SEL))origImp)(s, c);
-                    }));
-                  }
-                }
-              }
-              SEL threadSel = NSSelectorFromString(@"_markThreadAsSeen:bucket:session:shouldMarkThreadSeenStateUpdates:");
-              if ([self respondsToSelector:threadSel]) {
-                Method m = class_getInstanceMethod([self class], threadSel);
-                if (m) {
-                  IMP origImp = method_getImplementation(m);
-                  method_setImplementation(m, imp_implementationWithBlock(^(id s, SEL c, id t, id b, id se, BOOL u) {
-                    if (!PBOOL(@"AnonymousStories", YES))
-                      ((void(*)(id, SEL, id, id, id, BOOL))origImp)(s, c, t, b, se, u);
-                  }));
-                }
-              }
-            });
-          }
-
-          // Download button for story/reel VCs
-          if ((strstr(name, "Story") || strstr(name, "Reel")) && !strstr(name, "Cell") && !strstr(name, "Collection")) {
-            NSString *url = [MediaExtractor extractVideoURL:self];
-            if (url) injectDownloadBtn(self.view, url);
-          }
-        }), &orig_vdl);
-    }
-
-    // 2. initWithFBTree: ad blocking
-    {
-      SEL sel = NSSelectorFromString(@"initWithFBTree:");
-      if ([NSObject instancesRespondToSelector:sel]) {
-        static IMP orig_tree;
-        MSHookMessageEx([NSObject class], sel,
-          imp_implementationWithBlock(^(id self, SEL _cmd, id tree) {
-            if (PBOOL(@"RemoveAds", YES)) return (id)nil;
-            return ((id(*)(id, SEL, id))orig_tree)(self, _cmd, tree);
-          }), &orig_tree);
-      }
-    }
-
-    // 3. initWithFBPandoTree: content blocking
-    {
-      SEL sel = NSSelectorFromString(@"initWithFBPandoTree:");
-      if ([NSObject instancesRespondToSelector:sel]) {
-        static IMP orig_pando;
-        MSHookMessageEx([NSObject class], sel,
-          imp_implementationWithBlock(^(id self, SEL _cmd, id tree) {
-            BOOL block = PBOOL(@"RemovePYMK", YES) || PBOOL(@"RemoveRecs", YES);
-            if (block) return (id)nil;
-            return ((id(*)(id, SEL, id))orig_pando)(self, _cmd, tree);
-          }), &orig_pando);
-      }
-    }
-
-    // 5. Tab bar long press
-    [GlowTabBar install];
-
-    // 6. Welcome
-    if (!PBOOL(@"hasLaunched", NO)) {
-      PSET(@"hasLaunched", @YES); saveP();
-      dispatch_async(dispatch_get_main_queue(), ^{
-        UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Glow v1.3.1"
-          message:@"Build with all hooks." preferredStyle:UIAlertControllerStyleAlert];
-        [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-        [topVC() presentViewController:a animated:YES completion:nil];
-      });
-    }
-
-    // 7. Auto clear cache
-    if (PBOOL(@"AutoClearCache", NO))
-      [[NSURLCache sharedURLCache] removeAllCachedResponses];
-
-    NSLog(@"[Glow] full hooks loaded");
+    NSLog(@"[Glow] Phase 1 — constructor done (deferred)");
   }
 }
