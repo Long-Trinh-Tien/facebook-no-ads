@@ -26,7 +26,6 @@ static void loadP() {
 }
 static void saveP() { [P writeToFile:kPrefsPath atomically:YES]; }
 
-// ─── verifyTypeEncoding helper for Phase 2+ ───
 __attribute__((unused)) static BOOL verifyTypeEncoding(Class cls, SEL sel, const char *expected) {
   Method m = class_getInstanceMethod(cls, sel);
   if (!m) { NSLog(@"[Glow] SKIP: method not found %s %s", class_getName(cls), sel_getName(sel)); return NO; }
@@ -53,9 +52,294 @@ static UIViewController *topVC(void) {
   return root;
 }
 
-// ─── Settings VC (5 sections, matching original Glow) ───
-@interface GlowSettingsVC : UITableViewController @end
-@implementation GlowSettingsVC { NSArray *_sections; }
+// ─── Step 1: File Logging ───
+static void setupFileLogging(void) {
+  @try {
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *docDir = [paths firstObject];
+    if (!docDir) return;
+    NSString *logPath = [docDir stringByAppendingPathComponent:@"glow_log.txt"];
+    freopen([logPath UTF8String], "a+", stderr);
+    NSLog(@"[Glow] Logging to: %@", logPath);
+  } @catch (NSException *e) {
+    NSLog(@"[Glow] Log setup error: %@", e.reason);
+  }
+}
+
+// ─── Step 2: Class Enumeration ───
+static void enumerateFBClasses(void) {
+  unsigned int count;
+  Class *classes = objc_copyClassList(&count);
+  if (!classes) { NSLog(@"[Glow] objc_copyClassList failed"); return; }
+
+  NSLog(@"[Glow] ===== Class Enumeration (%d total) =====", count);
+  for (unsigned int i = 0; i < count; i++) {
+    const char *name = class_getName(classes[i]);
+    if (!name) continue;
+
+    // Focus on FB-related classes
+    BOOL isFBClass = (strstr(name, "Snacks") || strstr(name, "SeenState") ||
+                      strstr(name, "FBStory") || strstr(name, "FBReel") ||
+                      strstr(name, "FBFeed") || strstr(name, "Sponsored") ||
+                      strstr(name, "FBMem") || strstr(name, "Pando") ||
+                      strstr(name, "Bucket"));
+    BOOL isStoryClass = (strstr(name, "Story") && !strstr(name, "UI") && !strstr(name, "NS"));
+
+    if (isFBClass || isStoryClass) {
+      unsigned int mc;
+      Method *methods = class_copyMethodList(classes[i], &mc);
+      if (methods) {
+        NSLog(@"[Glow-FB] %s (%d methods)", name, mc);
+        for (unsigned int j = 0; j < mc && j < 30; j++) {
+          SEL sel = method_getName(methods[j]);
+          const char *selName = sel ? sel_getName(sel) : "null";
+          const char *enc = method_getTypeEncoding(methods[j]);
+          if (strstr(selName, "Seen") || strstr(selName, "seen") ||
+              strstr(selName, "Mark") || strstr(selName, "mark") ||
+              strstr(selName, "sendSeen") || strstr(selName, "Thread") ||
+              strstr(selName, "Bucket") || strstr(selName, "advance") ||
+              strstr(selName, "like") || strstr(selName, "Like") ||
+              strstr(selName, "download") || strstr(selName, "URL") ||
+              strstr(selName, "playable") || strstr(selName, "Sponsor") ||
+              strstr(selName, "initWithFB") || strstr(selName, "Pando") ||
+              strstr(selName, "closeStory") || strstr(selName, "SeenState") ||
+              strstr(selName, "markThread")) {
+            NSLog(@"[Glow-FB]   [%d] %s -> %s", j, selName, enc ?: "(null)");
+          }
+        }
+        free(methods);
+      }
+
+      // Check known selectors
+      if ([classes[i] instancesRespondToSelector:NSSelectorFromString(@"_sendSeenThreadIDsWithBucket:session:")])
+        NSLog(@"[Glow] >>> _sendSeenThreadIDsWithBucket:session: FOUND on %s", name);
+      if ([classes[i] instancesRespondToSelector:NSSelectorFromString(@"advanceToNextItemWithNavigationAction:")])
+        NSLog(@"[Glow] >>> advanceToNextItemWithNavigationAction: FOUND on %s", name);
+      if ([classes[i] instancesRespondToSelector:NSSelectorFromString(@"closeStoryWithSource:")])
+        NSLog(@"[Glow] >>> closeStoryWithSource: FOUND on %s", name);
+      if ([classes[i] instancesRespondToSelector:NSSelectorFromString(@"storyBucketType")])
+        NSLog(@"[Glow] >>> storyBucketType FOUND on %s", name);
+      if ([classes[i] instancesRespondToSelector:NSSelectorFromString(@"performLikeAction:")])
+        NSLog(@"[Glow] >>> performLikeAction: FOUND on %s", name);
+      if ([classes[i] instancesRespondToSelector:NSSelectorFromString(@"isSponsored")])
+        NSLog(@"[Glow] >>> isSponsored FOUND on %s", name);
+    }
+  }
+  free(classes);
+  NSLog(@"[Glow] ===== Class Enumeration complete =====");
+}
+
+// ─── MediaExtractor ───
+@interface MediaExtractor : NSObject
++ (NSString *)extractVideoURL:(id)obj;
+@end
+@implementation MediaExtractor
++ (NSString *)extractVideoURL:(id)obj {
+  if (!obj) return nil;
+  for (NSString *prop in @[@"videoURLString", @"playableURLString", @"hdPlayableURLString",
+                           @"dashPlayableURL", @"playableURL", @"mediaURLString",
+                           @"hdVideoURL", @"sdVideoURL"]) {
+    SEL sel = NSSelectorFromString(prop);
+    if ([obj respondsToSelector:sel]) {
+      NSString *val = [obj valueForKey:prop];
+      if (val && ![val hasPrefix:@"file://"]) return val;
+    }
+  }
+  return nil;
+}
+@end
+
+// ─── Download Injection ───
+@interface GlowDownloadTarget : NSObject @end
+@implementation GlowDownloadTarget
++ (instancetype)shared {
+  static GlowDownloadTarget *inst;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{ inst = [[GlowDownloadTarget alloc] init]; });
+  return inst;
+}
+- (void)downloadTapped:(UIButton *)btn {
+  NSString *url = btn.accessibilityIdentifier;
+  if (!url) return;
+  NSURLSessionDownloadTask *task = [[NSURLSession sharedSession] downloadTaskWithURL:[NSURL URLWithString:url]
+    completionHandler:^(NSURL *loc, NSURLResponse *resp, NSError *err) {
+      if (err) { NSLog(@"[Glow] download error: %@", err); return; }
+      [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+        [PHAssetCreationRequest creationRequestForAssetFromVideoAtFileURL:loc];
+      } completionHandler:^(BOOL success, NSError *e) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+          UIAlertController *a = [UIAlertController alertControllerWithTitle:success ? @"Saved!" : @"Failed"
+            message:nil preferredStyle:UIAlertControllerStyleAlert];
+          [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+          [[[[UIApplication sharedApplication] keyWindow] rootViewController] presentViewController:a animated:YES completion:nil];
+        });
+      }];
+    }];
+  [task resume];
+}
+@end
+
+static void injectDownloadBtn(UIView *target, NSString *urlStr) {
+  if (!urlStr.length) return;
+  if ([target viewWithTag:999]) return; // Already has button
+  dispatch_async(dispatch_get_main_queue(), ^{
+    if ([target viewWithTag:999]) return;
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+    btn.tag = 999;
+    [btn setTitle:@"⬇" forState:UIControlStateNormal];
+    btn.titleLabel.font = [UIFont systemFontOfSize:20];
+    btn.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.5];
+    btn.layer.cornerRadius = 18;
+    btn.frame = CGRectMake(target.bounds.size.width - 50, target.bounds.size.height - 100, 36, 36);
+    btn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleTopMargin;
+    [btn addTarget:[GlowDownloadTarget shared] action:@selector(downloadTapped:) forControlEvents:UIControlEventTouchUpInside];
+    btn.accessibilityIdentifier = urlStr;
+    [target addSubview:btn];
+  });
+}
+
+// ─── Step 3: Timer View Scan ───
+@interface GlowMediaScanner : NSObject
++ (void)scanView:(UIView *)view depth:(int)depth;
+@end
+@implementation GlowMediaScanner
++ (void)scanView:(UIView *)view depth:(int)depth {
+  if (depth > 10 || !view) return;
+  const char *name = class_getName([view class]);
+  if (strstr(name, "Story") || strstr(name, "Reel") || strstr(name, "Snacks")) {
+    if (!strstr(name, "Cell") && !strstr(name, "Collection") && !strstr(name, "Tray")) {
+      id responder = view;
+      while (responder && ![responder isKindOfClass:[UIViewController class]])
+        responder = [responder nextResponder];
+      if (responder) {
+        NSString *url = [MediaExtractor extractVideoURL:responder];
+        if (url) {
+          NSLog(@"[Glow-SCAN] Video URL on %s: %@", name, url);
+          injectDownloadBtn(view, url);
+        }
+      }
+    }
+  }
+  for (UIView *sub in view.subviews) {
+    [self scanView:sub depth:depth+1];
+  }
+}
++ (void)scanAllWindows {
+  if (@available(iOS 15.0, *)) {
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+      if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+      for (UIWindow *w in [(UIWindowScene *)scene windows]) {
+        [self scanView:w depth:0];
+      }
+    }
+  } else {
+    [self scanView:[[UIApplication sharedApplication] keyWindow] depth:0];
+  }
+}
+@end
+
+static void startScannerTimer(void) {
+  [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer *t) {
+    [GlowMediaScanner scanAllWindows];
+  }];
+  NSLog(@"[Glow] Scanner timer started (1.5s interval)");
+}
+
+// ─── setupAllHooks ───
+static void setupAllHooks(void) {
+  @autoreleasepool {
+    setupFileLogging();
+
+    @try {
+      NSString *fw = [[NSBundle mainBundle].bundlePath
+        stringByAppendingPathComponent:@"Frameworks/FBSharedFramework.framework/FBSharedFramework"];
+      if (fw) dlopen([fw UTF8String], RTLD_NOW | RTLD_GLOBAL);
+    } @catch (NSException *e) { NSLog(@"[Glow] dlopen error: %@", e.reason); }
+
+    enumerateFBClasses();
+    startScannerTimer();
+
+    if (PBOOL(@"AutoClearCache", NO))
+      [[NSURLCache sharedURLCache] removeAllCachedResponses];
+
+    if (!PBOOL(@"hasLaunched", NO)) {
+      PSET(@"hasLaunched", @YES); saveP();
+      UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Glow v1.3.1"
+        message:@"Phase 2 debug — class enum + timer scan.\nCheck glow_log.txt for FB classes." preferredStyle:UIAlertControllerStyleAlert];
+      [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+      UIViewController *root = [[[UIApplication sharedApplication] keyWindow] rootViewController];
+      if (root) [root presentViewController:a animated:YES completion:nil];
+    }
+
+    NSLog(@"[Glow] Phase 2 debug — setupAllHooks complete");
+  }
+}
+
+// ─── Constructor ───
+%ctor {
+  @autoreleasepool {
+    loadP();
+    _dyld_register_func_for_add_image(_glow_image_loaded);
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [[NSNotificationCenter defaultCenter]
+        addObserverForName:UIApplicationDidFinishLaunchingNotification
+        object:nil queue:[NSOperationQueue mainQueue]
+        usingBlock:^(NSNotification *note) {
+          [GlowTabBar install];
+          dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+            dispatch_get_main_queue(), ^{ setupAllHooks(); });
+        }];
+    });
+    NSLog(@"[Glow] Phase 2 debug — constructor done");
+  }
+}
+
+// ─── Include Tab Bar (needed for override above) ───
+// Tab bar classes from Phase 1
+@interface GlowLongPress : UILongPressGestureRecognizer @end
+@implementation GlowLongPress
+- (instancetype)initWithTarget:(id)target action:(SEL)action {
+  if ((self = [super initWithTarget:target action:action])) self.minimumPressDuration = 0.5;
+  return self;
+}
+@end
+
+@interface GlowTabBar : NSObject @end
+@implementation GlowTabBar
++ (UITabBar *)findInView:(UIView *)v {
+  if ([v isKindOfClass:[UITabBar class]]) return (UITabBar *)v;
+  for (UIView *s in v.subviews) { UITabBar *f = [self findInView:s]; if (f) return f; }
+  return nil;
+}
++ (void)install {
+  UITabBar *tb = nil;
+  if (@available(iOS 13, *)) {
+    for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+      if (![s isKindOfClass:[UIWindowScene class]]) continue;
+      for (UIWindow *w in [(UIWindowScene *)s windows]) { tb = [self findInView:w]; if (tb) break; }
+      if (tb) break;
+    }
+  }
+  if (!tb) tb = [self findInView:UIApplication.sharedApplication.keyWindow];
+  if (tb) {
+    for (UIGestureRecognizer *g in tb.gestureRecognizers)
+      if ([NSStringFromClass(g.class) containsString:@"Glow"]) return;
+    [tb addGestureRecognizer:[[GlowLongPress alloc] initWithTarget:self action:@selector(hLP:)]];
+  }
+}
++ (void)hLP:(UIGestureRecognizer *)g {
+  if (g.state == UIGestureRecognizerStateBegan) {
+    SettingsViewController *vc = [[SettingsViewController alloc] init];
+    UINavigationController *n = [[UINavigationController alloc] initWithRootViewController:vc];
+    [topVC() presentViewController:n animated:YES completion:nil];
+  }
+}
+@end
+
+// Settings
+@interface SettingsViewController : UITableViewController @end
+@implementation SettingsViewController { NSArray *_sections; }
 - (instancetype)init {
   if ((self = [super initWithStyle:UITableViewStyleGrouped])) {
     self.title = @"Glow";
@@ -104,103 +388,3 @@ static UIViewController *topVC(void) {
   PSET(_sections[s][@"items"][r][@"k"], @(sw.isOn)); saveP();
 }
 @end
-
-// ─── Long Press Gesture ───
-@interface GlowLongPress : UILongPressGestureRecognizer @end
-@implementation GlowLongPress
-- (instancetype)initWithTarget:(id)target action:(SEL)action {
-  if ((self = [super initWithTarget:target action:action])) self.minimumPressDuration = 0.5;
-  return self;
-}
-@end
-
-// ─── Tab Bar Installer ───
-@interface GlowTabBar : NSObject @end
-@implementation GlowTabBar
-+ (UITabBar *)findInView:(UIView *)v {
-  if ([v isKindOfClass:[UITabBar class]]) return (UITabBar *)v;
-  for (UIView *s in v.subviews) { UITabBar *f = [self findInView:s]; if (f) return f; }
-  return nil;
-}
-+ (void)install {
-  UITabBar *tb = nil;
-  if (@available(iOS 13, *)) {
-    for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
-      if (![s isKindOfClass:[UIWindowScene class]]) continue;
-      for (UIWindow *w in [(UIWindowScene *)s windows]) { tb = [self findInView:w]; if (tb) break; }
-      if (tb) break;
-    }
-  }
-  if (!tb) tb = [self findInView:UIApplication.sharedApplication.keyWindow];
-  if (tb) {
-    for (UIGestureRecognizer *g in tb.gestureRecognizers)
-      if ([NSStringFromClass(g.class) containsString:@"Glow"]) return;
-    [tb addGestureRecognizer:[[GlowLongPress alloc] initWithTarget:self action:@selector(hLP:)]];
-  }
-}
-+ (void)hLP:(UIGestureRecognizer *)g {
-  if (g.state == UIGestureRecognizerStateBegan) {
-    UINavigationController *n = [[UINavigationController alloc] initWithRootViewController:[[GlowSettingsVC alloc] init]];
-    [topVC() presentViewController:n animated:YES completion:nil];
-  }
-}
-@end
-
-// ─── setupAllHooks — called after app launch + 2s delay ───
-static void setupAllHooks(void) {
-  @autoreleasepool {
-    // dlopen FBSharedFramework (safe now — post-app-launch)
-    @try {
-      NSString *fw = [[NSBundle mainBundle].bundlePath
-        stringByAppendingPathComponent:@"Frameworks/FBSharedFramework.framework/FBSharedFramework"];
-      if (fw) dlopen([fw UTF8String], RTLD_NOW | RTLD_GLOBAL);
-    } @catch (NSException *e) { NSLog(@"[Glow] dlopen error: %@", e.reason); }
-
-    // Phase 2+: seen fix, download, ad blocking, auto-next, like confirm
-    // Will be added in subsequent phases
-
-    // Auto clear cache
-    if (PBOOL(@"AutoClearCache", NO))
-      [[NSURLCache sharedURLCache] removeAllCachedResponses];
-
-    // Welcome on first launch
-    if (!PBOOL(@"hasLaunched", NO)) {
-      PSET(@"hasLaunched", @YES); saveP();
-      UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Glow v1.3.1"
-        message:@"Phase 1 — no-crash foundation.\nTab bar → Settings works." preferredStyle:UIAlertControllerStyleAlert];
-      [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-      UIViewController *root = [[[UIApplication sharedApplication] keyWindow] rootViewController];
-      if (root) [root presentViewController:a animated:YES completion:nil];
-    }
-
-    NSLog(@"[Glow] Phase 1 — setupAllHooks complete");
-  }
-}
-
-// ─── Constructor — MINIMAL, defer EVERYTHING ───
-%ctor {
-  @autoreleasepool {
-    loadP();
-    _dyld_register_func_for_add_image(_glow_image_loaded);
-
-    // Defer ALL hooks to after app launch + 2s
-    // Pattern from uYouPlus/YTLite/iHide: minimal %ctor, defer everything
-    dispatch_async(dispatch_get_main_queue(), ^{
-      [[NSNotificationCenter defaultCenter]
-        addObserverForName:UIApplicationDidFinishLaunchingNotification
-        object:nil queue:[NSOperationQueue mainQueue]
-        usingBlock:^(NSNotification *note) {
-          // Tab bar (works without FB classes)
-          [GlowTabBar install];
-
-          // All hooks after 2s delay
-          dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
-            dispatch_get_main_queue(), ^{
-              setupAllHooks();
-          });
-        }];
-    });
-
-    NSLog(@"[Glow] Phase 1 — constructor done (deferred)");
-  }
-}
