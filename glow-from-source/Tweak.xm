@@ -4,6 +4,7 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #import <UIKit/UIKit.h>
+#import <Photos/Photos.h>
 #import <mach-o/dyld.h>
 
 extern "C" void MSHookMessageEx(Class _class, SEL _cmd, IMP _replacement, IMP *_result);
@@ -119,50 +120,191 @@ static UIViewController *topVC() {
 }
 @end
 
-// ─── Constructor (NO HOOKS — debug only) ───
+// ─── MediaExtractor ───
+@interface MediaExtractor : NSObject
++ (NSString *)extractVideoURL:(id)obj;
+@end
+@implementation MediaExtractor
++ (NSString *)extractVideoURL:(id)obj {
+  if (!obj) return nil;
+  for (NSString *prop in @[@"videoURLString", @"playableURLString", @"hdPlayableURLString",
+                           @"dashPlayableURL", @"playableURL", @"mediaURLString",
+                           @"hdVideoURL", @"sdVideoURL"]) {
+    SEL sel = NSSelectorFromString(prop);
+    if ([obj respondsToSelector:sel]) {
+      NSString *val = [obj valueForKey:prop];
+      if (val && ![val hasPrefix:@"file://"]) return val;
+    }
+  }
+  return nil;
+}
+@end
+
+// ─── Download Button Injection ───
+@interface GlowDownloadTarget : NSObject @end
+@implementation GlowDownloadTarget
++ (instancetype)shared {
+  static GlowDownloadTarget *inst;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{ inst = [[GlowDownloadTarget alloc] init]; });
+  return inst;
+}
+- (void)downloadTapped:(UIButton *)btn {
+  NSString *url = btn.accessibilityIdentifier;
+  if (!url) return;
+  NSURLSessionDownloadTask *task = [[NSURLSession sharedSession] downloadTaskWithURL:[NSURL URLWithString:url]
+    completionHandler:^(NSURL *loc, NSURLResponse *resp, NSError *err) {
+      if (err) { NSLog(@"[Glow] download error: %@", err); return; }
+      [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+        [PHAssetCreationRequest creationRequestForAssetFromVideoAtFileURL:loc];
+      } completionHandler:^(BOOL success, NSError *e) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+          UIAlertController *a = [UIAlertController alertControllerWithTitle:success ? @"Saved!" : @"Failed"
+            message:nil preferredStyle:UIAlertControllerStyleAlert];
+          [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+          [[[[UIApplication sharedApplication] keyWindow] rootViewController] presentViewController:a animated:YES completion:nil];
+        });
+      }];
+    }];
+  [task resume];
+}
+@end
+
+static void injectDownloadBtn(UIView *target, NSString *urlStr) {
+  if (!urlStr.length) return;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [btn setTitle:@"⬇" forState:UIControlStateNormal];
+    btn.titleLabel.font = [UIFont systemFontOfSize:20];
+    btn.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.5];
+    btn.layer.cornerRadius = 18;
+    btn.frame = CGRectMake(target.bounds.size.width - 50, target.bounds.size.height - 100, 36, 36);
+    btn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleTopMargin;
+    [btn addTarget:[GlowDownloadTarget shared] action:@selector(downloadTapped:) forControlEvents:UIControlEventTouchUpInside];
+    btn.accessibilityIdentifier = urlStr;
+    [target addSubview:btn];
+  });
+}
+
+// ─── Constructor ───
 %ctor {
   @autoreleasepool {
     loadP();
     _dyld_register_func_for_add_image(_glow_image_loaded);
 
-    // Hook 1: viewDidLoad (minimal — just call original)
+    // 1. viewDidLoad: pattern match + seen fix + download
     {
       static IMP orig_vdl;
       MSHookMessageEx([UIViewController class], @selector(viewDidLoad),
-        imp_implementationWithBlock(^(id self, SEL _cmd) {
-          ((void(*)(id, SEL))orig_vdl)(self, _cmd);
-          NSLog(@"[Glow] viewDidLoad: %s", class_getName([self class]));
+        imp_implementationWithBlock(^(UIViewController *self, SEL _cmd) {
+          ((void(*)(UIViewController *, SEL))orig_vdl)(self, _cmd);
+
+          const char *name = class_getName([self class]);
+          if (!name) return;
+
+          // Seen fix for story viewers
+          if (PBOOL(@"AnonymousStories", YES) && strstr(name, "Story")) {
+            static dispatch_once_t once;
+            dispatch_once(&once, ^{
+              SEL seenSels[] = {
+                NSSelectorFromString(@"_canMarkStoryAsSeen"),
+                NSSelectorFromString(@"MarkStoryAsSeen"),
+              };
+              for (int i = 0; i < 2; i++) {
+                if ([self respondsToSelector:seenSels[i]]) {
+                  Method m = class_getInstanceMethod([self class], seenSels[i]);
+                  if (m) {
+                    IMP origImp = method_getImplementation(m);
+                    method_setImplementation(m, imp_implementationWithBlock(^(id s, SEL c) {
+                      if (!PBOOL(@"AnonymousStories", YES))
+                        ((void(*)(id, SEL))origImp)(s, c);
+                    }));
+                  }
+                }
+              }
+              SEL threadSel = NSSelectorFromString(@"_markThreadAsSeen:bucket:session:shouldMarkThreadSeenStateUpdates:");
+              if ([self respondsToSelector:threadSel]) {
+                Method m = class_getInstanceMethod([self class], threadSel);
+                if (m) {
+                  IMP origImp = method_getImplementation(m);
+                  method_setImplementation(m, imp_implementationWithBlock(^(id s, SEL c, id t, id b, id se, BOOL u) {
+                    if (!PBOOL(@"AnonymousStories", YES))
+                      ((void(*)(id, SEL, id, id, id, BOOL))origImp)(s, c, t, b, se, u);
+                  }));
+                }
+              }
+            });
+          }
+
+          // Download button for story/reel VCs
+          if ((strstr(name, "Story") || strstr(name, "Reel")) && !strstr(name, "Cell") && !strstr(name, "Collection")) {
+            NSString *url = [MediaExtractor extractVideoURL:self];
+            if (url) injectDownloadBtn(self.view, url);
+          }
         }), &orig_vdl);
     }
 
-    // Test: dlopen FBSharedFramework
-    @try {
-      NSString *fwPath = [[NSBundle mainBundle].bundlePath
-        stringByAppendingPathComponent:@"Frameworks/FBSharedFramework.framework/FBSharedFramework"];
-      if (fwPath) {
-        void *h = dlopen([fwPath UTF8String], RTLD_NOW | RTLD_GLOBAL);
-        NSLog(@"[Glow] dlopen: %p err=%s", h, h ? "" : (dlerror() ?: "none"));
-        if (h) dlclose(h);
-      }
-    } @catch (NSException *e) {
-      NSLog(@"[Glow] dlopen exception: %@", e.reason);
+    // 2. addSubview: hook for download injection
+    {
+      static IMP orig_asv;
+      MSHookMessageEx([UIView class], @selector(addSubview:),
+        imp_implementationWithBlock(^(UIView *self, SEL _cmd, UIView *subview) {
+          ((void(*)(UIView *, SEL, UIView *))orig_asv)(self, _cmd, subview);
+          if (!subview) return;
+          const char *name = class_getName([subview class]);
+          if (!name) return;
+          if ((strstr(name, "Story") || strstr(name, "Reel")) && !strstr(name, "Cell")) {
+            NSString *url = [MediaExtractor extractVideoURL:subview];
+            if (url) injectDownloadBtn(subview, url);
+          }
+        }), &orig_asv);
     }
 
-    // Tab bar long press
+    // 3. initWithFBTree: ad blocking
+    {
+      SEL sel = NSSelectorFromString(@"initWithFBTree:");
+      if ([NSObject instancesRespondToSelector:sel]) {
+        static IMP orig_tree;
+        MSHookMessageEx([NSObject class], sel,
+          imp_implementationWithBlock(^(id self, SEL _cmd, id tree) {
+            if (PBOOL(@"RemoveAds", YES)) return (id)nil;
+            return ((id(*)(id, SEL, id))orig_tree)(self, _cmd, tree);
+          }), &orig_tree);
+      }
+    }
+
+    // 4. initWithFBPandoTree: content blocking
+    {
+      SEL sel = NSSelectorFromString(@"initWithFBPandoTree:");
+      if ([NSObject instancesRespondToSelector:sel]) {
+        static IMP orig_pando;
+        MSHookMessageEx([NSObject class], sel,
+          imp_implementationWithBlock(^(id self, SEL _cmd, id tree) {
+            BOOL block = PBOOL(@"RemovePYMK", YES) || PBOOL(@"RemoveRecs", YES);
+            if (block) return (id)nil;
+            return ((id(*)(id, SEL, id))orig_pando)(self, _cmd, tree);
+          }), &orig_pando);
+      }
+    }
+
+    // 5. Tab bar long press
     [GlowTabBar install];
 
-    // Welcome
+    // 6. Welcome
     if (!PBOOL(@"hasLaunched", NO)) {
       PSET(@"hasLaunched", @YES); saveP();
       dispatch_async(dispatch_get_main_queue(), ^{
         UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Glow v1.3.1"
-          message:@"No hooks — debug build.\nTest: is this alert showing?"
-          preferredStyle:UIAlertControllerStyleAlert];
+          message:@"Build with all hooks." preferredStyle:UIAlertControllerStyleAlert];
         [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
         [topVC() presentViewController:a animated:YES completion:nil];
       });
     }
 
-    NSLog(@"[Glow] minimal debug loaded");
+    // 7. Auto clear cache
+    if (PBOOL(@"AutoClearCache", NO))
+      [[NSURLCache sharedURLCache] removeAllCachedResponses];
+
+    NSLog(@"[Glow] full hooks loaded");
   }
 }
