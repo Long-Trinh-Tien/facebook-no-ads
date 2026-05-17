@@ -1,0 +1,4 @@
+_MSHookMessageEx
+_class_addMethod
+_class_replaceMethod
+_method_setImplementation

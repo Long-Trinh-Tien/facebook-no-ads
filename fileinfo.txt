@@ -1,0 +1,1 @@
+/tmp/glow_out/Library/MobileSubstrate/DynamicLibraries/Glow.dylib: Mach-O 64-bit dynamically linked shared library arm64
