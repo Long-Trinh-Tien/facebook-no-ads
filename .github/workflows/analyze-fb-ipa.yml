@@ -240,16 +240,19 @@ jobs:
                   block = otool_content[block_start:block_start+500]
                   out.write(f"  Raw block: {block[:200]}\n\n")
                   
-                  # Find all 'name' fields after baseMethods
-                  method_names = re.findall(r'name\s+0x([0-9a-f]+)\s+\(0x[0-9a-f]+\)', block)
+                  # The format is:
+                  #   name    0xRELATIVE (0xABSOLUTE)
+                  # We need the ABSOLUTE address (inside parentheses)
+                  # Find all method entries: name RELATIVE (ABSOLUTE)
+                  method_entries = re.findall(r'name\s+0x[0-9a-f]+\s+\(0x([0-9a-f]+)\)', block)
                   method_types = re.findall(r'types\s+0x[0-9a-f]+\s+\(0x[0-9a-f]+\)\s+(.+?)$', block, re.MULTILINE)
                   
-                  for i, name_addr_str in enumerate(method_names):
-                      name_addr = int(name_addr_str, 16)
+                  for i, abs_addr_str in enumerate(method_entries):
+                      abs_addr = int(abs_addr_str, 16)
                       # Find the selector string for this address
-                      sel_name = selectors.get(name_addr, f"UNKNOWN_0x{name_addr:x}")
+                      sel_name = selectors.get(abs_addr, f"UNKNOWN_0x{abs_addr:x}")
                       type_enc = method_types[i] if i < len(method_types) else "?"
-                      out.write(f"  [{i}] 0x{name_addr:x} -> {sel_name}\n")
+                      out.write(f"  [{i}] 0x{abs_addr:x} -> {sel_name}\n")
                       out.write(f"       type: {type_enc}\n")
           
           print("Selector resolution complete")
