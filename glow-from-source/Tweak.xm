@@ -1,19 +1,29 @@
-// STAGE 0v2 — Primitive Injection Proof (REAL)
-// NO UIKit. NO Foundation writeToFile. NO dispatch_async.
-// POSIX write to /tmp/ (world-writable on iOS, no sandbox issues)
-// If /tmp/glow_alive.txt appears → dylib executes.
+// STAGE 0v3 — Injection Proof via Documents
+// POSIX write to Documents/glow_alive.txt (readable via Files app)
+// NO UIKit, NO ObjC, NO dispatch_async
 
-#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 __attribute__((constructor))
 static void glow_init(void) {
-  int fd = open("/tmp/glow_alive.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-  if (fd >= 0) {
-    write(fd, "GLOW_ALIVE", 10);
-    close(fd);
-  }
+  const char *home = getenv("HOME");
+  if (!home) return;
   
-  // Also try Documents (will fail silently if sandbox not ready)
-  // /tmp/ is always writable
+  char path[512];
+  snprintf(path, sizeof(path), "%s/Documents/glow_alive.txt", home);
+  
+  // Ensure Documents dir exists (create if not)
+  char dir[512];
+  snprintf(dir, sizeof(dir), "%s/Documents", home);
+  mkdir(dir, 0755);
+  
+  FILE *f = fopen(path, "w");
+  if (f) {
+    fprintf(f, "GLOW_ALIVE\n");
+    fclose(f);
+  }
 }
