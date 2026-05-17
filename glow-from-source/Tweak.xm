@@ -14,6 +14,8 @@ static os_log_t glowLogOS(void) {
   dispatch_once(&once, ^{ log = os_log_create("com.glow.debug", "Glow"); });
   return log;
 }
+// Filter: log stream --predicate 'subsystem == "com.glow.debug"' --style compact
+// Or search for "[glow]" in Console.app / Antoine
 
 extern "C" void _dyld_register_func_for_add_image(void (*func)(const struct mach_header *mh, intptr_t vmaddr_slide));
 
@@ -78,9 +80,9 @@ static void GlowLog(NSString *format, ...) {
   NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
   va_end(args);
   
-  // Always NSLog + os_log (visible via Xcode/Console/terminal)
+  // Always NSLog + os_log with tag [glow] (filter: subsystem == "com.glow.debug")
   NSLog(@"[Glow] %@", msg);
-  os_log_info(glowLogOS(), "%{public}@", msg);
+  os_log_info(glowLogOS(), "[glow] %{public}@", msg);
   
   // Also write to file via NSFileHandle (accessible via Files app)
   @try {
