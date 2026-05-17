@@ -2,13 +2,25 @@
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <objc/runtime.h>
 #import <mach-o/dyld.h>
+#import <os/log.h>
 
 extern "C" void _dyld_register_func_for_add_image(void (*func)(const struct mach_header *mh, intptr_t vmaddr_slide));
 
+// Padding — symptom of dyld3 race, cần investigate sau
 __attribute__((used, section("__TEXT,__glow_pad")))
 static const uint8_t _glow_size_padding[15728640] = {0};
 static void _glow_image_loaded(const struct mach_header *mh, intptr_t vmaddr_slide) {}
+
+static os_log_t glowLog(void) {
+  static os_log_t l;
+  static dispatch_once_t t;
+  dispatch_once(&t, ^{ l = os_log_create("com.glow.fb", "Glow"); });
+  return l;
+}
+
+#define GLog(fmt, ...) os_log_info(glowLog(), "[glow] " fmt, ##__VA_ARGS__)
 
 static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.dvntm.glowprefs.plist";
 static NSMutableDictionary *P;
@@ -39,8 +51,9 @@ static UIViewController *topVC(void) {
   return root;
 }
 
-@interface SettingsViewController : UITableViewController @end
-@implementation SettingsViewController { NSArray *_sections; }
+// ─── Settings ───
+@interface GlowSettingsVC : UITableViewController @end
+@implementation GlowSettingsVC { NSArray *_sections; }
 - (instancetype)init {
   if ((self = [super initWithStyle:UITableViewStyleGrouped])) {
     self.title = @"Glow";
@@ -48,24 +61,14 @@ static UIViewController *topVC(void) {
       @{@"title": @"Download", @"items": @[
         @{@"l": @"Videos", @"k": @"DownloadVideos", @"d": @YES},
         @{@"l": @"Stories", @"k": @"DownloadStories", @"d": @YES},
-        @{@"l": @"Reels", @"k": @"DownloadReels", @"d": @YES},
-        @{@"l": @"All Formats", @"k": @"AllFormats", @"d": @NO},
-        @{@"l": @"Encoding Speed", @"k": @"EncodingSpeed", @"d": @0}]},
+        @{@"l": @"Reels", @"k": @"DownloadReels", @"d": @YES}]},
       @{@"title": @"Privacy", @"items": @[
-        @{@"l": @"Anonymous Stories", @"k": @"AnonymousStories", @"d": @YES},
-        @{@"l": @"Mark as Seen", @"k": @"MarkAsSeen", @"d": @NO}]},
+        @{@"l": @"Anonymous Stories", @"k": @"AnonymousStories", @"d": @YES}]},
       @{@"title": @"Content", @"items": @[
-        @{@"l": @"Remove Ads", @"k": @"RemoveAds", @"d": @YES},
-        @{@"l": @"Remove PYMK", @"k": @"RemovePYMK", @"d": @YES},
-        @{@"l": @"Remove Recs", @"k": @"RemoveRecs", @"d": @YES},
-        @{@"l": @"Remove Reels Carousel", @"k": @"RemoveReelsCarousel", @"d": @NO}]},
+        @{@"l": @"Remove Ads", @"k": @"RemoveAds", @"d": @YES}]},
       @{@"title": @"Interaction", @"items": @[
         @{@"l": @"Confirm Like", @"k": @"PostLikeConfirm", @"d": @NO},
-        @{@"l": @"Confirm Reels Like", @"k": @"ReelsLikeConfirm", @"d": @NO},
-        @{@"l": @"Disable Auto Next", @"k": @"DisableAutoNext", @"d": @NO}]},
-      @{@"title": @"UI", @"items": @[
-        @{@"l": @"Hide Overlay", @"k": @"HideOverlay", @"d": @NO},
-        @{@"l": @"Auto Clear Cache", @"k": @"AutoClearCache", @"d": @NO}]}];
+        @{@"l": @"Disable Auto Next", @"k": @"DisableAutoNext", @"d": @NO}]}];
   }
   return self;
 }
@@ -90,72 +93,57 @@ static UIViewController *topVC(void) {
 }
 @end
 
-@interface GlowTabBar : NSObject @end
-@interface GlowLongPress : UILongPressGestureRecognizer @end
-@implementation GlowLongPress
-- (instancetype)initWithTarget:(id)target action:(SEL)action {
-  if ((self = [super initWithTarget:target action:action])) self.minimumPressDuration = 0.5;
-  return self;
+// ─── Layer 1: UIKit hooks để discover runtime behavior ───
+
+// Hook UITabBar.layoutSubviews → inject long press gesture
+%hook UITabBar
+- (void)layoutSubviews {
+  %orig;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    GLog("UITabBar layoutSubviews — installing long press");
+    for (UIView *v in self.subviews) {
+      NSString *cls = NSStringFromClass([v class]);
+      GLog("tab child: %@", cls);
+    }
+    UILongPressGestureRecognizer *g = [[UILongPressGestureRecognizer alloc]
+      initWithTarget:[GlowSettingsVC class] action:@selector(glowHold:)];
+    g.minimumPressDuration = 0.5;
+    [self addGestureRecognizer:g];
+  });
 }
 @end
-@implementation GlowTabBar
-+ (UITabBar *)findInView:(UIView *)v {
-  if ([v isKindOfClass:[UITabBar class]]) return (UITabBar *)v;
-  for (UIView *s in v.subviews) { UITabBar *f = [self findInView:s]; if (f) return f; }
-  return nil;
+
+@implementation GlowSettingsVC (LongPress)
++ (void)glowHold:(UILongPressGestureRecognizer *)g {
+  if (g.state != UIGestureRecognizerStateBegan) return;
+  UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:[[GlowSettingsVC alloc] init]];
+  [topVC() presentViewController:nav animated:YES completion:nil];
 }
-+ (UITabBar *)findTabBar {
-  UITabBar *tb = nil;
-  // Try all windows/scenes
-  if (@available(iOS 13, *)) {
-    for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
-      if (![s isKindOfClass:[UIWindowScene class]]) continue;
-      for (UIWindow *w in [(UIWindowScene *)s windows]) {
-        tb = [self findInView:w]; if (tb) break;
-        // Also check root VC's tabBar
-        if (w.rootViewController && [w.rootViewController isKindOfClass:[UITabBarController class]])
-          tb = [(UITabBarController *)w.rootViewController tabBar];
-        if (tb) break;
-      }
-      if (tb) break;
-    }
-  }
-  if (!tb) {
-    tb = [self findInView:UIApplication.sharedApplication.keyWindow];
-    // Check root VC
-    UIViewController *root = UIApplication.sharedApplication.keyWindow.rootViewController;
-    if (!tb && [root isKindOfClass:[UITabBarController class]])
-      tb = [(UITabBarController *)root tabBar];
-  }
-  return tb;
-}
-+ (void)installWithRetry:(int)retries {
-  UITabBar *tb = [self findTabBar];
-  if (tb) {
-    for (UIGestureRecognizer *g in tb.gestureRecognizers)
-      if ([NSStringFromClass(g.class) containsString:@"Glow"]) return;
-    [tb addGestureRecognizer:[[GlowLongPress alloc] initWithTarget:self action:@selector(hLP:)]];
-  } else if (retries > 0) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
-      dispatch_get_main_queue(), ^{ [self installWithRetry:retries - 1]; });
-  }
-}
-+ (void)install { [self installWithRetry:3]; }
-+ (void)hLP:(UIGestureRecognizer *)g {
-  if (g.state == UIGestureRecognizerStateBegan) {
-    UINavigationController *n = [[UINavigationController alloc] initWithRootViewController:[[SettingsViewController alloc] init]];
-    [topVC() presentViewController:n animated:YES completion:nil];
+@end
+
+// Hook UIViewController.viewDidAppear → discover FB classes từ instance thật
+%hook UIViewController
+- (void)viewDidAppear:(BOOL)animated {
+  %orig;
+  NSString *name = NSStringFromClass([self class]);
+  if ([name containsString:@"Feed"] || [name containsString:@"Story"] ||
+      [name containsString:@"Reel"] || [name containsString:@"Snacks"] ||
+      [name containsString:@"Tab"] || [name containsString:@"Bucket"]) {
+    GLog("VC: %@", name);
   }
 }
 @end
 
+// ─── Constructor — TỐI GIẢN ───
 %ctor {
   @autoreleasepool {
     loadP();
     _dyld_register_func_for_add_image(_glow_image_loaded);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
-      dispatch_get_main_queue(), ^{
-        [GlowTabBar install];
+    // KHÔNG: fileIO, objc_copyClassList, dlopen, notifications, timers
+    // CHỈ: defer setup qua dispatch_async
+    dispatch_async(dispatch_get_main_queue(), ^{
+      GLog("Glow loaded");
     });
   }
 }
