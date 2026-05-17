@@ -37,11 +37,11 @@ static void saveP() { [P writeToFile:kPrefsPath atomically:YES]; }
 // ─── verifyTypeEncoding ───
 __attribute__((unused)) static BOOL verifyTypeEncoding(Class cls, SEL sel, const char *expected) {
   Method m = class_getInstanceMethod(cls, sel);
-  if (!m) { NSLog(@"[Glow] SKIP: method not found %s %s", class_getName(cls), sel_getName(sel)); return NO; }
+  if (!m) { GlowLog(@" SKIP: method not found %s %s", class_getName(cls), sel_getName(sel)); return NO; }
   const char *actual = method_getTypeEncoding(m);
   if (!actual || !expected) return NO;
   if (strcmp(actual, expected) == 0) return YES;
-  NSLog(@"[Glow] TYPE ENCODING MISMATCH %s %s: exp=%s got=%s", class_getName(cls), sel_getName(sel), expected, actual);
+  GlowLog(@" TYPE ENCODING MISMATCH %s %s: exp=%s got=%s", class_getName(cls), sel_getName(sel), expected, actual);
   return NO;
 }
 
@@ -61,17 +61,35 @@ static UIViewController *topVC(void) {
   return root;
 }
 
-// ─── File Logging ───
-static void setupFileLogging(void) {
+// ─── File Logging (NSFileHandle — reliable) ───
+static NSFileHandle *_logFH = nil;
+static void GlowLog(NSString *format, ...) {
+  va_list args;
+  va_start(args, format);
+  NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
+  va_end(args);
+  
+  // Always NSLog (visible via Xcode device console)
+  GlowLog(@" %@", msg);
+  
+  // Also write to file via NSFileHandle
   @try {
-    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-    NSString *docDir = [paths firstObject];
-    if (!docDir) return;
-    NSString *logPath = [docDir stringByAppendingPathComponent:@"glow_log.txt"];
-    freopen([logPath UTF8String], "a+", stderr);
-    NSLog(@"[Glow] Logging to: %@", logPath);
+    if (!_logFH) {
+      NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+      NSString *docDir = [paths firstObject];
+      if (!docDir) return;
+      NSString *logPath = [docDir stringByAppendingPathComponent:@"glow_log.txt"];
+      [[NSFileManager defaultManager] createFileAtPath:logPath contents:nil attributes:nil];
+      _logFH = [NSFileHandle fileHandleForWritingAtPath:logPath];
+    }
+    if (_logFH) {
+      [_logFH seekToEndOfFile];
+      NSString *line = [NSString stringWithFormat:@"[%@] %@\n", [NSDate date], msg];
+      [_logFH writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+      [_logFH synchronizeFile];
+    }
   } @catch (NSException *e) {
-    NSLog(@"[Glow] Log setup error: %@", e.reason);
+    GlowLog(@" Log write error: %@", e.reason);
   }
 }
 
@@ -79,9 +97,9 @@ static void setupFileLogging(void) {
 static void enumerateFBClasses(void) {
   unsigned int count;
   Class *classes = objc_copyClassList(&count);
-  if (!classes) { NSLog(@"[Glow] objc_copyClassList failed"); return; }
+  if (!classes) { GlowLog(@" objc_copyClassList failed"); return; }
 
-  NSLog(@"[Glow] ===== Class Enumeration (%d total) =====", count);
+  GlowLog(@" ===== Class Enumeration (%d total) =====", count);
   for (unsigned int i = 0; i < count; i++) {
     const char *name = class_getName(classes[i]);
     if (!name) continue;
@@ -113,22 +131,22 @@ static void enumerateFBClasses(void) {
 
     // Known selectors
     if ([classes[i] instancesRespondToSelector:NSSelectorFromString(@"_sendSeenThreadIDsWithBucket:session:")])
-      NSLog(@"[Glow] >>> _sendSeenThreadIDsWithBucket:session: FOUND on %s", name);
+      GlowLog(@" >>> _sendSeenThreadIDsWithBucket:session: FOUND on %s", name);
     if ([classes[i] instancesRespondToSelector:NSSelectorFromString(@"advanceToNextItemWithNavigationAction:")])
-      NSLog(@"[Glow] >>> advanceToNextItemWithNavigationAction: FOUND on %s", name);
+      GlowLog(@" >>> advanceToNextItemWithNavigationAction: FOUND on %s", name);
     if ([classes[i] instancesRespondToSelector:NSSelectorFromString(@"closeStoryWithSource:")])
-      NSLog(@"[Glow] >>> closeStoryWithSource: FOUND on %s", name);
+      GlowLog(@" >>> closeStoryWithSource: FOUND on %s", name);
     if ([classes[i] instancesRespondToSelector:NSSelectorFromString(@"storyBucketType")])
-      NSLog(@"[Glow] >>> storyBucketType FOUND on %s", name);
+      GlowLog(@" >>> storyBucketType FOUND on %s", name);
     if ([classes[i] instancesRespondToSelector:NSSelectorFromString(@"performLikeAction:")])
-      NSLog(@"[Glow] >>> performLikeAction: FOUND on %s", name);
+      GlowLog(@" >>> performLikeAction: FOUND on %s", name);
     if ([classes[i] instancesRespondToSelector:NSSelectorFromString(@"isSponsored")])
-      NSLog(@"[Glow] >>> isSponsored FOUND on %s", name);
+      GlowLog(@" >>> isSponsored FOUND on %s", name);
     if ([classes[i] isSubclassOfClass:[UIViewController class]])
       NSLog(@"[Glow-VC] VC: %s", name);
   }
   free(classes);
-  NSLog(@"[Glow] ===== Class Enumeration complete =====");
+  GlowLog(@"===== Class Enumeration complete =====");
 }
 
 // ─── MediaExtractor ───
@@ -160,7 +178,7 @@ static void enumerateFBClasses(void) {
   if (!url) return;
   NSURLSessionDownloadTask *task = [[NSURLSession sharedSession] downloadTaskWithURL:[NSURL URLWithString:url]
     completionHandler:^(NSURL *loc, NSURLResponse *resp, NSError *err) {
-      if (err) { NSLog(@"[Glow] download error: %@", err); return; }
+      if (err) { GlowLog(@" download error: %@", err); return; }
       [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
         [PHAssetCreationRequest creationRequestForAssetFromVideoAtFileURL:loc];
       } completionHandler:^(BOOL success, NSError *e) {
@@ -236,18 +254,19 @@ static void startScannerTimer(void) {
   [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer *t) {
     [GlowMediaScanner scanAllWindows];
   }];
-  NSLog(@"[Glow] Scanner timer started (1.5s interval)");
+  GlowLog(@" Scanner timer started (1.5s interval)");
 }
 
 // ─── setupAllHooks ───
 static void setupAllHooks(void) {
   @autoreleasepool {
-    setupFileLogging();
+    // First GlowLog call initializes the log file
+    GlowLog(@"===== Phase 2 debug start =====");
     @try {
       NSString *fw = [[NSBundle mainBundle].bundlePath
         stringByAppendingPathComponent:@"Frameworks/FBSharedFramework.framework/FBSharedFramework"];
       if (fw) dlopen([fw UTF8String], RTLD_NOW | RTLD_GLOBAL);
-    } @catch (NSException *e) { NSLog(@"[Glow] dlopen error: %@", e.reason); }
+    } @catch (NSException *e) { GlowLog(@" dlopen error: %@", e.reason); }
     enumerateFBClasses();
     startScannerTimer();
     if (PBOOL(@"AutoClearCache", NO)) [[NSURLCache sharedURLCache] removeAllCachedResponses];
@@ -259,7 +278,7 @@ static void setupAllHooks(void) {
       UIViewController *root = [[[UIApplication sharedApplication] keyWindow] rootViewController];
       if (root) [root presentViewController:a animated:YES completion:nil];
     }
-    NSLog(@"[Glow] Phase 2 debug — setupAllHooks complete");
+    GlowLog(@" Phase 2 debug — setupAllHooks complete");
   }
 }
 
@@ -278,7 +297,7 @@ static void setupAllHooks(void) {
             dispatch_get_main_queue(), ^{ setupAllHooks(); });
         }];
     });
-    NSLog(@"[Glow] Phase 2 debug — constructor done");
+    GlowLog(@" Phase 2 debug — constructor done");
   }
 }
 
