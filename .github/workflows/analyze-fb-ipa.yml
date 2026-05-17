@@ -121,6 +121,140 @@ jobs:
             otool -v -s __DATA __objc_const "$FB" 2>/dev/null | head -1000 >> /tmp/results/fb_typencodings.txt || true
           fi
 
+      - name: RE-8 Resolve selector names for target classes
+        run: |
+          FWS=$(find /tmp/fb/extracted -name "FBSharedFramework" -type f 2>/dev/null | head -1)
+          if [ -z "$FWS" ]; then
+            FWS=$(find /tmp/fb/extracted -name "FBSharedDynamicFramework" -type f 2>/dev/null | head -1)
+          fi
+
+          if [ -z "$FWS" ]; then
+            echo "No framework found for selector resolution"
+            exit 0
+          fi
+
+          python3 << 'PYEOF'
+          import subprocess, re, struct
+
+          FWS = '/tmp/fb/extracted/Payload/Facebook.app/Frameworks/FBSharedFramework.framework/FBSharedFramework'
+
+          # Get __objc_methname section start and size
+          # Use otool -l to get section info
+          result = subprocess.run(['otool', '-l', FWS], capture_output=True, text=True, timeout=30)
+          lines = result.stdout.split('\n')
+          
+          methname_base = None
+          methname_size = None
+          for i, line in enumerate(lines):
+              if '__objc_methname' in line:
+                  # Get the VM address from the next few lines
+                  for j in range(i, i+10):
+                      if j >= len(lines): break
+                      if 'addr' in lines[j]:
+                          methname_base = int(lines[j].split()[-1], 16)
+                      if 'size' in lines[j]:
+                          methname_size = int(lines[j].split()[-1], 16)
+                          break
+                  break
+          
+          if not methname_base:
+              print("Could not find __objc_methname section")
+              exit(0)
+          
+          print(f"__objc_methname: base=0x{methname_base:x}, size=0x{methname_size:x}")
+          
+          # Read the section data
+          # otool -v -s __TEXT __objc_methname
+          result2 = subprocess.run(['otool', '-v', '-s', '__TEXT', '__objc_methname', FWS],
+                                  capture_output=True, text=True, timeout=30)
+          methname_data = result2.stdout
+          
+          # Parse the hex dump to get selector strings
+          # Format: address | hex bytes | ASCII
+          selectors = {}  # addr -> name
+          for line in methname_data.split('\n'):
+              line = line.strip()
+              if not line or ':' not in line:
+                  continue
+              parts = line.split()
+              if len(parts) < 2:
+                  continue
+              try:
+                  addr = int(parts[0], 16)
+              except:
+                  continue
+              # The selector string is the ASCII part at the end
+              # Find it by looking for printable chars after the hex bytes
+              idx = line.find('\t')
+              if idx < 0:
+                  idx = line.find('  ')
+              if idx < 0:
+                  continue
+              ascii_part = line[idx:].strip()
+              # Remove hex garbage, keep only the selector
+              ascii_clean = ''
+              for c in ascii_part:
+                  if c == '\t':
+                      break
+                  ascii_clean += c
+              selectors[addr] = ascii_clean.strip()
+          
+          print(f"Found {len(selectors)} selectors in __objc_methname")
+          
+          # Now parse the otool -oV output to find target classes and their methods
+          with open('/tmp/results/fbshared_otool.txt') as f:
+              otool_content = f.read()
+          
+          # Find target class blocks
+          target_classes = [
+              'FBSnacksBucketsSeenStateManager',
+              'FBSnacksUnifiedSeenStateMutator',
+              'FBShortsSeenStateMutator',
+              'FBSnacksViewerViewController',
+              'FBSnacksSeenStateWriting',
+              'FBSnacksSeenStateCache',
+              'FBSnacksSurfaceAwareSeenStateWriter',
+          ]
+          
+          with open('/tmp/results/resolved_selectors.txt', 'w') as out:
+              for target in target_classes:
+                  out.write(f"\n{'='*60}\n")
+                  out.write(f"=== {target} ===\n")
+                  out.write(f"{'='*60}\n")
+                  
+                  # Find the class block in otool output
+                  idx = otool_content.find(f'_OBJC_CLASS_$_' + target)
+                  if idx < 0:
+                      idx = otool_content.find(target)
+                  if idx < 0:
+                      out.write("  (class not found in otool output)\n")
+                      continue
+                  
+                  # Find baseMethods section
+                  block_start = otool_content.find('baseMethods', idx)
+                  if block_start < 0:
+                      out.write("  (no baseMethods found)\n")
+                      continue
+                  
+                  # Parse method entries
+                  block = otool_content[block_start:block_start+500]
+                  out.write(f"  Raw block: {block[:200]}\n\n")
+                  
+                  # Find all 'name' fields after baseMethods
+                  method_names = re.findall(r'name\s+0x([0-9a-f]+)\s+\(0x[0-9a-f]+\)', block)
+                  method_types = re.findall(r'types\s+0x[0-9a-f]+\s+\(0x[0-9a-f]+\)\s+(.+?)$', block, re.MULTILINE)
+                  
+                  for i, name_addr_str in enumerate(method_names):
+                      name_addr = int(name_addr_str, 16)
+                      # Find the selector string for this address
+                      sel_name = selectors.get(name_addr, f"UNKNOWN_0x{name_addr:x}")
+                      type_enc = method_types[i] if i < len(method_types) else "?"
+                      out.write(f"  [{i}] 0x{name_addr:x} -> {sel_name}\n")
+                      out.write(f"       type: {type_enc}\n")
+          
+          print("Selector resolution complete")
+          PYEOF
+
       - name: Upload results
         uses: actions/upload-artifact@v4
         with:
