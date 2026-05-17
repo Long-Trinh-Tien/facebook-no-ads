@@ -26,6 +26,15 @@ static void loadP() {
 }
 static void saveP() { [P writeToFile:kPrefsPath atomically:YES]; }
 
+// ─── Forward declarations ───
+@interface GlowTabBar : NSObject
++ (void)install;
++ (UITabBar *)findInView:(UIView *)v;
++ (void)hLP:(UIGestureRecognizer *)g;
+@end
+@interface SettingsViewController : UITableViewController @end
+
+// ─── verifyTypeEncoding ───
 __attribute__((unused)) static BOOL verifyTypeEncoding(Class cls, SEL sel, const char *expected) {
   Method m = class_getInstanceMethod(cls, sel);
   if (!m) { NSLog(@"[Glow] SKIP: method not found %s %s", class_getName(cls), sel_getName(sel)); return NO; }
@@ -52,7 +61,7 @@ static UIViewController *topVC(void) {
   return root;
 }
 
-// ─── Step 1: File Logging ───
+// ─── File Logging ───
 static void setupFileLogging(void) {
   @try {
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
@@ -66,7 +75,7 @@ static void setupFileLogging(void) {
   }
 }
 
-// ─── Step 2: Class Enumeration ───
+// ─── Class Enumeration ───
 static void enumerateFBClasses(void) {
   unsigned int count;
   Class *classes = objc_copyClassList(&count);
@@ -76,54 +85,47 @@ static void enumerateFBClasses(void) {
   for (unsigned int i = 0; i < count; i++) {
     const char *name = class_getName(classes[i]);
     if (!name) continue;
+    BOOL isFB = (strstr(name, "Snacks") || strstr(name, "SeenState") ||
+                 strstr(name, "FBStory") || strstr(name, "FBReel") ||
+                 strstr(name, "Sponsored") || strstr(name, "FBMem") ||
+                 strstr(name, "Bucket") || strstr(name, "Pando") ||
+                 strstr(name, "FBFeed"));
+    BOOL isStory = (strstr(name, "Story") && !strstr(name, "UI") && !strstr(name, "NS"));
+    if (!isFB && !isStory) continue;
 
-    // Focus on FB-related classes
-    BOOL isFBClass = (strstr(name, "Snacks") || strstr(name, "SeenState") ||
-                      strstr(name, "FBStory") || strstr(name, "FBReel") ||
-                      strstr(name, "FBFeed") || strstr(name, "Sponsored") ||
-                      strstr(name, "FBMem") || strstr(name, "Pando") ||
-                      strstr(name, "Bucket"));
-    BOOL isStoryClass = (strstr(name, "Story") && !strstr(name, "UI") && !strstr(name, "NS"));
-
-    if (isFBClass || isStoryClass) {
-      unsigned int mc;
-      Method *methods = class_copyMethodList(classes[i], &mc);
-      if (methods) {
-        NSLog(@"[Glow-FB] %s (%d methods)", name, mc);
-        for (unsigned int j = 0; j < mc && j < 30; j++) {
-          SEL sel = method_getName(methods[j]);
-          const char *selName = sel ? sel_getName(sel) : "null";
-          const char *enc = method_getTypeEncoding(methods[j]);
-          if (strstr(selName, "Seen") || strstr(selName, "seen") ||
-              strstr(selName, "Mark") || strstr(selName, "mark") ||
-              strstr(selName, "sendSeen") || strstr(selName, "Thread") ||
-              strstr(selName, "Bucket") || strstr(selName, "advance") ||
-              strstr(selName, "like") || strstr(selName, "Like") ||
-              strstr(selName, "download") || strstr(selName, "URL") ||
-              strstr(selName, "playable") || strstr(selName, "Sponsor") ||
-              strstr(selName, "initWithFB") || strstr(selName, "Pando") ||
-              strstr(selName, "closeStory") || strstr(selName, "SeenState") ||
-              strstr(selName, "markThread")) {
-            NSLog(@"[Glow-FB]   [%d] %s -> %s", j, selName, enc ?: "(null)");
-          }
-        }
-        free(methods);
+    unsigned int mc;
+    Method *methods = class_copyMethodList(classes[i], &mc);
+    if (methods) {
+      NSLog(@"[Glow-FB] %s (%d methods)", name, mc);
+      for (unsigned int j = 0; j < mc && j < 30; j++) {
+        SEL sel = method_getName(methods[j]);
+        const char *sn = sel ? sel_getName(sel) : "null";
+        const char *enc = method_getTypeEncoding(methods[j]);
+        if (strstr(sn, "Seen") || strstr(sn, "seen") || strstr(sn, "Mark") ||
+            strstr(sn, "mark") || strstr(sn, "Thread") || strstr(sn, "Bucket") ||
+            strstr(sn, "advance") || strstr(sn, "like") || strstr(sn, "Like") ||
+            strstr(sn, "URL") || strstr(sn, "playable") || strstr(sn, "Sponsor") ||
+            strstr(sn, "closeStory") || strstr(sn, "SeenState") || strstr(sn, "sendSeen"))
+          NSLog(@"[Glow-FB]   [%d] %s -> %s", j, sn, enc ?: "(null)");
       }
-
-      // Check known selectors
-      if ([classes[i] instancesRespondToSelector:NSSelectorFromString(@"_sendSeenThreadIDsWithBucket:session:")])
-        NSLog(@"[Glow] >>> _sendSeenThreadIDsWithBucket:session: FOUND on %s", name);
-      if ([classes[i] instancesRespondToSelector:NSSelectorFromString(@"advanceToNextItemWithNavigationAction:")])
-        NSLog(@"[Glow] >>> advanceToNextItemWithNavigationAction: FOUND on %s", name);
-      if ([classes[i] instancesRespondToSelector:NSSelectorFromString(@"closeStoryWithSource:")])
-        NSLog(@"[Glow] >>> closeStoryWithSource: FOUND on %s", name);
-      if ([classes[i] instancesRespondToSelector:NSSelectorFromString(@"storyBucketType")])
-        NSLog(@"[Glow] >>> storyBucketType FOUND on %s", name);
-      if ([classes[i] instancesRespondToSelector:NSSelectorFromString(@"performLikeAction:")])
-        NSLog(@"[Glow] >>> performLikeAction: FOUND on %s", name);
-      if ([classes[i] instancesRespondToSelector:NSSelectorFromString(@"isSponsored")])
-        NSLog(@"[Glow] >>> isSponsored FOUND on %s", name);
+      free(methods);
     }
+
+    // Known selectors
+    if ([classes[i] instancesRespondToSelector:NSSelectorFromString(@"_sendSeenThreadIDsWithBucket:session:")])
+      NSLog(@"[Glow] >>> _sendSeenThreadIDsWithBucket:session: FOUND on %s", name);
+    if ([classes[i] instancesRespondToSelector:NSSelectorFromString(@"advanceToNextItemWithNavigationAction:")])
+      NSLog(@"[Glow] >>> advanceToNextItemWithNavigationAction: FOUND on %s", name);
+    if ([classes[i] instancesRespondToSelector:NSSelectorFromString(@"closeStoryWithSource:")])
+      NSLog(@"[Glow] >>> closeStoryWithSource: FOUND on %s", name);
+    if ([classes[i] instancesRespondToSelector:NSSelectorFromString(@"storyBucketType")])
+      NSLog(@"[Glow] >>> storyBucketType FOUND on %s", name);
+    if ([classes[i] instancesRespondToSelector:NSSelectorFromString(@"performLikeAction:")])
+      NSLog(@"[Glow] >>> performLikeAction: FOUND on %s", name);
+    if ([classes[i] instancesRespondToSelector:NSSelectorFromString(@"isSponsored")])
+      NSLog(@"[Glow] >>> isSponsored FOUND on %s", name);
+    if ([classes[i] isSubclassOfClass:[UIViewController class]])
+      NSLog(@"[Glow-VC] VC: %s", name);
   }
   free(classes);
   NSLog(@"[Glow] ===== Class Enumeration complete =====");
@@ -149,15 +151,10 @@ static void enumerateFBClasses(void) {
 }
 @end
 
-// ─── Download Injection ───
+// ─── Download ───
 @interface GlowDownloadTarget : NSObject @end
 @implementation GlowDownloadTarget
-+ (instancetype)shared {
-  static GlowDownloadTarget *inst;
-  static dispatch_once_t once;
-  dispatch_once(&once, ^{ inst = [[GlowDownloadTarget alloc] init]; });
-  return inst;
-}
++ (instancetype)shared { static GlowDownloadTarget *inst; static dispatch_once_t once; dispatch_once(&once, ^{ inst = [[GlowDownloadTarget alloc] init]; }); return inst; }
 - (void)downloadTapped:(UIButton *)btn {
   NSString *url = btn.accessibilityIdentifier;
   if (!url) return;
@@ -181,7 +178,7 @@ static void enumerateFBClasses(void) {
 
 static void injectDownloadBtn(UIView *target, NSString *urlStr) {
   if (!urlStr.length) return;
-  if ([target viewWithTag:999]) return; // Already has button
+  if ([target viewWithTag:999]) return;
   dispatch_async(dispatch_get_main_queue(), ^{
     if ([target viewWithTag:999]) return;
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -198,9 +195,10 @@ static void injectDownloadBtn(UIView *target, NSString *urlStr) {
   });
 }
 
-// ─── Step 3: Timer View Scan ───
+// ─── Timer View Scan ───
 @interface GlowMediaScanner : NSObject
 + (void)scanView:(UIView *)view depth:(int)depth;
++ (void)scanAllWindows;
 @end
 @implementation GlowMediaScanner
 + (void)scanView:(UIView *)view depth:(int)depth {
@@ -220,17 +218,13 @@ static void injectDownloadBtn(UIView *target, NSString *urlStr) {
       }
     }
   }
-  for (UIView *sub in view.subviews) {
-    [self scanView:sub depth:depth+1];
-  }
+  for (UIView *sub in view.subviews) [self scanView:sub depth:depth+1];
 }
 + (void)scanAllWindows {
   if (@available(iOS 15.0, *)) {
     for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
       if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-      for (UIWindow *w in [(UIWindowScene *)scene windows]) {
-        [self scanView:w depth:0];
-      }
+      for (UIWindow *w in [(UIWindowScene *)scene windows]) [self scanView:w depth:0];
     }
   } else {
     [self scanView:[[UIApplication sharedApplication] keyWindow] depth:0];
@@ -249,19 +243,14 @@ static void startScannerTimer(void) {
 static void setupAllHooks(void) {
   @autoreleasepool {
     setupFileLogging();
-
     @try {
       NSString *fw = [[NSBundle mainBundle].bundlePath
         stringByAppendingPathComponent:@"Frameworks/FBSharedFramework.framework/FBSharedFramework"];
       if (fw) dlopen([fw UTF8String], RTLD_NOW | RTLD_GLOBAL);
     } @catch (NSException *e) { NSLog(@"[Glow] dlopen error: %@", e.reason); }
-
     enumerateFBClasses();
     startScannerTimer();
-
-    if (PBOOL(@"AutoClearCache", NO))
-      [[NSURLCache sharedURLCache] removeAllCachedResponses];
-
+    if (PBOOL(@"AutoClearCache", NO)) [[NSURLCache sharedURLCache] removeAllCachedResponses];
     if (!PBOOL(@"hasLaunched", NO)) {
       PSET(@"hasLaunched", @YES); saveP();
       UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Glow v1.3.1"
@@ -270,7 +259,6 @@ static void setupAllHooks(void) {
       UIViewController *root = [[[UIApplication sharedApplication] keyWindow] rootViewController];
       if (root) [root presentViewController:a animated:YES completion:nil];
     }
-
     NSLog(@"[Glow] Phase 2 debug — setupAllHooks complete");
   }
 }
@@ -280,7 +268,6 @@ static void setupAllHooks(void) {
   @autoreleasepool {
     loadP();
     _dyld_register_func_for_add_image(_glow_image_loaded);
-
     dispatch_async(dispatch_get_main_queue(), ^{
       [[NSNotificationCenter defaultCenter]
         addObserverForName:UIApplicationDidFinishLaunchingNotification
@@ -295,8 +282,7 @@ static void setupAllHooks(void) {
   }
 }
 
-// ─── Include Tab Bar (needed for override above) ───
-// Tab bar classes from Phase 1
+// ─── Tab Bar ───
 @interface GlowLongPress : UILongPressGestureRecognizer @end
 @implementation GlowLongPress
 - (instancetype)initWithTarget:(id)target action:(SEL)action {
@@ -305,7 +291,6 @@ static void setupAllHooks(void) {
 }
 @end
 
-@interface GlowTabBar : NSObject @end
 @implementation GlowTabBar
 + (UITabBar *)findInView:(UIView *)v {
   if ([v isKindOfClass:[UITabBar class]]) return (UITabBar *)v;
@@ -330,15 +315,13 @@ static void setupAllHooks(void) {
 }
 + (void)hLP:(UIGestureRecognizer *)g {
   if (g.state == UIGestureRecognizerStateBegan) {
-    SettingsViewController *vc = [[SettingsViewController alloc] init];
-    UINavigationController *n = [[UINavigationController alloc] initWithRootViewController:vc];
+    UINavigationController *n = [[UINavigationController alloc] initWithRootViewController:[[SettingsViewController alloc] init]];
     [topVC() presentViewController:n animated:YES completion:nil];
   }
 }
 @end
 
-// Settings
-@interface SettingsViewController : UITableViewController @end
+// ─── Settings ───
 @implementation SettingsViewController { NSArray *_sections; }
 - (instancetype)init {
   if ((self = [super initWithStyle:UITableViewStyleGrouped])) {
