@@ -1,9 +1,7 @@
-name: Analyze FB 560.x IPA Classes
+name: Deep FB 560.x IPA Analysis
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ master ]
 
 jobs:
   analyze:
@@ -14,88 +12,117 @@ jobs:
       - name: Install tools
         run: |
           brew install jtool2 2>/dev/null || true
+          pip3 install dsdump 2>/dev/null || true
 
       - name: Download FB IPA from release
         run: |
           gh release download fb-560-ipa --repo Long-Trinh-Tien/facebook-no-ads \
-            --pattern 'facebook.ipa' --dir /tmp/fb 2>/dev/null || \
-            echo "No IPA release found"
-          ls -la /tmp/fb/ 2>/dev/null
+            --pattern 'facebook.ipa' --dir /tmp/fb 2>&1
+          echo "IPA download check:"
+          ls -la /tmp/fb/facebook.ipa
         env:
           GH_TOKEN: ${{ github.token }}
 
       - name: Extract IPA
-        if: hashFiles('/tmp/fb/facebook.ipa') != ''
         run: |
           mkdir -p /tmp/fb/extracted
           unzip -o /tmp/fb/facebook.ipa -d /tmp/fb/extracted/
-          mkdir -p /tmp/results
+          echo "Extracted:"
+          ls -d /tmp/fb/extracted/Payload/Facebook.app/
+          ls -d /tmp/fb/extracted/Payload/Facebook.app/Frameworks/FBSharedFramework.framework/ 2>/dev/null || \
+            ls -d /tmp/fb/extracted/Payload/Facebook.app/Frameworks/FBSharedDynamicFramework.framework/ 2>/dev/null || \
+            echo "No FB frameworks found!"
 
-      - name: "RE-5 Analyze FB main binary (strings + selectors)"
-        if: hashFiles('/tmp/fb/extracted') != ''
+      - name: RE-5 Analyze FB main binary
         run: |
+          mkdir -p /tmp/results
           FB=/tmp/fb/extracted/Payload/Facebook.app/Facebook
-          mkdir -p /tmp/results
-
-          # Strings search for FB classes and selectors
+          
+          if [ ! -f "$FB" ]; then
+            echo "Main binary not found!" >> /tmp/results/error.txt
+            find /tmp/fb/extracted -name "Facebook" -type f | head -3 >> /tmp/results/error.txt
+            exit 0
+          fi
+          
+          # All FB class names
           strings "$FB" | grep -E "^FB[A-Z]" | sort -u > /tmp/results/fb_classnames.txt
-          echo "=== FB class names (sample) ==="
-          head -30 /tmp/results/fb_classnames.txt
+          echo "FB class names found: $(wc -l < /tmp/results/fb_classnames.txt)"
+          
+          # Seen/Story/Reel selectors
+          # Use '|| true' to prevent grep exit code 1 from stopping
+          echo "=== Seen selectors ===" > /tmp/results/fb_selectors.txt
+          strings "$FB" | grep -E "^_sendSeen|^_markThread|^_canMark|^MarkStory|^markThread" | sort -u >> /tmp/results/fb_selectors.txt 2>&1 || true
+          
+          echo "=== Download selectors ===" >> /tmp/results/fb_selectors.txt
+          strings "$FB" | grep -E "^videoURL|^playableURL|^HDPlayback|^SDPlayback|^download|^playable" | sort -u >> /tmp/results/fb_selectors.txt 2>&1 || true
+          
+          echo "=== Like/Interaction selectors ===" >> /tmp/results/fb_selectors.txt
+          strings "$FB" | grep -E "^performLike|^likeAction|^confirmLike|^advanceToNext|^nextItem" | sort -u >> /tmp/results/fb_selectors.txt 2>&1 || true
+          
+          echo "=== Ad/Sponsored selectors ===" >> /tmp/results/fb_selectors.txt
+          strings "$FB" | grep -E "^isSponsored|^isAd|^sponsoredData|^initWith|^category" | sort -u >> /tmp/results/fb_selectors.txt 2>&1 || true
+          
+          echo "=== Story/Reel class names ===" >> /tmp/results/fb_selectors.txt
+          grep -E "Story|Reel|Snack|Bucket|Seen" /tmp/results/fb_classnames.txt >> /tmp/results/fb_selectors.txt 2>&1 || true
 
-          echo ""
-          echo "=== Seen-related selectors ==="
-          strings "$FB" | grep -E "^_sendSeen|^_markThread|^_canMark|^MarkStory|^markThread|^seenState|^SeenState" | sort -u | head -30
-
-          echo ""
-          echo "=== Download-related selectors ==="
-          strings "$FB" | grep -E "^videoURL|^playableURL|^HDPlayback|^SDPlayback|^download" | sort -u | head -30
-
-          echo ""
-          echo "=== Like/Interaction selectors ==="
-          strings "$FB" | grep -E "^performLike|^likeAction|^confirmLike|^advanceToNext|^nextItem" | sort -u | head -20
-
-          echo ""
-          echo "=== Ad/PYMK selectors ==="
-          strings "$FB" | grep -E "^isSponsored|^isAd|^sponsoredData|^initWithFB|^initWithPando|^category" | sort -u | head -20
-
-          echo ""
-          echo "=== Story/Reel classes ==="
-          grep -E "Story|Reel|Snack|Bucket|Seen" /tmp/results/fb_classnames.txt | sort -u | head -30
-
-      - name: "RE-6 Analyze FBSharedFramework"
-        if: hashFiles('/tmp/fb/extracted') != ''
+      - name: RE-6 Analyze FBSharedFramework
         run: |
-          FWS=/tmp/fb/extracted/Payload/Facebook.app/Frameworks/FBSharedFramework.framework/FBSharedFramework
-          if [ ! -f "$FWS" ]; then
-            echo "FBSharedFramework not found, trying FBSharedDynamicFramework"
-            FWS=/tmp/fb/extracted/Payload/Facebook.app/Frameworks/FBSharedDynamicFramework.framework/FBSharedDynamicFramework
+          # Try multiple paths
+          FWS=$(find /tmp/fb/extracted -name "FBSharedFramework" -type f 2>/dev/null | head -1)
+          if [ -z "$FWS" ]; then
+            FWS=$(find /tmp/fb/extracted -name "FBSharedDynamicFramework" -type f 2>/dev/null | head -1)
+          fi
+          
+          if [ -n "$FWS" ]; then
+            echo "Analyzing: $FWS ($(ls -la "$FWS" | awk '{print $5}') bytes)"
+            
+            # dsdump
+            which dsdump && dsdump "$FWS" > /tmp/results/fbshared_dsdump.txt 2>&1 || true
+            
+            # jtool2
+            jtool2 --objc "$FWS" > /tmp/results/fbshared_jtool2.txt 2>&1 || true
+            
+            # Class names from strings
+            strings "$FWS" | grep -E "^FB[A-Z]" | sort -u > /tmp/results/fbshared_classnames.txt
+            echo "FB classes found: $(wc -l < /tmp/results/fbshared_classnames.txt)"
+            
+            # Target classes
+            echo "=== Story/Seen/Reel classes ===" > /tmp/results/fbshared_targets.txt
+            grep -E "Story|Seen|Reel|Snack|Bucket|Feed|Ad|Sponsor" /tmp/results/fbshared_classnames.txt | sort -u >> /tmp/results/fbshared_targets.txt
+            
+            # Method selectors
+            echo "=== FBSharedFramework selectors ===" > /tmp/results/fbshared_selectors.txt
+            for pattern in "seen" "Seen" "mark" "download" "story" "reel" "like" "next" "advance" "sponsored" "ad" "Ad"; do
+              strings "$FWS" | grep -E "^[a-z].*$pattern" 2>/dev/null | sort -u >> /tmp/results/fbshared_selectors.txt || true
+            done
+            echo "Unique selectors found: $(sort -u /tmp/results/fbshared_selectors.txt | wc -l)"
+            
+            # otool metadata
+            otool -oV "$FWS" > /tmp/results/fbshared_otool.txt 2>&1 || true
+            otool -L "$FWS" > /tmp/results/fbshared_deps.txt 2>&1 || true
+          else
+            echo "No FBSharedFramework found!" | tee /tmp/results/error.txt
+            find /tmp/fb/extracted -name "*.framework" -type d 2>/dev/null | head -10 > /tmp/results/frameworks_list.txt
+            echo "Available frameworks:" >> /tmp/results/error.txt
+            cat /tmp/results/frameworks_list.txt >> /tmp/results/error.txt
           fi
 
-          if [ -f "$FWS" ]; then
-            echo "=== Analyzing: $FWS ==="
+      - name: RE-7 Extract method type encodings from FB binary
+        run: |
+          FB=/tmp/fb/extracted/Payload/Facebook.app/Facebook
+          
+          if [ -f "$FB" ]; then
+            # Seen-related type encodings
+            echo "=== Seen type encodings ===" > /tmp/results/fb_typencodings.txt
+            strings "$FB" | grep -E "^v[0-9]*@.*Seen|^B[0-9]*@.*Seen|^v[0-9]*@.*canMark|^v[0-9]*@.*markThread" | sort -u >> /tmp/results/fb_typencodings.txt
             
-            # ObjC class metadata via jtool2
-            jtool2 --objc "$FWS" 2>/dev/null | head -500 > /tmp/results/fbshared_objc.txt || true
-            
-            # String-based class search
-            strings "$FWS" | grep -E "^FBSnacks|^FBStory|^FBReel|^FBFeed|^FBAd|^FBSpon|^FBMem" | sort -u \
-              > /tmp/results/fbshared_classes.txt
-            
-            echo "=== Target classes (Story/Seen/Reel) ==="
-            grep -E "Story|Seen|Reel|Snack|Bucket" /tmp/results/fbshared_classes.txt | sort -u | head -50
-            
-            echo ""
-            echo "=== Method selectors in FBSharedFramework ==="
-            strings "$FWS" | grep -E '^[a-z].+:$' | grep -E "seen|mark|download|story|reel|like|next|advance|sponsored|ad" | sort -u \
-              > /tmp/results/fbshared_selectors.txt
-            head -30 /tmp/results/fbshared_selectors.txt
-          else
-            echo "No FB frameworks found"
+            # Find ObjC method lists in __objc_const
+            echo "=== __objc_const (first 1000 lines) ===" >> /tmp/results/fb_typencodings.txt
+            otool -v -s __DATA __objc_const "$FB" 2>/dev/null | head -1000 >> /tmp/results/fb_typencodings.txt || true
           fi
 
       - name: Upload results
-        if: hashFiles('/tmp/results') != ''
         uses: actions/upload-artifact@v4
         with:
-          name: fb-560-class-analysis
+          name: fb-560-deep-analysis
           path: /tmp/results/

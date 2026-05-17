@@ -1,4 +1,4 @@
-name: Deep Glow.dylib RE (class-dump + disasm)
+name: Deep Glow.dylib RE
 
 on:
   workflow_dispatch:
@@ -20,183 +20,122 @@ jobs:
       - name: Install tools
         run: |
           brew install jtool2 2>/dev/null || true
+          # Install dsdump for ObjC class dump
+          pip3 install dsdump 2>/dev/null || true
 
-      - name: "RE-1 ObjC class-dump via jtool2"
+      - name: RE-1 ObjC class-dump
         run: |
           mkdir -p /tmp/results
           GLOW=/tmp/glow/Glow.dylib
 
-          # jtool2 ObjC dump
-          jtool2 --objc "$GLOW" > /tmp/results/objc_dump.txt 2>&1 || true
-          
-          # Try dsdump if available via pip
-          pip3 install dsdump 2>/dev/null && dsdump "$GLOW" > /tmp/results/dsdump.txt 2>&1 || true
-          
-          # Fallback: parse ObjC class list from nm
-          echo "=== ObjC Classes (from nm) ===" > /tmp/results/class_list.txt
-          nm "$GLOW" | grep '_OBJC_CLASS_\$' | grep -v '_NS\|_UI\|_PH\|_AV\|_CA\|_LS\|_OBJC_CLASS_\$_\$' | sort >> /tmp/results/class_list.txt
+          # 1. dsdump (best for ObjC/Swift)
+          which dsdump && dsdump "$GLOW" > /tmp/results/dsdump.txt 2>&1 || echo "no dsdump"
 
-      - name: "RE-2 ObjC metadata extraction"
+          # 2. jtool2 ObjC dump (try different flags)
+          jtool2 --objc "$GLOW" > /tmp/results/jtool2_objc.txt 2>&1 || true
+          jtool2 -arch arm64 -d objc "$GLOW" > /tmp/results/jtool2_objc_v2.txt 2>&1 || true
+          
+          # 3. nm class list (fallback)
+          nm "$GLOW" | grep _OBJC_CLASS_ | grep -v '_\$_\$\|_NS\|_UI\|_PH\|_AV\|_CA\|_LS' > /tmp/results/class_list.txt
+
+      - name: RE-2 ObjC metadata
         run: |
           GLOW=/tmp/glow/Glow.dylib
-
-          # Full ObjC metadata with otool
-          otool -oV "$GLOW" > /tmp/results/otool_ov_full.txt 2>&1 || true
-          
-          # Method type encodings
+          otool -oV "$GLOW" > /tmp/results/otool_ov.txt 2>&1 || true
           otool -v -s __TEXT __objc_methtype "$GLOW" > /tmp/results/methtypes.txt 2>&1 || true
-          
-          # CFString constants
           otool -v -s __DATA_CONST __cfstring "$GLOW" > /tmp/results/cfstrings.txt 2>&1 || true
-          
-          # ObjC constant data
           otool -v -s __DATA __objc_const "$GLOW" > /tmp/results/objc_const.txt 2>&1 || true
-          
-          # Selectors
           otool -v -s __DATA __objc_selrefs "$GLOW" > /tmp/results/selrefs.txt 2>&1 || true
 
-      - name: "RE-3 Find %ctor and key functions"
+      - name: RE-3 Constructor disassembly
         run: |
           GLOW=/tmp/glow/Glow.dylib
           
-          # Find all ObjC method symbols (exclude ffmpeg)
-          nm "$GLOW" | grep -E '\-\[|\+\[|_OBJC_CLASS_\$_' > /tmp/results/objc_symbols.txt 2>&1
-          echo ""
-          echo "=== Glow's own ObjC classes ==="
-          grep '_OBJC_CLASS_\$' /tmp/results/objc_symbols.txt | grep -v 'NS\|UI\|PH\|AV\|CA\|_OBJC_CLASS_\$_NS\|_OBJC_CLASS_\$_UI\|_OBJC_CLASS_\$_PH\|_OBJC_CLASS_\$_AV\|_OBJC_CLASS_\$_CA' | sort -u
-          
-          echo ""
-          echo "=== Glow's own methods (non-UIKit/Foundation) ==="
-          grep -E '\-\[|\+\[' /tmp/results/objc_symbols.txt | grep -v 'UI\|NS\|PH\|AV\|CA\|NSObject\|UIColor\|UIFont\|UIScreen' | sort -u
-          
-          echo ""
-          echo "=== __mod_init_func (constructor offset) ==="
-          xxd -s $((0xb1c0)) -l 4 "$GLOW"
-          
-          # Find where constructor points to
-          python3 -c "
-          import struct
-          with open('$GLOW', 'rb') as f:
-              f.seek(0xb1c0)
-              val = struct.unpack('<I', f.read(4))[0]
-              ctor_addr = 0x4000 + val
-              print(f'Constructor at: 0x{ctor_addr:x} (in __text)')
-          "
-
-      - name: "RE-4 Disassemble key functions"
-        run: |
-          GLOW=/tmp/glow/Glow.dylib
-
-          # Get constructor address
+          # Find constructor address from __init_offsets
           CTOR=$(python3 -c "
           import struct
           with open('$GLOW', 'rb') as f:
               f.seek(0xb1c0)
               val = struct.unpack('<I', f.read(4))[0]
-              print(f'0x{0x4000 + val:x}')
+              print(f'{0x4000 + val:x}')
           ")
+          echo "Constructor at: 0x$CTOR" > /tmp/results/ctor_info.txt
           
-          echo "=== Constructor at $CTOR ==="
-          # Disassemble constructor
-          jtool2 -d __text "$GLOW" 2>/dev/null | grep -A 200 "\<$CTOR\>" | head -200 > /tmp/results/ctor_disasm.txt
+          # Disassemble constructor using otool -tV (the whole function)
+          # Get the function length from disassembly and extract it
+          FULL_DISASM=$(otool -tV "$GLOW" 2>/dev/null)
+          echo "$FULL_DISASM" | awk '/^'$CTOR':/,/ret|blr|^[0-9a-f]+:/' | head -200 > /tmp/results/ctor_disasm.txt
           
-          echo ""
-          echo "=== text section boundaries ==="
-          otool -l "$GLOW" | grep -A4 "__TEXT,__text" | head -10 > /tmp/results/text_boundaries.txt
+          echo "Full disassembly size: $(echo "$FULL_DISASM" | wc -l) lines" > /tmp/results/disasm_stats.txt
           
-          echo ""
-          echo "=== Find non-ffmpeg functions (Glow's own code) ==="
-          # Get all function addresses from nm that are NOT ffmpeg
-          python3 << 'PYEOF'
-          import subprocess, re
-          result = subprocess.run(['nm', '/tmp/glow/Glow.dylib'], capture_output=True, text=True)
-          lines = result.stdout.strip().split('\n')
-          
-          # Find ObjC method addresses
-          objc_methods = []
-          for line in lines:
-              parts = line.strip().split()
-              if len(parts) < 3: continue
-              addr_str, sym_type = parts[0], parts[1]
-              if sym_type != 'T': continue  # Only text section symbols
-              name = ' '.join(parts[2:])
-              if '-[' in name or '+[' in name:
-                  # Skip system methods
-                  if name.startswith('-[UI') or name.startswith('+[UI') or \
-                     name.startswith('-[NS') or name.startswith('+[NS') or \
-                     name.startswith('-[PH') or name.startswith('-[AV'):
-                      continue
-                  objc_methods.append((int(addr_str, 16), name))
-          
-          # Sort by address and save
-          objc_methods.sort()
-          with open('/tmp/results/glow_methods.txt', 'w') as f:
-              for addr, name in objc_methods:
-                  f.write(f"0x{addr:x} {name}\n")
-          print(f"Found {len(objc_methods)} Glow-specific methods")
-          for addr, name in objc_methods:
-              print(f"  0x{addr:x} {name}")
-          PYEOF
+          # Also try jtool2 for the constructor specifically
+          jtool2 -d __text "$GLOW" 2>/dev/null | grep -A 300 "0x$CTOR" | head -200 > /tmp/results/ctor_jtool2.txt
 
-      - name: "RE-5 Disassemble each Glow method"
+      - name: RE-4 List all Glow-specific methods with addresses
         run: |
           GLOW=/tmp/glow/Glow.dylib
           
-          # Read method addresses and disassemble each
           python3 << 'PYEOF'
-          import subprocess, os
+          import subprocess
           
           GLOW = '/tmp/glow/Glow.dylib'
           
-          # Read method list
-          with open('/tmp/results/glow_methods.txt') as f:
-              methods = [line.strip().split(None, 1) for line in f if line.strip()]
+          # Get full disassembly
+          result = subprocess.run(['otool', '-tV', GLOW], capture_output=True, text=True, timeout=120)
+          disasm = result.stdout
           
-          # Disassemble each method (5 lines context before and after)
-          with open('/tmp/results/glow_methods_disasm.txt', 'w') as out:
-              for addr_str, name in methods:
+          # Get nm output for Glow's own symbols
+          result2 = subprocess.run(['nm', GLOW], capture_output=True, text=True, timeout=30)
+          
+          # Parse nm for Glow's own methods (no UIKit/Foundation)
+          methods = []
+          for line in result2.stdout.split('\n'):
+              parts = line.strip().split()
+              if len(parts) < 3: continue
+              addr_str, sym_type, name = parts[0], parts[1], ' '.join(parts[2:])
+              if sym_type != 'T': continue
+              if '-[' in name and not any(x in name for x in ['UIView', 'UIButton', 'UIViewController', 'NSObject', 'NSString', 'UIColor', 'UIFont', 'UIScreen', 'UITable']):
+                  # Get the function disassembly
                   addr = int(addr_str, 16)
-                  start = max(0, addr - 8)
-                  end = addr + 200
-                  result = subprocess.run(
-                      ['jtool2', '-d', '__text', GLOW],
-                      capture_output=True, text=True, timeout=30
-                  )
-                  # Extract the specific function from full disassembly
-                  out.write(f"\n{'='*60}\n")
-                  out.write(f"=== {name} @ {addr_str} ===\n")
-                  out.write(f"{'='*60}\n")
-                  
-                  # Use otool -tV for ARM64 disassembly
-                  result2 = subprocess.run(
-                      ['otool', '-tV', '-arch', 'arm64', GLOW],
-                      capture_output=True, text=True, timeout=60
-                  )
                   in_func = False
                   func_lines = []
-                  for line in result2.stdout.split('\n'):
-                      if line.strip().startswith(addr_str):
+                  for line2 in disasm.split('\n'):
+                      stripped = line2.strip()
+                      if stripped.startswith(addr_str):
                           in_func = True
                       if in_func:
-                          func_lines.append(line)
-                          if len(func_lines) > 50:
+                          func_lines.append(stripped)
+                          if len(func_lines) > 60:
                               break
-                  out.write('\n'.join(func_lines))
-                  out.write('\n')
+                  
+                  methods.append((addr, name, func_lines))
+          
+          with open('/tmp/results/glow_methods.txt', 'w') as f:
+              for addr, name, lines in methods:
+                  f.write(f"0x{addr:x} {name}\n")
+          
+          # Also write disassembly for methods
+          with open('/tmp/results/glow_methods_disasm.txt', 'w') as f:
+              for addr, name, lines in methods:
+                  f.write(f"\n{'='*60}\n")
+                  f.write(f"0x{addr:x} {name}\n")
+                  f.write(f"{'='*60}\n")
+                  for line in lines[:50]:
+                      f.write(line + '\n')
+          
+          print(f"Found {len(methods)} Glow-specific methods")
+          for addr, name, _ in methods[:20]:
+              print(f"  0x{addr:x} {name}")
           PYEOF
 
-      - name: "RE-6 Extract FB-related strings and selectors"
+      - name: RE-5 Extract FB selectors
         run: |
           GLOW=/tmp/glow/Glow.dylib
           
-          echo "=== FB-related selectors ===" > /tmp/results/fb_selectors.txt
+          echo "=== FB selectors ===" > /tmp/results/fb_selectors.txt
           strings "$GLOW" | grep -E "^(_canMark|MarkStory|_markThread|storyBucket|initWithFB|initWithPando|tabbarHeight|performLike|advanceTo|downloadMedia|extractURL|buttonFor|videoURL|playableURL|mediaObject|isStory|setIsStory)" | sort -u >> /tmp/results/fb_selectors.txt
-          
-          echo "" >> /tmp/results/fb_selectors.txt
-          echo "=== Full selector list (filtered) ===" >> /tmp/results/fb_selectors.txt
-          strings "$GLOW" | grep -E '^[a-z].+:$' | grep -E "seen|mark|download|story|reel|feed|like|next|advance|tab|nav|gesture" | sort -u >> /tmp/results/fb_selectors.txt
 
-      - name: Upload all results
+      - name: Upload results
         uses: actions/upload-artifact@v4
         with:
           name: glow-deep-re
