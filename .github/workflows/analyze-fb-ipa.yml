@@ -1,12 +1,7 @@
-name: Analyze Facebook IPA
+name: Analyze FB 560.x IPA Classes
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - qwen-glow
-    paths:
-      - '.github/workflows/analyze-fb-ipa.yml'
 
 jobs:
   analyze:
@@ -14,86 +9,104 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download facebook.ipa from Tailscale Funnel
+      - name: Install tools
         run: |
-          curl -L -o facebook.ipa "https://tmy-tuf-1.danio-map.ts.net/facebook.ipa"
-          ls -lh facebook.ipa
-          file facebook.ipa
+          brew install class-dump 2>/dev/null || true
+
+      - name: Download FB IPA
+        run: |
+          # IPA too large for repo, need manual upload to release
+          # For now, check if available
+          gh release download fb-560-ipa --repo Long-Trinh-Tien/facebook-no-ads \
+            --pattern 'facebook.ipa' --dir /tmp/fb 2>/dev/null || \
+            echo "No IPA release found. Create release 'fb-560-ipa' with facebook.ipa"
+          ls -la /tmp/fb/ 2>/dev/null
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Extract IPA
+        if: hashFiles('/tmp/fb/facebook.ipa') != ''
         run: |
-          unzip -q facebook.ipa -d fb_extract
-          ls -la fb_extract/Payload/
-          APP_DIR=$(ls fb_extract/Payload/)
-          echo "APP_DIR=$APP_DIR" >> $GITHUB_ENV
-          # Find the actual binary (might not match .app name)
-          BINARY=$(find "fb_extract/Payload/$APP_DIR" -maxdepth 1 -type f -perm +111 | head -1)
-          echo "BINARY=$BINARY" >> $GITHUB_ENV
-          ls -la "$BINARY"
-          file "$BINARY"
+          mkdir -p /tmp/fb/extracted
+          unzip -o /tmp/fb/facebook.ipa -d /tmp/fb/extracted/
+          echo "Extracted to /tmp/fb/extracted"
+          ls -la /tmp/fb/extracted/Payload/Facebook.app/Frameworks/ 2>/dev/null | head -10
 
-      - name: otool - architecture, headers, linked libs
+      - name: RE-5: class-dump FB main binary
+        if: hashFiles('/tmp/fb/extracted') != ''
         run: |
-          set +e
-          mkdir -p analysis_output
-          echo "=== file ===" > analysis_output/file_info.txt
-          file "$BINARY" >> analysis_output/file_info.txt
-          echo "=== otool -hv ===" > analysis_output/otool_hv.txt
-          otool -arch arm64 -hv "$BINARY" >> analysis_output/otool_hv.txt 2>&1
-          echo "=== otool -L ===" > analysis_output/otool_L.txt
-          otool -arch arm64 -L "$BINARY" >> analysis_output/otool_L.txt 2>&1
-          echo "=== otool -l (filtered) ===" > analysis_output/otool_l.txt
-          otool -arch arm64 -l "$BINARY" | grep -A2 -E "(segname|LC_SEGMENT|LC_DYLD)" >> analysis_output/otool_l.txt 2>&1 || true
+          mkdir -p /tmp/results
 
-      - name: class-dump ObjC headers
+          class-dump /tmp/fb/extracted/Payload/Facebook.app/Facebook \
+            > /tmp/results/fb_main_class_dump.txt 2>&1 || true
+          
+          echo "=== Main binary classes (Story/Seen/Reel/Feed/Ad) ==="
+          grep -E "@interface\s+(FB|\w*Story|\w*Seen|\w*Reel|\w*Feed|\w*Ad|\w*Sponsored|\w*Download|\w*Like)" \
+            /tmp/results/fb_main_class_dump.txt | head -50
+
+      - name: RE-6: class-dump FBSharedFramework
+        if: hashFiles('/tmp/fb/extracted') != ''
         run: |
-          set +e
-          brew install class-dump 2>/dev/null || true
-          mkdir -p classdump_output
-          if command -v class-dump &>/dev/null; then
-            class-dump -H -o classdump_output "$BINARY" 2>&1 || echo "class-dump FAILED"
-            echo "class-dump headers: $(ls classdump_output/ | wc -l)"
+          FBSHARED=/tmp/fb/extracted/Payload/Facebook.app/Frameworks/FBSharedFramework.framework/FBSharedFramework
+          
+          if [ -f "$FBSHARED" ]; then
+            class-dump "$FBSHARED" > /tmp/results/fbshared_class_dump.txt 2>&1 || true
+            
+            echo "=== Target classes (Story/Seen/Reel) ==="
+            grep -E "@interface\s+(FBSnacks|FBStory|FBReel|FBFeed|FBAd|FBSpon)" \
+              /tmp/results/fbshared_class_dump.txt | head -50
+            
+            echo ""
+            echo "=== Seen-related methods ==="
+            grep -E "(canMark|markSeen|sendSeen|markThread|SeenState|Bucket)" \
+              /tmp/results/fbshared_class_dump.txt | head -30
+            
+            echo ""
+            echo "=== Download-related methods ==="
+            grep -E "(videoURL|playableURL|HDPlayback|SDPlayback|download|save)" \
+              /tmp/results/fbshared_class_dump.txt | head -30
+            
+            echo ""
+            echo "=== Like/Interaction methods ==="
+            grep -E "(performLike|likeAction|ConfirmLike|ReelsLike)" \
+              /tmp/results/fbshared_class_dump.txt | head -20
+            
+            echo ""
+            echo "=== Auto-advance methods ==="
+            grep -E "(advanceToNext|autoAdvance|nextItem|navigationAction)" \
+              /tmp/results/fbshared_class_dump.txt | head -20
+            
+            echo ""
+            echo "=== Ad/PYMK/Recs methods ==="
+            grep -E "(isSponsored|isAd|sponsoredData|category|FBTree|PandoTree)" \
+              /tmp/results/fbshared_class_dump.txt | head -20
           else
-            pip3 install class-dump 2>&1 || true
-            python3 -m class_dump -H -o classdump_output "$BINARY" 2>&1 || echo "class-dump FAILED"
+            echo "FBSharedFramework not found at $FBSHARED"
           fi
 
-      - name: strings - search for key selectors/classes
+      - name: RE-7: Extract method type encodings from FB
+        if: hashFiles('/tmp/fb/extracted') != ''
         run: |
-          set +e
-          mkdir -p analysis_output
-          strings "$BINARY" > analysis_output/strings_all.txt 2>&1
-          echo "=== Seen-related ===" > analysis_output/strings_seen.txt
-          strings "$BINARY" | grep -iE "(seen|snacks|mutator|bucket|markThread|markStory)" >> analysis_output/strings_seen.txt 2>&1 || true
-          echo "=== Video/Media URL ===" > analysis_output/strings_video.txt
-          strings "$BINARY" | grep -iE "(videoURL|videoUrl|playableURL|streamURL|mediaURL|downloadURL|hdVideo|sdVideo)" >> analysis_output/strings_video.txt 2>&1 || true
-          echo "=== Like/Action ===" > analysis_output/strings_like.txt
-          strings "$BINARY" | grep -iE "(likeAction|performLike|likeButton|likeHandler|FBLike)" >> analysis_output/strings_like.txt 2>&1 || true
-          echo "=== Story Viewer ===" > analysis_output/strings_story.txt
-          strings "$BINARY" | grep -iE "(StoryViewer|StoryPlayer|StoryContent|ReelsViewer|ReelsPlayer)" >> analysis_output/strings_story.txt 2>&1 || true
-          echo "=== FBMem/FBTree ===" > analysis_output/strings_mem.txt
-          strings "$BINARY" | grep -iE "(FBMem|FBTree|initWithFB|FBVideoChannel)" >> analysis_output/strings_mem.txt 2>&1 || true
-          echo "=== All FB class strings ===" > analysis_output/strings_fb.txt
-          strings "$BINARY" | grep -iE "^FB[A-Z]" | sort -u >> analysis_output/strings_fb.txt 2>&1 || true
+          FB=/tmp/fb/extracted/Payload/Facebook.app/Facebook
+          
+          echo "=== Seen-related selectors ==="
+          strings "$FB" | grep -E "^_sendSeenThread|^_markThreadAsSeen|^_canMarkStory|^MarkStoryAsSeen|^markThreadAsSeen" | sort -u | head -20
+          
+          echo ""
+          echo "=== Download-related selectors ==="
+          strings "$FB" | grep -E "^videoURL|^playableURL|^HDPlayback|^SDPlayback|^download" | sort -u | head -20
+          
+          echo ""
+          echo "=== Like selectors ==="
+          strings "$FB" | grep -E "^performLike|^likeAction|^confirmLike" | sort -u | head -20
+          
+          echo ""
+          echo "=== Auto-advance selectors ==="
+          strings "$FB" | grep -E "^advanceToNext|^nextItem" | sort -u | head -20
 
-      - name: nm - symbols
-        run: |
-          set +e
-          mkdir -p analysis_output
-          echo "=== nm -g (global symbols) ===" > analysis_output/nm_g.txt
-          nm -arch arm64 -g "$BINARY" 2>&1 | grep -iE "(FB|snacks|seen|video|story)" | head -500 >> analysis_output/nm_g.txt 2>&1 || true
-          echo "=== nm -u (undefined) ===" > analysis_output/nm_u.txt
-          nm -arch arm64 -u "$BINARY" 2>&1 | grep -iE "(FB|snacks)" | head -200 >> analysis_output/nm_u.txt 2>&1 || true
-
-      - name: Upload analysis artifacts
+      - name: Upload results
+        if: hashFiles('/tmp/results') != ''
         uses: actions/upload-artifact@v4
         with:
-          name: fb-ipa-analysis
-          path: analysis_output/**
-
-      - name: Upload class-dump headers
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: fb-classdump-headers
-          path: classdump_output/**
+          name: fb-560-class-analysis
+          path: /tmp/results/

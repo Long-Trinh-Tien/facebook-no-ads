@@ -1,4 +1,4 @@
-name: Analyze Original Glow Structure
+name: Deep Glow.dylib RE (class-dump + disasm)
 
 on:
   workflow_dispatch:
@@ -9,71 +9,196 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download original Glow from our release
+      - name: Download Glow.dylib from release
         run: |
-          gh release download glow-original --repo Long-Trinh-Tien/facebook-no-ads
-          ls -la glow.deb
+          gh release download glow-original --repo Long-Trinh-Tien/facebook-no-ads \
+            --pattern 'Glow.dylib' --dir /tmp/glow
+          ls -la /tmp/glow/Glow.dylib
         env:
           GH_TOKEN: ${{ github.token }}
 
-      - name: Extract dylib
+      - name: Install tools
         run: |
-          mkdir -p /tmp/glow_out
-          cd /tmp/glow_out
-          ar x ${{ github.workspace }}/glow.deb
-          # Handle lzma compression
-          if [ -f data.tar.lzma ]; then
-            brew install xz 2>/dev/null || true
-            lzma -d data.tar.lzma
-            tar xf data.tar
-          elif [ -f data.tar.xz ]; then
-            tar xf data.tar.xz
-          elif [ -f data.tar.gz ]; then
-            tar xf data.tar.gz
-          elif [ -f data.tar.zst ]; then
-            tar xf data.tar.zst
-          fi
-          GLOW=$(find /tmp/glow_out -name "Glow.dylib" 2>/dev/null | head -1)
-          echo "GLOW=$GLOW" >> $GITHUB_ENV
+          brew install class-dump jtool2 2>/dev/null || true
+          pip3 install dsdump 2>/dev/null || true
 
-      - name: Install jtool2
+      - name: RE-1: ObjC class-dump
         run: |
-          brew install jtool2 2>/dev/null || true
-          which jtool2 || echo "jtool2 not found"
-
-      - name: Full analysis
-        run: |
-          GLOW="${{ env.GLOW }}"
-          echo "Analyzing: $GLOW"
-          ls -la "$GLOW"
-          
           mkdir -p /tmp/results
-          
-          file "$GLOW" > /tmp/results/fileinfo.txt
-          otool -L "$GLOW" > /tmp/results/libraries.txt
-          otool -l "$GLOW" > /tmp/results/loadcmds.txt
-          
-          nm -gU "$GLOW" > /tmp/results/exported_syms.txt 2>&1
-          nm -u "$GLOW" | sort > /tmp/results/imported_syms.txt 2>&1
-          nm "$GLOW" | grep _OBJC_CLASS > /tmp/results/objc_classes.txt 2>&1
-          
-          strings "$GLOW" > /tmp/results/strings.txt 2>&1
-          strings "$GLOW" | grep -E '^[a-z].+:$' | sort -u > /tmp/results/selectors.txt 2>&1
-          
-          jtool2 --objc "$GLOW" > /tmp/results/objc_dump.txt 2>&1 || true
-          
-          jtool2 -d __text "$GLOW" 2>/dev/null | head -3000 > /tmp/results/disasm_header.txt
-          jtool2 -d __text "$GLOW" 2>/dev/null | tail -3000 > /tmp/results/disasm_tail.txt
-          
-          jtool2 --analyze "$GLOW" 2>/dev/null > /tmp/results/analyze.txt || true
-          
-          nm -u "$GLOW" | grep -i "hook\|substrate\|MSHook\|logos\|method_set\|class_replace\|class_addMethod" \
-            > /tmp/results/hook_imports.txt 2>&1 || echo "none found" > /tmp/results/hook_imports.txt
-          
-          echo "complete" > /tmp/results/complete.txt
+          GLOW=/tmp/glow/Glow.dylib
 
-      - name: Upload results
+          # class-dump to headers
+          class-dump -H "$GLOW" -o /tmp/results/headers/ 2>&1 || echo "class-dump header fail"
+          class-dump "$GLOW" > /tmp/results/objc_class_dump.txt 2>&1 || true
+          
+          # jtool2 ObjC dump
+          jtool2 --objc "$GLOW" > /tmp/results/jtool2_objc.txt 2>&1 || true
+          
+          # Count classes
+          grep "@interface\|@protocol" /tmp/results/objc_class_dump.txt | head -40 > /tmp/results/class_list.txt
+
+      - name: RE-2: ObjC metadata extraction
+        run: |
+          GLOW=/tmp/glow/Glow.dylib
+
+          # Full ObjC metadata with otool
+          otool -oV "$GLOW" > /tmp/results/otool_ov_full.txt 2>&1 || true
+          
+          # Method type encodings
+          otool -v -s __TEXT __objc_methtype "$GLOW" > /tmp/results/methtypes.txt 2>&1 || true
+          
+          # CFString constants
+          otool -v -s __DATA_CONST __cfstring "$GLOW" > /tmp/results/cfstrings.txt 2>&1 || true
+          
+          # ObjC constant data
+          otool -v -s __DATA __objc_const "$GLOW" > /tmp/results/objc_const.txt 2>&1 || true
+          
+          # Selectors
+          otool -v -s __DATA __objc_selrefs "$GLOW" > /tmp/results/selrefs.txt 2>&1 || true
+
+      - name: RE-3: Find %ctor and key functions
+        run: |
+          GLOW=/tmp/glow/Glow.dylib
+          
+          # Find all ObjC method symbols (exclude ffmpeg)
+          nm "$GLOW" | grep -E '\-\[|\+\[|_OBJC_CLASS_\$_' > /tmp/results/objc_symbols.txt 2>&1
+          echo ""
+          echo "=== Glow's own ObjC classes ==="
+          grep '_OBJC_CLASS_\$' /tmp/results/objc_symbols.txt | grep -v 'NS\|UI\|PH\|AV\|CA\|_OBJC_CLASS_\$_NS\|_OBJC_CLASS_\$_UI\|_OBJC_CLASS_\$_PH\|_OBJC_CLASS_\$_AV\|_OBJC_CLASS_\$_CA' | sort -u
+          
+          echo ""
+          echo "=== Glow's own methods (non-UIKit/Foundation) ==="
+          grep -E '\-\[|\+\[' /tmp/results/objc_symbols.txt | grep -v 'UI\|NS\|PH\|AV\|CA\|NSObject\|UIColor\|UIFont\|UIScreen' | sort -u
+          
+          echo ""
+          echo "=== __mod_init_func (constructor offset) ==="
+          xxd -s $((0xb1c0)) -l 4 "$GLOW"
+          
+          # Find where constructor points to
+          python3 -c "
+          import struct
+          with open('$GLOW', 'rb') as f:
+              f.seek(0xb1c0)
+              val = struct.unpack('<I', f.read(4))[0]
+              ctor_addr = 0x4000 + val
+              print(f'Constructor at: 0x{ctor_addr:x} (in __text)')
+          "
+
+      - name: RE-4: Disassemble key functions
+        run: |
+          GLOW=/tmp/glow/Glow.dylib
+
+          # Get constructor address
+          CTOR=$(python3 -c "
+          import struct
+          with open('$GLOW', 'rb') as f:
+              f.seek(0xb1c0)
+              val = struct.unpack('<I', f.read(4))[0]
+              print(f'0x{0x4000 + val:x}')
+          ")
+          
+          echo "=== Constructor at $CTOR ==="
+          # Disassemble constructor
+          jtool2 -d __text "$GLOW" 2>/dev/null | grep -A 200 "\<$CTOR\>" | head -200 > /tmp/results/ctor_disasm.txt
+          
+          echo ""
+          echo "=== text section boundaries ==="
+          otool -l "$GLOW" | grep -A4 "__TEXT,__text" | head -10 > /tmp/results/text_boundaries.txt
+          
+          echo ""
+          echo "=== Find non-ffmpeg functions (Glow's own code) ==="
+          # Get all function addresses from nm that are NOT ffmpeg
+          python3 << 'PYEOF'
+          import subprocess, re
+          result = subprocess.run(['nm', '/tmp/glow/Glow.dylib'], capture_output=True, text=True)
+          lines = result.stdout.strip().split('\n')
+          
+          # Find ObjC method addresses
+          objc_methods = []
+          for line in lines:
+              parts = line.strip().split()
+              if len(parts) < 3: continue
+              addr_str, sym_type = parts[0], parts[1]
+              if sym_type != 'T': continue  # Only text section symbols
+              name = ' '.join(parts[2:])
+              if '-[' in name or '+[' in name:
+                  # Skip system methods
+                  if name.startswith('-[UI') or name.startswith('+[UI') or \
+                     name.startswith('-[NS') or name.startswith('+[NS') or \
+                     name.startswith('-[PH') or name.startswith('-[AV'):
+                      continue
+                  objc_methods.append((int(addr_str, 16), name))
+          
+          # Sort by address and save
+          objc_methods.sort()
+          with open('/tmp/results/glow_methods.txt', 'w') as f:
+              for addr, name in objc_methods:
+                  f.write(f"0x{addr:x} {name}\n")
+          print(f"Found {len(objc_methods)} Glow-specific methods")
+          for addr, name in objc_methods:
+              print(f"  0x{addr:x} {name}")
+          PYEOF
+
+      - name: RE-5: Disassemble each Glow method
+        run: |
+          GLOW=/tmp/glow/Glow.dylib
+          
+          # Read method addresses and disassemble each
+          python3 << 'PYEOF'
+          import subprocess, os
+          
+          GLOW = '/tmp/glow/Glow.dylib'
+          
+          # Read method list
+          with open('/tmp/results/glow_methods.txt') as f:
+              methods = [line.strip().split(None, 1) for line in f if line.strip()]
+          
+          # Disassemble each method (5 lines context before and after)
+          with open('/tmp/results/glow_methods_disasm.txt', 'w') as out:
+              for addr_str, name in methods:
+                  addr = int(addr_str, 16)
+                  start = max(0, addr - 8)
+                  end = addr + 200
+                  result = subprocess.run(
+                      ['jtool2', '-d', '__text', GLOW],
+                      capture_output=True, text=True, timeout=30
+                  )
+                  # Extract the specific function from full disassembly
+                  out.write(f"\n{'='*60}\n")
+                  out.write(f"=== {name} @ {addr_str} ===\n")
+                  out.write(f"{'='*60}\n")
+                  
+                  # Use otool -tV for ARM64 disassembly
+                  result2 = subprocess.run(
+                      ['otool', '-tV', '-arch', 'arm64', GLOW],
+                      capture_output=True, text=True, timeout=60
+                  )
+                  in_func = False
+                  func_lines = []
+                  for line in result2.stdout.split('\n'):
+                      if line.strip().startswith(addr_str):
+                          in_func = True
+                      if in_func:
+                          func_lines.append(line)
+                          if len(func_lines) > 50:
+                              break
+                  out.write('\n'.join(func_lines))
+                  out.write('\n')
+          PYEOF
+
+      - name: RE-6: Extract FB-related strings and selectors
+        run: |
+          GLOW=/tmp/glow/Glow.dylib
+          
+          echo "=== FB-related selectors ===" > /tmp/results/fb_selectors.txt
+          strings "$GLOW" | grep -E "^(_canMark|MarkStory|_markThread|storyBucket|initWithFB|initWithPando|tabbarHeight|performLike|advanceTo|downloadMedia|extractURL|buttonFor|videoURL|playableURL|mediaObject|isStory|setIsStory)" | sort -u >> /tmp/results/fb_selectors.txt
+          
+          echo "" >> /tmp/results/fb_selectors.txt
+          echo "=== Full selector list (filtered) ===" >> /tmp/results/fb_selectors.txt
+          strings "$GLOW" | grep -E '^[a-z].+:$' | grep -E "seen|mark|download|story|reel|feed|like|next|advance|tab|nav|gesture" | sort -u >> /tmp/results/fb_selectors.txt
+
+      - name: Upload all results
         uses: actions/upload-artifact@v4
         with:
-          name: glow-original-analysis
+          name: glow-deep-re
           path: /tmp/results/
