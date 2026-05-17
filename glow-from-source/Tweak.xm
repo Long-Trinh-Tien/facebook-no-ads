@@ -1,22 +1,14 @@
-// STAGE 1 — Hook Engine Confirmed
-// method_setImplementation works. objc_msgSend has issues from constructor.
-// Use C function pointer for calling originals.
-// Verify: hook GlowTest.test → return 999, confirm via file.
+// STAGE 1 — Dynamic class via objc_allocateClassPair
+// @implementation GlowTest crashes pre-constructor on iOS 16+ sideload
+// Create class DYNAMICALLY in constructor instead
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <objc/runtime.h>
 
-// Custom test class
-@interface GlowTest : NSObject
-- (int)test;
-@end
-@implementation GlowTest
-- (int)test { return 1; }
-@end
-
 // C replacement function
 static int hookedTest(id self, SEL _cmd) { return 999; }
+static int origTest(id self, SEL _cmd) { return 1; }
 
 __attribute__((constructor))
 static void glow_init(void) {
@@ -27,31 +19,47 @@ static void glow_init(void) {
   FILE *f = fopen(path, "w");
   if (!f) return;
   
-  // Setup via C runtime
-  Class cls = objc_getClass("GlowTest");
-  SEL sel = sel_registerName("test");
-  Method m = class_getInstanceMethod(cls, sel);
+  // Create a new class at runtime (bypasses compile-time ObjC registration)
+  Class newClass = objc_allocateClassPair(objc_getClass("NSObject"), "GlowDynamicTest", 0);
+  if (!newClass) {
+    fprintf(f, "FAIL: objc_allocateClassPair\n");
+    fclose(f);
+    return;
+  }
   
-  // Create instance via C API (bypasses objc_msgSend)
-  id obj = class_createInstance(cls, 0);
+  // Add method
+  class_addMethod(newClass, sel_registerName("test"), (IMP)origTest, "i@:");
   
-  // Call original via C function pointer
-  IMP orig = method_getImplementation(m);
-  int before = ((int(*)(id, SEL))orig)(obj, sel);
+  // Register
+  objc_registerClassPair(newClass);
+  
+  // Create instance
+  id obj = class_createInstance(newClass, 0);
+  if (!obj) {
+    fprintf(f, "FAIL: class_createInstance\n");
+    fclose(f);
+    return;
+  }
+  
+  // Test before hook
+  IMP orig = class_getMethodImplementation(newClass, sel_registerName("test"));
+  int before = ((int(*)(id, SEL))orig)(obj, sel_registerName("test"));
   
   // Hook!
+  Method m = class_getInstanceMethod(newClass, sel_registerName("test"));
   method_setImplementation(m, (IMP)hookedTest);
   
-  // Call hooked via C function pointer
-  int after = ((int(*)(id, SEL))hookedTest)(obj, sel);
+  // Test after hook
+  IMP hooked = class_getMethodImplementation(newClass, sel_registerName("test"));
+  int after = ((int(*)(id, SEL))hooked)(obj, sel_registerName("test"));
   
-  fprintf(f, "GlowTest.test() before hook: %d\n", before);
-  fprintf(f, "GlowTest.test() after hook:  %d\n", after);
+  fprintf(f, "Before: %d\n", before);
+  fprintf(f, "After:  %d\n", after);
   
   if (before == 1 && after == 999)
-    fprintf(f, "\nHOOK ENGINE: CONFIRMED ✅\n");
+    fprintf(f, "\nHOOK ENGINE: CONFIRMED on dynamic class ✅\n");
   else
-    fprintf(f, "\nHOOK ENGINE: UNEXPECTED %d -> %d\n", before, after);
+    fprintf(f, "\nUNEXPECTED: %d -> %d\n", before, after);
   
   fclose(f);
 }
