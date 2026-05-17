@@ -27,7 +27,7 @@ static void loadP() {
 static void saveP() { [P writeToFile:kPrefsPath atomically:YES]; }
 
 // ─── verifyTypeEncoding helper for Phase 2+ ───
-static BOOL verifyTypeEncoding(Class cls, SEL sel, const char *expected) {
+__attribute__((unused)) static BOOL verifyTypeEncoding(Class cls, SEL sel, const char *expected) {
   Method m = class_getInstanceMethod(cls, sel);
   if (!m) { NSLog(@"[Glow] SKIP: method not found %s %s", class_getName(cls), sel_getName(sel)); return NO; }
   const char *actual = method_getTypeEncoding(m);
