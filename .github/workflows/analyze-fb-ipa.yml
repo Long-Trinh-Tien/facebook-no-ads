@@ -288,9 +288,39 @@ jobs:
                       rel_val = int(rel_offsets[i], 16)
                       type_str = type_strs[i]
                       
-                      # The RELATIVE offset in otool output is relative to __objc_methname base
-                      # selector_addr = methname_base + rel_val
-                      name_addr = methname_base + rel_val
+                      # Formula: slided_selector = (slided_ml_base + 8 + i*12) + (int32)rel_val
+                      # We need: unslided_selector = (unslided_ml_base + 8 + i*12) + (int32)rel_val
+                      # The slide that converts unslided to slided is consistent
+                      # ml_addr from otool IS slided in this output
+                      # We need to convert back: unslided = slided - (slide_from_ml_addr)
+                      # Use the selectors dict keyed by UNSLIDED addresses from __objc_methname
+                      # slide = ml_addr - unslided_ml_addr
+                      # We don't know unslided_ml_addr, BUT:
+                      # The difference between a selector's slided and unslided address 
+                      # equals the difference between ml_addr and its unslided version
+                      # So: unslided_selector = slided_selector - slide
+                      # And: unslided_ml_addr + slide = ml_addr (the seen value)
+                      # Since the selectors dict has UNSLIDED addresses:
+                      # We need to compute the unslided selector address
+                      
+                      # Try multiple formulas:
+                      # F1: slided_sel = ml_addr + 8 + i*12 + rel_val
+                      slided_sel = ml_addr + 8 + i * 12 + (rel_val if rel_val < 0x80000000 else rel_val - 0x100000000)
+                      
+                      # The selectors dict is keyed by UNSLIDED addresses starting at methname_base
+                      # We need to find the offset within __objc_methname section
+                      # The selector address (either slided or unslided) should be within methname range
+                      # Let's try both interpretations
+                      
+                      # Try 1: address IS unslided (otool shows unslided values)
+                      name_addr = slided_sel
+                      sel_name = selectors.get(name_addr, f"UNKNOWN_0x{name_addr:x}")
+                      
+                      # Try 2: adjust to unslided by subtracting a base
+                      if sel_name.startswith('UNKNOWN'):
+                          # The slided address - unslided_base = relative_offset_within_methname
+                          # Try using the second value from parentheses if available
+                          pass  # Simplified - just report what we have
                       
                       # Look up in selectors dictionary
                       sel_name = selectors.get(name_addr, f"UNKNOWN_0x{name_addr:x}")

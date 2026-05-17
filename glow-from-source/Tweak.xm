@@ -16,6 +16,35 @@ static const uint8_t _glow_size_padding[15728640] = {0};
 static void _glow_image_loaded(const struct mach_header *mh, intptr_t vmaddr_slide) {}
 
 static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.dvntm.glowprefs.plist";
+
+// ─── File Logging ───
+static void GlowLog(NSString *format, ...) {
+  va_list args;
+  va_start(args, format);
+  NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
+  va_end(args);
+  NSLog(@"[Glow] %@", msg);
+  @try {
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *docDir = [paths firstObject];
+    if (docDir) {
+      NSString *logPath = [docDir stringByAppendingPathComponent:@"glow_debug.txt"];
+      NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
+      if (!fh) {
+        [[NSFileManager defaultManager] createFileAtPath:logPath contents:nil attributes:nil];
+        fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
+      }
+      if (fh) {
+        [fh seekToEndOfFile];
+        NSString *line = [NSString stringWithFormat:@"[%@] %@\n", [NSDate date], msg];
+        [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+        [fh closeFile];
+      }
+    }
+  } @catch (NSException *e) {
+    NSLog(@"[Glow] log error: %@", e.reason);
+  }
+}
 static NSMutableDictionary *P;
 #define PBOOL(k,d) ([P[k] ?: @(d) boolValue])
 #define PSET(k,v) (P[k] = v)
@@ -119,6 +148,36 @@ static UIViewController *topVC() {
   }
 }
 @end
+
+// ─── Runtime Class Discovery ───
+static void discoverFBClasses(void) {
+  int count;
+  Class *classes = objc_copyClassList(&count);
+  if (!classes) return;
+
+  GlowLog(@"=== FB Class Discovery (%d total classes) ===", count);
+  for (int i = 0; i < count; i++) {
+    const char *name = class_getName(classes[i]);
+    if (!name) continue;
+    if (strstr(name, "FBSnacks") || strstr(name, "FBStory") || strstr(name, "FBReel") ||
+        strstr(name, "SeenState") || strstr(name, "SeenMutator") || strstr(name, "ShortsSeen") ||
+        strstr(name, "ViewerSheet") || strstr(name, "Sponsored") || strstr(name, "FeedStory")) {
+      // Log the class and its methods
+      unsigned int mc;
+      Method *methods = class_copyMethodList(classes[i], &mc);
+      if (methods) {
+        GlowLog(@"Class: %s (%d methods)", name, mc);
+        for (unsigned int j = 0; j < mc && j < 20; j++) {
+          SEL sel = method_getName(methods[j]);
+          const char *enc = method_getTypeEncoding(methods[j]);
+          GlowLog(@"  [%d] %s -> %s", j, sel ? sel_getName(sel) : "(null)", enc ?: "(null)");
+        }
+        free(methods);
+      }
+    }
+  }
+  free(classes);
+}
 
 // ─── MediaExtractor ───
 @interface MediaExtractor : NSObject
@@ -271,10 +330,15 @@ static void injectDownloadBtn(UIView *target, NSString *urlStr) {
       }
     }
 
-    // 5. Tab bar long press
+    // 5. Class discovery (debug: logs to Documents/glow_debug.txt)
+    dispatch_async(dispatch_get_main_queue(), ^{
+      discoverFBClasses();
+    });
+
+    // 6. Tab bar long press
     [GlowTabBar install];
 
-    // 6. Welcome
+    // 7. Welcome
     if (!PBOOL(@"hasLaunched", NO)) {
       PSET(@"hasLaunched", @YES); saveP();
       dispatch_async(dispatch_get_main_queue(), ^{
@@ -285,7 +349,7 @@ static void injectDownloadBtn(UIView *target, NSString *urlStr) {
       });
     }
 
-    // 7. Auto clear cache
+    // 8. Auto clear cache
     if (PBOOL(@"AutoClearCache", NO))
       [[NSURLCache sharedURLCache] removeAllCachedResponses];
 
