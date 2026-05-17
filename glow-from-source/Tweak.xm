@@ -2,6 +2,7 @@
 
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
+#import <dlfcn.h>
 #import <UIKit/UIKit.h>
 #import <Photos/Photos.h>
 #import <mach-o/dyld.h>
@@ -38,11 +39,13 @@ static BOOL verifyTypeEncoding(Class cls, SEL sel, const char *expected) {
 
 static UIViewController *topVC(void) {
   UIViewController *root = nil;
-  if (@available(iOS 13.0, *)) {
+  if (@available(iOS 15.0, *)) {
     for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
       if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-      UIWindow *keyWin = [(UIWindowScene *)scene keyWindow];
-      if (keyWin) { root = keyWin.rootViewController; break; }
+      for (UIWindow *w in [(UIWindowScene *)scene windows]) {
+        if (w.rootViewController) { root = w.rootViewController; break; }
+      }
+      if (root) break;
     }
   }
   if (!root) root = [[[UIApplication sharedApplication] keyWindow] rootViewController];
