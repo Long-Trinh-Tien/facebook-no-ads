@@ -71,7 +71,7 @@ static void GlowLog(NSString *format, ...) {
   va_end(args);
   
   // Always NSLog (visible via Xcode device console)
-  GlowLog(@" %@", msg);
+  NSLog(@"[Glow] %@", msg);
   
   // Also write to file via NSFileHandle
   @try {
@@ -90,7 +90,7 @@ static void GlowLog(NSString *format, ...) {
       [_logFH synchronizeFile];
     }
   } @catch (NSException *e) {
-    GlowLog(@" Log write error: %@", e.reason);
+    NSLog(@"[Glow] Log write error: %@", e.reason);
   }
 }
 
