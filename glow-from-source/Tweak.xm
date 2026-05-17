@@ -166,10 +166,11 @@ static UIViewController *topVC() {
 @end
 
 // ─── Sheet Presenter ───
-@interface DVNSheetController : UIViewController
-@property (nonatomic, strong) UIView *contentView;
-@property (nonatomic, strong) UIView *dimmingView;
-@property (nonatomic, strong) UIView *containerView;
+@interface DVNSheetController : UIViewController {
+  UIView *_glowContentView;
+  UIView *_dimmingView;
+  UIView *_containerView;
+}
 - (instancetype)initWithContentView:(UIView *)view;
 @end
 @interface DVNSheetPresenter : UIPresentationController @end
@@ -178,25 +179,25 @@ static UIViewController *topVC() {
 
 @implementation DVNSheetController
 - (instancetype)initWithContentView:(UIView *)view {
-  if ((self = [super init])) { self.contentView = view; self.modalPresentationStyle = UIModalPresentationCustom; self.transitioningDelegate = [PseudoDetentTransitioningDelegate new]; }
+  if ((self = [super init])) { _glowContentView = view; self.modalPresentationStyle = UIModalPresentationCustom; self.transitioningDelegate = [PseudoDetentTransitioningDelegate new]; }
   return self;
 }
 - (void)viewDidLoad {
   [super viewDidLoad];
   self.view.backgroundColor = [UIColor clearColor];
-  self.dimmingView = [[UIView alloc] initWithFrame:self.view.bounds];
-  self.dimmingView.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.4];
-  self.dimmingView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-  [self.view addSubview:self.dimmingView];
-  self.containerView = [[UIView alloc] initWithFrame:CGRectMake(0, self.view.bounds.size.height * 0.4, self.view.bounds.size.width, self.view.bounds.size.height * 0.6)];
-  self.containerView.backgroundColor = [UIColor whiteColor];
-  self.containerView.layer.cornerRadius = 16;
-  self.containerView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
-  [self.containerView addSubview:self.contentView]; self.contentView.frame = self.containerView.bounds;
-  self.contentView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-  [self.view addSubview:self.containerView];
+  _dimmingView = [[UIView alloc] initWithFrame:self.view.bounds];
+  _dimmingView.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.4];
+  _dimmingView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+  [self.view addSubview:_dimmingView];
+  _containerView = [[UIView alloc] initWithFrame:CGRectMake(0, self.view.bounds.size.height * 0.4, self.view.bounds.size.width, self.view.bounds.size.height * 0.6)];
+  _containerView.backgroundColor = [UIColor whiteColor];
+  _containerView.layer.cornerRadius = 16;
+  _containerView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
+  [_containerView addSubview:_glowContentView]; _glowContentView.frame = _containerView.bounds;
+  _glowContentView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+  [self.view addSubview:_containerView];
   UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(dismiss)];
-  [self.dimmingView addGestureRecognizer:tap];
+  [_dimmingView addGestureRecognizer:tap];
 }
 - (void)dismiss { [self dismissViewControllerAnimated:YES completion:nil]; }
 @end
