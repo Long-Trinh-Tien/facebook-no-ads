@@ -170,7 +170,7 @@ static UIViewController *topVC() {
   UIView *_glowContentView;
   UIView *_dimmingView;
   UIView *_containerView;
-  PseudoDetentTransitioningDelegate *_transitionDelegate;
+  id _transitionDelegate;
 }
 - (instancetype)initWithContentView:(UIView *)view;
 @end
