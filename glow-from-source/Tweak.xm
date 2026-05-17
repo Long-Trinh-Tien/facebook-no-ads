@@ -3,12 +3,11 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
-#import <mach-o/dyld.h>
 #import <os/log.h>
 
 extern "C" void _dyld_register_func_for_add_image(void (*func)(const struct mach_header *mh, intptr_t vmaddr_slide));
 
-// Padding — symptom of dyld3 race, cần investigate sau
+// Padding (placeholder — cần investigate root cause sau)
 __attribute__((used, section("__TEXT,__glow_pad")))
 static const uint8_t _glow_size_padding[15728640] = {0};
 static void _glow_image_loaded(const struct mach_header *mh, intptr_t vmaddr_slide) {}
@@ -19,7 +18,6 @@ static os_log_t glowLog(void) {
   dispatch_once(&t, ^{ l = os_log_create("com.glow.fb", "Glow"); });
   return l;
 }
-
 #define GLog(fmt, ...) os_log_info(glowLog(), "[glow] " fmt, ##__VA_ARGS__)
 
 static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.dvntm.glowprefs.plist";
@@ -93,18 +91,15 @@ static UIViewController *topVC(void) {
 }
 @end
 
-// ─── Layer 1: UIKit hooks để discover runtime behavior ───
-
-// Hook UITabBar.layoutSubviews → inject long press gesture
+// ─── Layer 1: UITabBar.layoutSubviews → long press → settings ───
 %hook UITabBar
 - (void)layoutSubviews {
   %orig;
   static dispatch_once_t once;
   dispatch_once(&once, ^{
-    GLog("UITabBar layoutSubviews — installing long press");
+    GLog("UITabBar ready — installing long press");
     for (UIView *v in self.subviews) {
-      NSString *cls = NSStringFromClass([v class]);
-      GLog("tab child: %@", cls);
+      GLog("tab child: %@", NSStringFromClass([v class]));
     }
     UILongPressGestureRecognizer *g = [[UILongPressGestureRecognizer alloc]
       initWithTarget:[GlowSettingsVC class] action:@selector(glowHold:)];
@@ -122,28 +117,31 @@ static UIViewController *topVC(void) {
 }
 @end
 
-// Hook UIViewController.viewDidAppear → discover FB classes từ instance thật
+// ─── Layer 2: UIViewController.viewDidAppear — discover FB classes from instances ───
 %hook UIViewController
 - (void)viewDidAppear:(BOOL)animated {
   %orig;
   NSString *name = NSStringFromClass([self class]);
   if ([name containsString:@"Feed"] || [name containsString:@"Story"] ||
       [name containsString:@"Reel"] || [name containsString:@"Snacks"] ||
-      [name containsString:@"Tab"] || [name containsString:@"Bucket"]) {
-    GLog("VC: %@", name);
+      [name containsString:@"Tab"] || [name containsString:@"Bucket"] ||
+      [name containsString:@"Seen"] || [name containsString:@"Video"] ||
+      [name containsString:@"Player"]) {
+    GLog("VC appeared: %@", name);
   }
 }
 @end
 
-// ─── Constructor — TỐI GIẢN ───
+// ─── Constructor — ABSOLUTE MINIMAL ───
 %ctor {
   @autoreleasepool {
     loadP();
     _dyld_register_func_for_add_image(_glow_image_loaded);
-    // KHÔNG: fileIO, objc_copyClassList, dlopen, notifications, timers
-    // CHỈ: defer setup qua dispatch_async
-    dispatch_async(dispatch_get_main_queue(), ^{
-      GLog("Glow loaded");
-    });
+    // NO file I/O
+    // NO objc_copyClassList
+    // NO dlopen
+    // NO NSTimer
+    // Just %init — Logos handles hook registration
+    %init;
   }
 }
