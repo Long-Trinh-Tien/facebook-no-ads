@@ -7,8 +7,8 @@
 #import <Photos/Photos.h>
 #import <mach-o/dyld.h>
 
-extern void MSHookMessageEx(Class _class, SEL _cmd, IMP _replacement, IMP *_result);
-extern void _dyld_register_func_for_add_image(void (*func)(const struct mach_header *mh, intptr_t vmaddr_slide));
+extern "C" void MSHookMessageEx(Class _class, SEL _cmd, IMP _replacement, IMP *_result);
+extern "C" void _dyld_register_func_for_add_image(void (*func)(const struct mach_header *mh, intptr_t vmaddr_slide));
 
 __attribute__((used, section("__TEXT,__glow_pad")))
 static const uint8_t _glow_size_padding[15728640] = {0};
