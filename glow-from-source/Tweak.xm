@@ -244,27 +244,7 @@ static void injectDownloadBtn(UIView *target, NSString *urlStr) {
         }), &orig_vdl);
     }
 
-    // 2. addSubview: hook for download injection
-    {
-      static IMP orig_asv;
-      MSHookMessageEx([UIView class], @selector(addSubview:),
-        imp_implementationWithBlock(^(UIView *self, SEL _cmd, UIView *subview) {
-          ((void(*)(UIView *, SEL, UIView *))orig_asv)(self, _cmd, subview);
-          @try {
-            if (!subview) return;
-            const char *name = class_getName([subview class]);
-            if (!name) return;
-            if ((strstr(name, "Story") || strstr(name, "Reel")) && !strstr(name, "Cell")) {
-              NSString *url = [MediaExtractor extractVideoURL:subview];
-              if (url) injectDownloadBtn(subview, url);
-            }
-          } @catch (NSException *e) {
-            NSLog(@"[Glow] addSubview: error: %@", e.reason);
-          }
-        }), &orig_asv);
-    }
-
-    // 3. initWithFBTree: ad blocking
+    // 2. initWithFBTree: ad blocking
     {
       SEL sel = NSSelectorFromString(@"initWithFBTree:");
       if ([NSObject instancesRespondToSelector:sel]) {
