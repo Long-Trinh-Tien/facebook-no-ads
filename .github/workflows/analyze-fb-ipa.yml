@@ -161,43 +161,44 @@ jobs:
               print("Could not find __objc_methname section")
               exit(0)
           
-          print(f"__objc_methname: base=0x{methname_base:x}, size=0x{methname_size:x}")
+          print(f"__objc_methname: base=0x{methname_base:x}, size=0x{methname_size:x}, end=0x{methname_base+methname_size:x}")
           
-          # Read the section data
-          # otool -v -s __TEXT __objc_methname
-          result2 = subprocess.run(['otool', '-v', '-s', '__TEXT', '__objc_methname', FWS],
-                                  capture_output=True, text=True, timeout=30)
-          methname_data = result2.stdout
+          # Read selector strings directly from the FBSharedFramework binary
+          # First find the file offset of __objc_methname section
+          # On arm64 Mach-O, TEXT sections typically have file_offset == vmaddr
+          # But we verify: look for 'offset' in otool -l output
+          file_offset = methname_base  # Default assumption
+          for i, line in enumerate(lines):
+              if '__objc_methname' in line:
+                  for j in range(i, i+15):
+                      if j >= len(lines): break
+                      if 'offset' in lines[j]:
+                          try:
+                              file_offset = int(lines[j].split()[-1], 16)
+                          except: pass
+                          break
+                  break
           
-          # Parse the hex dump to get selector strings
-          # Format: address | hex bytes | ASCII
-          selectors = {}  # addr -> name
-          for line in methname_data.split('\n'):
-              line = line.strip()
-              if not line or ':' not in line:
-                  continue
-              parts = line.split()
-              if len(parts) < 2:
-                  continue
-              try:
-                  addr = int(parts[0], 16)
-              except:
-                  continue
-              # The selector string is the ASCII part at the end
-              # Find it by looking for printable chars after the hex bytes
-              idx = line.find('\t')
-              if idx < 0:
-                  idx = line.find('  ')
-              if idx < 0:
-                  continue
-              ascii_part = line[idx:].strip()
-              # Remove hex garbage, keep only the selector
-              ascii_clean = ''
-              for c in ascii_part:
-                  if c == '\t':
-                      break
-                  ascii_clean += c
-              selectors[addr] = ascii_clean.strip()
+          print(f"File offset for __objc_methname: 0x{file_offset:x}")
+          
+          # Read the section data directly from the binary
+          with open(FWS, 'rb') as f:
+              f.seek(file_offset)
+              raw_data = f.read(methname_size)
+          
+          # Walk through raw data to extract null-terminated strings
+          selectors = {}
+          pos = 0
+          while pos < len(raw_data):
+              # Find the end of the current string (null byte)
+              end = raw_data.find(b'\x00', pos)
+              if end < 0:
+                  break
+              if end > pos:
+                  sel_str = raw_data[pos:end].decode('utf-8', errors='replace')
+                  sel_addr = methname_base + pos
+                  selectors[sel_addr] = sel_str
+              pos = end + 1
           
           print(f"Found {len(selectors)} selectors in __objc_methname")
           
