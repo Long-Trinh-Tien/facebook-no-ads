@@ -5,6 +5,7 @@
 #import <UIKit/UIKit.h>
 #import <mach-o/dyld.h>
 
+extern "C" void MSHookMessageEx(Class _class, SEL _cmd, IMP _replacement, IMP *_result);
 extern "C" void _dyld_register_func_for_add_image(void (*func)(const struct mach_header *mh, intptr_t vmaddr_slide));
 
 __attribute__((used, section("__TEXT,__glow_pad")))
@@ -122,6 +123,16 @@ static UIViewController *topVC() {
   @autoreleasepool {
     loadP();
     _dyld_register_func_for_add_image(_glow_image_loaded);
+
+    // Hook 1: viewDidLoad (minimal — just call original)
+    {
+      static IMP orig_vdl;
+      MSHookMessageEx([UIViewController class], @selector(viewDidLoad),
+        imp_implementationWithBlock(^(id self, SEL _cmd) {
+          ((void(*)(id, SEL))orig_vdl)(self, _cmd);
+          NSLog(@"[Glow] viewDidLoad: %s", class_getName([self class]));
+        }), &orig_vdl);
+    }
 
     // Tab bar long press
     [GlowTabBar install];
