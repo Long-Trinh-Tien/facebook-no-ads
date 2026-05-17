@@ -27,6 +27,7 @@ static void loadP() {
 static void saveP() { [P writeToFile:kPrefsPath atomically:YES]; }
 
 // ─── Forward declarations ───
+static void GlowLog(NSString *format, ...);
 @interface GlowTabBar : NSObject
 + (void)install;
 + (UITabBar *)findInView:(UIView *)v;
