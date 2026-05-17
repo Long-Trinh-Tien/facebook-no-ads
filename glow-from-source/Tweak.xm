@@ -299,17 +299,16 @@ static void setupAllHooks(void) {
   @autoreleasepool {
     loadP();
     _dyld_register_func_for_add_image(_glow_image_loaded);
-    dispatch_async(dispatch_get_main_queue(), ^{
-      [[NSNotificationCenter defaultCenter]
-        addObserverForName:UIApplicationDidFinishLaunchingNotification
-        object:nil queue:[NSOperationQueue mainQueue]
-        usingBlock:^(NSNotification *note) {
-          [GlowTabBar install];
-          dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
-            dispatch_get_main_queue(), ^{ setupAllHooks(); });
-        }];
+    
+    // Defer to main queue after app fully launched (3s).
+    // KHÔNG dùng UIApplicationDidFinishLaunchingNotification — nó gửi trước khi ta đăng ký
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+      dispatch_get_main_queue(), ^{
+        [GlowTabBar install];
+        setupAllHooks();
     });
-    GlowLog(@" Phase 2 debug — constructor done");
+    
+    GlowLog(@"constructor done");
   }
 }
 
