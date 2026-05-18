@@ -1,19 +1,16 @@
-// Stage 2: Hook UIView.didMoveToWindow — verify runtime hook fires
-// Constructor: install hook via method_setImplementation
-// Hook IMP: C function writes to file + calls original
+// KNOWN_GOOD_BASELINE + STEP E: attach tiny red UIView to view.window
+// Based on commit 980d557 (KNOWN_GOOD_HOOK_BASELINE)
+// ONLY change: dispatch_async + addSubview to view.window
 
+#import <UIKit/UIKit.h>
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <objc/runtime.h>
 
-static IMP orig_didMoveToWindow = NULL;
+static IMP (*orig_dtm)(id, SEL) = NULL;
 
-static void hooked_didMoveToWindow(id self, SEL _cmd) {
-  // This runs when UIKit calls objc_msgSend(self, @selector(didMoveToWindow))
-  // PAC context is valid here — we're inside the runtime's call chain
+static void hooked_dtm(id self, SEL _cmd) {
+  if (orig_dtm) orig_dtm(self, _cmd);
   
-  // Write evidence
   const char *home = getenv("HOME");
   if (home) {
     char path[512];
@@ -25,39 +22,35 @@ static void hooked_didMoveToWindow(id self, SEL _cmd) {
     }
   }
   
-  // Call original
-  if (orig_didMoveToWindow) {
-    ((void(*)(id,SEL))orig_didMoveToWindow)(self, _cmd);
-  }
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    dispatch_async(dispatch_get_main_queue(), ^{
+      UIView *view = (UIView *)self;
+      UIWindow *win = view.window;
+      if (win) {
+        UIView *sq = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 80, 80)];
+        sq.backgroundColor = UIColor.redColor;
+        [win addSubview:sq];
+        
+        if (home) {
+          char path[512];
+          snprintf(path, sizeof(path), "%s/Documents/glow_hook.txt", home);
+          FILE *f = fopen(path, "a");
+          if (f) {
+            fprintf(f, "RED_SQUARE_ADDED to window %p\n", (void*)win);
+            fclose(f);
+          }
+        }
+      }
+    });
+  });
 }
 
 __attribute__((constructor))
 static void glow_init(void) {
-  const char *home = getenv("HOME");
-  if (!home) return;
-  
-  char path[512];
-  snprintf(path, sizeof(path), "%s/Documents/glow_hook.txt", home);
-  
-  FILE *f = fopen(path, "w");
-  if (!f) return;
-  
-  // Hook UIView.didMoveToWindow
-  Class uiView = objc_getClass("UIView");
-  SEL dtmSel = sel_registerName("didMoveToWindow");
-  Method dtmM = class_getInstanceMethod(uiView, dtmSel);
-  
-  orig_didMoveToWindow = method_getImplementation(dtmM);
-  method_setImplementation(dtmM, (IMP)hooked_didMoveToWindow);
-  
-  IMP check = method_getImplementation(dtmM);
-  
-  fprintf(f, "UIView class: %p\n", (void*)uiView);
-  fprintf(f, "orig IMP: %p\n", (void*)orig_didMoveToWindow);
-  fprintf(f, "hooked IMP: %p\n", (void*)check);
-  fprintf(f, "match: %s\n", check == (IMP)hooked_didMoveToWindow ? "YES" : "NO");
-  fprintf(f, "\nHOOK INSTALLED: UIView.didMoveToWindow\n");
-  fprintf(f, "Waiting for hook to fire...\n");
-  
-  fclose(f);
+  Class c = objc_getClass("UIView");
+  SEL s = sel_registerName("didMoveToWindow");
+  Method m = class_getInstanceMethod(c, s);
+  orig_dtm = (IMP(*)(id,SEL))method_getImplementation(m);
+  method_setImplementation(m, (IMP)hooked_dtm);
 }
