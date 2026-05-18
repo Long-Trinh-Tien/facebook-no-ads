@@ -90,19 +90,16 @@ static void inspectAndMark(void) {
 static void hooked_sendEvent(id self, SEL _cmd, id event) {
   if (orig_sendEvent) orig_sendEvent(self, _cmd, event);
   
-  // Detect 3-finger tap
+  // Detect 3-finger tap (any phase — Began or Ended)
   NSSet *touches = [event allTouches];
   if ([touches count] >= 3) {
-    UITouch *touch = [touches anyObject];
-    if (touch.phase == UITouchPhaseEnded) {
-      static BOOL pending = NO;
-      if (!pending) {
-        pending = YES;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-          inspectAndMark();
-          pending = NO;
-        });
-      }
+    static BOOL pending = NO;
+    if (!pending) {
+      pending = YES;
+      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        inspectAndMark();
+        pending = NO;
+      });
     }
   }
 }
