@@ -1,124 +1,88 @@
-// Phase 2B.1 — Manual Inspector
-// 3-finger tap to scan + highlight main window hierarchy
-// No auto-scan. No logging.
+// Phase 2C — Floating debug button
+// UIAction-based (iOS 14+), no class_addMethod complexity
 
 #import <UIKit/UIKit.h>
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <objc/runtime.h>
 
-static IMP (*orig_sendEvent)(id, SEL, id) = NULL;
+static IMP (*orig_dtm)(id, SEL) = NULL;
 
-// Clear all markers before fresh scan
-static void clearMarkers(UIView *view) {
-  if (!view) return;
-  view.layer.borderWidth = 0;
-  view.layer.borderColor = nil;
-  view.alpha = 1.0;
-  for (UIView *sub in [view subviews]) {
-    clearMarkers(sub);
+static void mark(UIView *v, int d) {
+  if (!v || d > 15 || v.hidden) return;
+  CGRect f = v.frame;
+  CGFloat sw = UIScreen.mainScreen.bounds.size.width;
+  
+  BOOL hc = NO, hs = NO;
+  for (UIView *s in v.subviews) {
+    if ([s isKindOfClass:UICollectionView.class]) hc = YES;
+    if ([s isKindOfClass:UIScrollView.class]) hs = YES;
   }
+  
+  UIColor *c = nil;
+  CGFloat bw = 0;
+  if (f.size.width >= sw - 10 && d <= 3) { c = UIColor.redColor; bw = 3; }
+  else if (hc && f.size.width > 150) { c = UIColor.blueColor; bw = 2; }
+  else if (hs && f.size.width > 100) { c = UIColor.greenColor; bw = 2; }
+  
+  if (c) {
+    v.layer.borderWidth = bw;
+    v.layer.borderColor = c.CGColor;
+  }
+  for (UIView *s in v.subviews) mark(s, d + 1);
 }
 
-static void markView(UIView *view, int depth) {
-  if (!view || depth > 15) return;
-  if ([view isHidden] || view.window == nil) return;
-  
-  CGRect f = [view frame];
-  CGFloat sw = [UIScreen mainScreen].bounds.size.width;
-  
-  // Check children for collection/scroll
-  BOOL hasCollection = NO;
-  BOOL hasScroll = NO;
-  for (UIView *sub in [view subviews]) {
-    if ([sub isKindOfClass:[UICollectionView class]]) hasCollection = YES;
-    if ([sub isKindOfClass:[UIScrollView class]]) hasScroll = YES;
-  }
-  
-  // Classification
-  UIColor *color = nil;
-  CGFloat borderW = 0;
-  
-  if (f.size.width >= sw - 10 && depth <= 3) {
-    // Full-width, shallow → primary container (feed, reels)
-    color = [UIColor redColor];
-    borderW = 3.0;
-  } else if (hasCollection && f.size.width > 150) {
-    // Collection container → feed row
-    color = [UIColor blueColor];
-    borderW = 2.0;
-  } else if (hasScroll && f.size.width > 100) {
-    // Scroll container → story/carousel
-    color = [UIColor greenColor];
-    borderW = 2.0;
-  } else if (f.size.width > 250 && f.size.height > 150) {
-    // Large media tile
-    color = [UIColor orangeColor];
-    borderW = 1.5;
-  } else if (![view isKindOfClass:[UIView class]] || 
-             strcmp(object_getClassName(view), "UIView") != 0) {
-    // Custom subclass, non-trivial size
-    if (f.size.width > 100 && f.size.height > 50) {
-      color = [UIColor purpleColor];
-      borderW = 1.0;
-    }
-  }
-  
-  if (color && borderW > 0) {
-    view.layer.borderWidth = borderW;
-    view.layer.borderColor = color.CGColor;
-    view.alpha = 0.9;
-  }
-  
-  // Recurse
-  for (UIView *sub in [view subviews]) {
-    markView(sub, depth + 1);
-  }
+static void clear(UIView *v) {
+  if (!v) return;
+  v.layer.borderWidth = 0;
+  v.layer.borderColor = nil;
+  for (UIView *s in v.subviews) clear(s);
 }
 
-static void inspectAndMark(void) {
-  UIWindow *win = [UIApplication sharedApplication].keyWindow;
-  if (!win) {
-    win = [[UIApplication sharedApplication].windows firstObject];
-  }
-  if (!win) return;
-  clearMarkers(win);
-  markView(win, 0);
+static void inspect(void) {
+  UIWindow *w = UIApplication.sharedApplication.keyWindow;
+  if (!w) w = UIApplication.sharedApplication.delegate.window;
+  if (!w) return;
+  clear(w);
+  mark(w, 0);
 }
 
-static void hooked_sendEvent(id self, SEL _cmd, id event) {
-  if (orig_sendEvent) orig_sendEvent(self, _cmd, event);
+static void setupButton(void) {
+  UIWindow *dw = [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, 44, 44)];
+  dw.windowLevel = UIWindowLevelAlert + 1000;
+  dw.backgroundColor = UIColor.clearColor;
   
-  // Detect 3-finger tap (any phase — Began or Ended)
-  NSSet *touches = [event allTouches];
-  if ([touches count] >= 3) {
-    static BOOL pending = NO;
-    if (!pending) {
-      pending = YES;
-      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        inspectAndMark();
-        pending = NO;
-      });
-    }
+  UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
+  b.frame = CGRectMake(0, 0, 44, 44);
+  b.backgroundColor = [UIColor colorWithRed:0 green:0.5 blue:1 alpha:0.35];
+  b.layer.cornerRadius = 22;
+  b.clipsToBounds = YES;
+  [b setTitle:@"☰" forState:UIControlStateNormal];
+  b.titleLabel.font = [UIFont boldSystemFontOfSize:18];
+  
+  if (@available(iOS 14.0, *)) {
+    [b addAction:[UIAction actionWithHandler:^(UIAction *a) { inspect(); }]
+         forControlEvents:UIControlEventTouchUpInside];
   }
+  
+  dw.rootViewController = [[UIViewController alloc] init];
+  [dw.rootViewController.view addSubview:b];
+  dw.frame = CGRectMake(16, 200, 44, 44);
+  dw.hidden = NO;
+}
+
+static void hooked_dtm(id self, SEL _cmd) {
+  if (orig_dtm) orig_dtm(self, _cmd);
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    dispatch_async(dispatch_get_main_queue(), ^{ setupButton(); });
+  });
 }
 
 __attribute__((constructor))
 static void glow_init(void) {
-  Class appClass = objc_getClass("UIApplication");
-  SEL seSel = sel_registerName("sendEvent:");
-  Method seM = class_getInstanceMethod(appClass, seSel);
-  orig_sendEvent = (IMP(*)(id,SEL,id))method_getImplementation(seM);
-  method_setImplementation(seM, (IMP)hooked_sendEvent);
-  
-  const char *home = getenv("HOME");
-  if (!home) return;
-  char path[512];
-  snprintf(path, sizeof(path), "%s/Documents/glow_hook.txt", home);
-  FILE *f = fopen(path, "w");
-  if (f) {
-    fprintf(f, "MANUAL INSPECTOR ACTIVE\n3-finger tap → hierarchy scan\n");
-    fclose(f);
-  }
+  Class c = objc_getClass("UIView");
+  SEL s = sel_registerName("didMoveToWindow");
+  Method m = class_getInstanceMethod(c, s);
+  orig_dtm = (IMP(*)(id,SEL))method_getImplementation(m);
+  method_setImplementation(m, (IMP)hooked_dtm);
 }
