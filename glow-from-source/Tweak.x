@@ -1,58 +1,63 @@
-// Execution trace only — NO overlay, NO UI, NO visual effects
-// Append-only markers to determine EXACTLY where flow stops
+// Stage 2: Hook UIView.didMoveToWindow — verify runtime hook fires
+// Constructor: install hook via method_setImplementation
+// Hook IMP: C function writes to file + calls original
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <objc/runtime.h>
 
-#define MARK(s) do { \
-  const char *home = getenv("HOME"); \
-  if (!home) return; \
-  char path[512]; \
-  snprintf(path, sizeof(path), "%s/Documents/glow_trace.txt", home); \
-  FILE *f = fopen(path, "a"); \
-  if (f) { fprintf(f, "%s\n", s); fflush(f); fclose(f); } \
-} while(0)
+static IMP orig_didMoveToWindow = NULL;
 
-static IMP (*orig_dtm)(id, SEL) = NULL;
-
-static void hooked_dtm(id self, SEL _cmd) {
-  MARK("D_hook_callback_fire");
+static void hooked_didMoveToWindow(id self, SEL _cmd) {
+  // This runs when UIKit calls objc_msgSend(self, @selector(didMoveToWindow))
+  // PAC context is valid here — we're inside the runtime's call chain
   
-  if (orig_dtm) orig_dtm(self, _cmd);
+  // Write evidence
+  const char *home = getenv("HOME");
+  if (home) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/Documents/glow_hook.txt", home);
+    FILE *f = fopen(path, "a");
+    if (f) {
+      fprintf(f, "HOOK_FIRED: UIView %p didMoveToWindow\n", (void*)self);
+      fclose(f);
+    }
+  }
   
-  static dispatch_once_t once;
-  dispatch_once(&once, ^{
-    MARK("E_main_queue_enter");
-    
-    dispatch_async(dispatch_get_main_queue(), ^{
-      MARK("F_main_queue_callback");
-      
-      UIView *view = (UIView *)self;
-      if (view.window) {
-        MARK("G_view_window_not_nil");
-        if (view.window.windowScene) {
-          MARK("H_windowScene_not_nil");
-        }
-      }
-    });
-  });
+  // Call original
+  if (orig_didMoveToWindow) {
+    ((void(*)(id,SEL))orig_didMoveToWindow)(self, _cmd);
+  }
 }
 
 __attribute__((constructor))
 static void glow_init(void) {
-  MARK("A_ctor_enter");
+  const char *home = getenv("HOME");
+  if (!home) return;
   
-  Class c = objc_getClass("UIView");
-  if (c) {
-    MARK("B_UIView_class_found");
-    SEL s = sel_registerName("didMoveToWindow");
-    Method m = class_getInstanceMethod(c, s);
-    if (m) {
-      MARK("C_method_found");
-      orig_dtm = (IMP(*)(id,SEL))method_getImplementation(m);
-      method_setImplementation(m, (IMP)hooked_dtm);
-      MARK("C_hook_installed");
-    }
-  }
+  char path[512];
+  snprintf(path, sizeof(path), "%s/Documents/glow_hook.txt", home);
+  
+  FILE *f = fopen(path, "w");
+  if (!f) return;
+  
+  // Hook UIView.didMoveToWindow
+  Class uiView = objc_getClass("UIView");
+  SEL dtmSel = sel_registerName("didMoveToWindow");
+  Method dtmM = class_getInstanceMethod(uiView, dtmSel);
+  
+  orig_didMoveToWindow = method_getImplementation(dtmM);
+  method_setImplementation(dtmM, (IMP)hooked_didMoveToWindow);
+  
+  IMP check = method_getImplementation(dtmM);
+  
+  fprintf(f, "UIView class: %p\n", (void*)uiView);
+  fprintf(f, "orig IMP: %p\n", (void*)orig_didMoveToWindow);
+  fprintf(f, "hooked IMP: %p\n", (void*)check);
+  fprintf(f, "match: %s\n", check == (IMP)hooked_didMoveToWindow ? "YES" : "NO");
+  fprintf(f, "\nHOOK INSTALLED: UIView.didMoveToWindow\n");
+  fprintf(f, "Waiting for hook to fire...\n");
+  
+  fclose(f);
 }
