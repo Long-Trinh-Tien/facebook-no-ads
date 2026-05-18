@@ -9,7 +9,7 @@
 #include <dispatch/dispatch.h>
 
 static IMP orig_didMoveToWindow = NULL;
-static BOOL async_done = NO;
+static BOOL marker_done = NO;
 
 static void hooked_didMoveToWindow(id self, SEL _cmd) {
   // This runs when UIKit calls objc_msgSend(self, @selector(didMoveToWindow))
@@ -32,24 +32,44 @@ static void hooked_didMoveToWindow(id self, SEL _cmd) {
     ((void(*)(id,SEL))orig_didMoveToWindow)(self, _cmd);
   }
   
-  // STEP D: capture window pointer at hook time, access in async block
-  if (!async_done) {
-    UIView *view = (UIView *)self;
-    UIWindow *win = view.window;
-    async_done = YES;
-    dispatch_async(dispatch_get_main_queue(), ^{
-      const char *home = getenv("HOME");
-      if (home) {
-        char path[512];
-        snprintf(path, sizeof(path), "%s/Documents/glow_hook.txt", home);
-        FILE *f = fopen(path, "a");
-        if (f) {
-          fprintf(f, "ASYNC_BLOCK_EXECUTED\n");
-          fprintf(f, "captured_win=%p\n", (void*)win);
-          fclose(f);
-        }
+  // STEP E: inline UIKit mutation — NO async, NO blocks, NO capture
+  if (!marker_done) {
+    marker_done = YES;
+    
+    // Create tiny red square via runtime C functions
+    Class uiview = objc_getClass("UIView");
+    Class uicolor = objc_getClass("UIColor");
+    
+    SEL allocSel = sel_registerName("alloc");
+    SEL initSel = sel_registerName("initWithFrame:");
+    SEL bgSel = sel_registerName("setBackgroundColor:");
+    SEL addSel = sel_registerName("addSubview:");
+    
+    // Get red color
+    id red = ((id(*)(id,SEL))objc_msgSend)(uicolor, sel_registerName("redColor"));
+    
+    // Create square: initWithFrame:CGRectMake(0,0,80,80)
+    id sq = ((id(*)(id,SEL))objc_msgSend)(uiview, allocSel);
+    CGRect frame = CGRectMake(0, 0, 80, 80);
+    sq = ((id(*)(id,SEL,CGRect))objc_msgSend)(sq, initSel, frame);
+    
+    // Set background
+    ((void(*)(id,SEL,id))objc_msgSend)(sq, bgSel, red);
+    
+    // Add to current view
+    ((void(*)(id,SEL,id))objc_msgSend)(self, addSel, sq);
+    
+    // Log
+    const char *home = getenv("HOME");
+    if (home) {
+      char path[512];
+      snprintf(path, sizeof(path), "%s/Documents/glow_hook.txt", home);
+      FILE *f = fopen(path, "a");
+      if (f) {
+        fprintf(f, "INLINE_MARKER_ADDED sq=%p red=%p\n", (void*)sq, (void*)red);
+        fclose(f);
       }
-    });
+    }
   }
 }
 
