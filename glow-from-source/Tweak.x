@@ -1,10 +1,35 @@
-// No Logos, no ObjC messaging. Pure C + ObjC runtime functions only.
-// Diagnostic: writes 8 steps + HOOK ENGINE confirmation to Documents/glow_hook.txt
+// Stage 2: Hook UIView.didMoveToWindow — verify runtime hook fires
+// Constructor: install hook via method_setImplementation
+// Hook IMP: C function writes to file + calls original
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <objc/runtime.h>
+
+static IMP orig_didMoveToWindow = NULL;
+
+static void hooked_didMoveToWindow(id self, SEL _cmd) {
+  // This runs when UIKit calls objc_msgSend(self, @selector(didMoveToWindow))
+  // PAC context is valid here — we're inside the runtime's call chain
+  
+  // Write evidence
+  const char *home = getenv("HOME");
+  if (home) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/Documents/glow_hook.txt", home);
+    FILE *f = fopen(path, "a");
+    if (f) {
+      fprintf(f, "HOOK_FIRED: UIView %p didMoveToWindow\n", (void*)self);
+      fclose(f);
+    }
+  }
+  
+  // Call original
+  if (orig_didMoveToWindow) {
+    ((void(*)(id,SEL))orig_didMoveToWindow)(self, _cmd);
+  }
+}
 
 __attribute__((constructor))
 static void glow_init(void) {
@@ -17,46 +42,22 @@ static void glow_init(void) {
   FILE *f = fopen(path, "w");
   if (!f) return;
   
-  // Step 1: objc_getClass
-  Class nsObj = objc_getClass("NSObject");
-  Class nsStr = objc_getClass("NSString");
-  fprintf(f, "STEP1  NSObject=%p NSString=%p\n", (void*)nsObj, (void*)nsStr);
-  
-  // Step 2: sel_registerName
-  SEL descSel = sel_registerName("description");
-  fprintf(f, "STEP2  description SEL=%p\n", (void*)descSel);
-  
-  // Step 3: class_getInstanceMethod
-  Method descM = class_getInstanceMethod(nsObj, descSel);
-  fprintf(f, "STEP3  description Method=%p\n", (void*)descM);
-  
-  // Step 4: method_getImplementation
-  IMP origIMP = method_getImplementation(descM);
-  fprintf(f, "STEP4  orig IMP=%p\n", (void*)origIMP);
-  
-  // Step 5: class_createInstance + call via C fn ptr
-  id inst = class_createInstance(nsObj, 0);
-  id val = ((id(*)(id,SEL))origIMP)(inst, descSel);
-  fprintf(f, "STEP5  instance=%p desc=%s\n", (void*)inst, val ? "NONNULL" : "NULL");
-  
-  // Step 6: method_setImplementation (replace)
-  method_setImplementation(descM, (IMP)origIMP);
-  IMP check1 = method_getImplementation(descM);
-  fprintf(f, "STEP6  set+get IMP=%p match=%s\n", (void*)check1, check1 == origIMP ? "YES" : "NO");
-  
-  // Step 7: restore
-  method_setImplementation(descM, origIMP);
-  IMP check2 = method_getImplementation(descM);
-  fprintf(f, "STEP7  restored IMP=%p match=%s\n", (void*)check2, check2 == origIMP ? "YES" : "NO");
-  
-  // Step 8: hook UIView.didMoveToWindow (actual UIKit hook)
+  // Hook UIView.didMoveToWindow
   Class uiView = objc_getClass("UIView");
   SEL dtmSel = sel_registerName("didMoveToWindow");
   Method dtmM = class_getInstanceMethod(uiView, dtmSel);
-  IMP dtmIMP = method_getImplementation(dtmM);
-  fprintf(f, "STEP8  UIView.didMoveToWindow IMP=%p\n", (void*)dtmIMP);
   
-  fprintf(f, "\nHOOK_ENGINE PRIMITIVES: CONFIRMED\n");
+  orig_didMoveToWindow = method_getImplementation(dtmM);
+  method_setImplementation(dtmM, (IMP)hooked_didMoveToWindow);
+  
+  IMP check = method_getImplementation(dtmM);
+  
+  fprintf(f, "UIView class: %p\n", (void*)uiView);
+  fprintf(f, "orig IMP: %p\n", (void*)orig_didMoveToWindow);
+  fprintf(f, "hooked IMP: %p\n", (void*)check);
+  fprintf(f, "match: %s\n", check == (IMP)hooked_didMoveToWindow ? "YES" : "NO");
+  fprintf(f, "\nHOOK INSTALLED: UIView.didMoveToWindow\n");
+  fprintf(f, "Waiting for hook to fire...\n");
   
   fclose(f);
 }
