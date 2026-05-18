@@ -6,8 +6,7 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = Glow
 Glow_FILES = Tweak.x
-Glow_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -I$(THEOS)/include
-Glow_FRAMEWORKS = UIKit Foundation AVFoundation Photos CoreGraphics CoreServices Security SystemConfiguration
-Glow_LDFLAGS = -L$(THEOS)/lib -lsubstrate -lobjc
+Glow_CFLAGS = -Wno-deprecated-declarations
+Glow_LDFLAGS = -L$(THEOS)/lib
 
 include $(THEOS_MAKE_PATH)/tweak.mk
