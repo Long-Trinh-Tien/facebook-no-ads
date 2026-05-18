@@ -6,8 +6,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <objc/runtime.h>
+#include <dispatch/dispatch.h>
 
 static IMP orig_didMoveToWindow = NULL;
+static BOOL async_done = NO;
 
 static void hooked_didMoveToWindow(id self, SEL _cmd) {
   // This runs when UIKit calls objc_msgSend(self, @selector(didMoveToWindow))
@@ -20,7 +22,7 @@ static void hooked_didMoveToWindow(id self, SEL _cmd) {
     snprintf(path, sizeof(path), "%s/Documents/glow_hook.txt", home);
     FILE *f = fopen(path, "a");
     if (f) {
-      fprintf(f, "HOOK_V2: UIView %p didMoveToWindow\n", (void*)self);
+      fprintf(f, "HOOK_FIRED: UIView %p didMoveToWindow\n", (void*)self);
       fclose(f);
     }
   }
@@ -28,6 +30,23 @@ static void hooked_didMoveToWindow(id self, SEL _cmd) {
   // Call original
   if (orig_didMoveToWindow) {
     ((void(*)(id,SEL))orig_didMoveToWindow)(self, _cmd);
+  }
+  
+  // STEP B: dispatch_async to main queue — ONLY change
+  if (!async_done) {
+    async_done = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      const char *home = getenv("HOME");
+      if (home) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/Documents/glow_hook.txt", home);
+        FILE *f = fopen(path, "a");
+        if (f) {
+          fprintf(f, "ASYNC_BLOCK_EXECUTED\n");
+          fclose(f);
+        }
+      }
+    });
   }
 }
 
