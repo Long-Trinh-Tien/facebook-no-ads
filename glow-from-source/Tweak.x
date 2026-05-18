@@ -32,9 +32,10 @@ static void hooked_didMoveToWindow(id self, SEL _cmd) {
     ((void(*)(id,SEL))orig_didMoveToWindow)(self, _cmd);
   }
   
-  // STEP C: dispatch_async + view.window access
+  // STEP D: capture window pointer at hook time, access in async block
   if (!async_done) {
     UIView *view = (UIView *)self;
+    UIWindow *win = view.window;
     async_done = YES;
     dispatch_async(dispatch_get_main_queue(), ^{
       const char *home = getenv("HOME");
@@ -44,7 +45,7 @@ static void hooked_didMoveToWindow(id self, SEL _cmd) {
         FILE *f = fopen(path, "a");
         if (f) {
           fprintf(f, "ASYNC_BLOCK_EXECUTED\n");
-          fprintf(f, "view.window=%p\n", (void*)view.window);
+          fprintf(f, "captured_win=%p\n", (void*)win);
           fclose(f);
         }
       }
