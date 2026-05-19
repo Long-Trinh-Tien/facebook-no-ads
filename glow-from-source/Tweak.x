@@ -259,6 +259,57 @@ static void hooked_viewDidAppear(id self, SEL _cmd, BOOL animated) {
     glowButtonAttached = YES;
 }
 
+// ─── Try to resolve a symbol from FBSharedFramework ───
+static void *dlsymFromFBSharedFramework(const char *symName, FILE *f) {
+    // Iterate all loaded images to find FBSharedFramework
+    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (!name) continue;
+
+        // Look for FBSharedFramework in the path
+        if (strstr(name, "FBSharedFramework")) {
+            fprintf(f, "  found FBSharedFramework at image[%u]: %s\n", i, name);
+            // Try to dlopen it with NOLOAD (already loaded)
+            void *handle = dlopen(name, RTLD_LAZY | RTLD_NOLOAD);
+            if (handle) {
+                void *sym = dlsym(handle, symName);
+                fprintf(f, "  dlsym(%s) on handle: %p\n", symName, sym);
+                dlclose(handle);
+                return sym;
+            }
+        }
+
+        // Also try without path (just framework name)
+        if (strstr(name, "Frameworks/")) {
+            const char *fwName = strstr(name, "Frameworks/");
+            if (fwName && strstr(fwName, "FBShared")) {
+                fprintf(f, "  alt match: %s\n", name);
+            }
+        }
+    }
+    return NULL;
+}
+
+// ─── Try RTLD_NEXT fallback ───
+static void *dlsymWithFallback(const char *symName, FILE *f) {
+    void *sym = dlsym(RTLD_DEFAULT, symName);
+    if (sym) return sym;
+
+    fprintf(f, "dlsym RTLD_DEFAULT failed (%s), trying image scan...\n", dlerror());
+
+    sym = dlsymFromFBSharedFramework(symName, f);
+    if (sym) return sym;
+
+    // Last try: RTLD_NEXT
+    sym = dlsym(RTLD_NEXT, symName);
+    if (sym) {
+        fprintf(f, "dlsym RTLD_NEXT: %p\n", sym);
+        return sym;
+    }
+
+    return NULL;
+}
+
 // ─── Constructor ───
 __attribute__((constructor))
 static void glow_init(void) {
@@ -271,13 +322,62 @@ static void glow_init(void) {
     if (!f) return;
     fprintf(f, "Stage R1.5 — Dual-Function Passive Telemetry\n\n");
 
-    isSponsored = dlsym(RTLD_DEFAULT, "_FBFeedUnitIsSponsored");
-    fprintf(f, "dlsym _FBFeedUnitIsSponsored: %p (%s)\n",
-            (void*)isSponsored, isSponsored ? "OK" : dlerror());
+    // Log all loaded images for debugging
+    fprintf(f, "Loaded images:\n");
+    for (uint32_t i = 0; i < _dyld_image_count() && i < 10; i++) {
+        fprintf(f, "  [%u] %s\n", i, _dyld_get_image_name(i));
+    }
+    fprintf(f, "  ... (showing first 10 of %u)\n\n", _dyld_image_count());
 
-    sponDataObjects = dlsym(RTLD_DEFAULT, "_FBSponsoredDataObjectsForFeedUnit");
-    fprintf(f, "dlsym _FBSponsoredDataObjectsForFeedUnit: %p (%s)\n",
-            sponDataObjects, sponDataObjects ? "OK" : dlerror());
+    // Try multiple strategies to find the functions
+    isSponsored = dlsymWithFallback("_FBFeedUnitIsSponsored", f);
+    fprintf(f, "\n_RESULT _FBFeedUnitIsSponsored: %p\n", (void*)isSponsored);
+
+    sponDataObjects = dlsymWithFallback("_FBSponsoredDataObjectsForFeedUnit", f);
+    fprintf(f, "\n_RESULT _FBSponsoredDataObjectsForFeedUnit: %p\n", sponDataObjects);
+
+    // If still not found, try after a delay (FBSharedFramework might not be loaded yet)
+    if (!isSponsored) {
+        fprintf(f, "\nScheduling retry in 5s...\n");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            const char *h = getenv("HOME");
+            if (!h) return;
+            char p[512];
+            snprintf(p, sizeof(p), "%s/Documents/glow_hook2.txt", h);
+            FILE *f2 = fopen(p, "w");
+            if (!f2) return;
+            fprintf(f2, "=== Retry dlsym after 5s ===\n\n");
+            for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+                const char *n = _dyld_get_image_name(i);
+                if (n && (strstr(n, "FBShared") || strstr(n, "Frameworks"))) {
+                    fprintf(f2, "  [%u] %s\n", i, n);
+                }
+            }
+
+            void *s = dlsymWithFallback("_FBFeedUnitIsSponsored", f2);
+            fprintf(f2, "\n_RESULT _FBFeedUnitIsSponsored: %p\n", s);
+            void *sd = dlsymWithFallback("_FBSponsoredDataObjectsForFeedUnit", f2);
+            fprintf(f2, "\n_RESULT _FBSponsoredDataObjectsForFeedUnit: %p\n", sd);
+
+            if (s) {
+                isSponsored = s;
+                sponDataObjects = sd;
+                fprintf(f2, "RESOLVED! Functions now available.\n");
+            } else {
+                fprintf(f2, "STILL NOT FOUND. Checking exports of FBSharedFramework...\n");
+                // Try to enumerate exports
+                for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+                    const char *n = _dyld_get_image_name(i);
+                    if (n && strstr(n, "FBShared")) {
+                        fprintf(f2, "Image[%u]: %s\n", i, n);
+                        // Check if NSModule or similar can help
+                        break;
+                    }
+                }
+            }
+            fclose(f2);
+        });
+    }
 
     fprintf(f, "\nNative caller addrs (from static RE):\n");
     fprintf(f, "  0x1000c2814 0x1000cfe00 0x1000e0280\n");
