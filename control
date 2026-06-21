@@ -1,8 +1,8 @@
 Package: com.tommy.glowv3
 Name: GlowV3
-Version: 1.2.36
+Version: 1.2.37
 Architecture: iphoneos-arm
-Description: Facebook ad blocker + Reels v8.2.36 (inject long press in hooked_setVideoItem)
+Description: Facebook ad blocker + Reels v8.2.37 (debug log + gesture delegate + main thread)
 Maintainer: tommy
 Author: tommy
 Section: Tweaks

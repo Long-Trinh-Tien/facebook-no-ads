@@ -1072,7 +1072,7 @@ static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *w
 // ─── Feature 4: Download Video (long press) ───
 // Hook FBVideoOverlayPluginComponentBackgroundView.didLongPress:
 // Walk view hierarchy to find VideoContainerView, get current playback item.
-@interface GlowVideoDownloadHandler : NSObject
+@interface GlowVideoDownloadHandler : NSObject <UIGestureRecognizerDelegate>
 - (void)showToast:(NSString *)msg;
 @end
 @implementation GlowVideoDownloadHandler
@@ -1080,56 +1080,64 @@ static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *w
 // v8.2.34: Helper - present MODAL alert (not action sheet) for quality choice.
 // UIAlertControllerStyleAlert is more reliable than action sheet in Reels
 // fullscreen context where action sheet gets dismissed by Reels gestures.
-// For newsfeed long press, used as backup if UIMenu doesn't work.
+// v8.2.37: WRAP entire body in dispatch_async(main_queue) per user BUG 1 fix.
+// Calling UIKit from a background thread crashes (EXC_BAD_ACCESS).
 - (void)presentQualityActionSheetHD:(NSURL *)hd
                                   sd:(NSURL *)sd
                           sourceView:(UIView *)srcView {
-    UIWindow *win = nil;
-    for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
-        if ([s isKindOfClass:[UIWindowScene class]]) {
-            for (UIWindow *w in ((UIWindowScene *)s).windows) {
-                if (w.isKeyWindow) { win = w; break; }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *win = nil;
+        for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+            if ([s isKindOfClass:[UIWindowScene class]]) {
+                for (UIWindow *w in ((UIWindowScene *)s).windows) {
+                    if (w.isKeyWindow) { win = w; break; }
+                }
             }
+            if (win) break;
         }
-        if (win) break;
-    }
-    UIViewController *top = nil;
-    if (win) {
-        top = win.rootViewController;
-        while (top.presentedViewController) top = top.presentedViewController;
-    }
-    if (!top) {
-        // Fallback: download HD if available, else SD
-        if (hd) [self downloadVideoURL:hd quality:@"hd"];
-        else if (sd) [self downloadVideoURL:sd quality:@"sd"];
-        return;
-    }
-    // v8.2.34: Use UIAlertControllerStyleAlert (modal) instead of action sheet
-    // Modal alerts are more visible and harder to dismiss accidentally
-    NSMutableString *msg = [NSMutableString string];
-    if (hd) [msg appendString:@"HD = 720p\n"];
-    if (sd) [msg appendString:@"SD = 360p"];
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"📥 Tải video"
-                                                                   message:msg
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    if (hd) {
-        [alert addAction:[UIAlertAction actionWithTitle:@"📥 Tải HD (720p)"
-                                                  style:UIAlertActionStyleDefault
-                                                handler:^(UIAlertAction *a) {
-            [self downloadVideoURL:hd quality:@"HD"];
-        }]];
-    }
-    if (sd) {
-        [alert addAction:[UIAlertAction actionWithTitle:@"📥 Tải SD (360p)"
-                                                  style:UIAlertActionStyleDefault
-                                                handler:^(UIAlertAction *a) {
-            [self downloadVideoURL:sd quality:@"SD"];
-        }]];
-    }
-    [alert addAction:[UIAlertAction actionWithTitle:@"Hủy"
-                                              style:UIAlertActionStyleCancel
-                                            handler:nil]];
-    [top presentViewController:alert animated:YES completion:nil];
+        UIViewController *top = nil;
+        if (win) {
+            top = win.rootViewController;
+            while (top.presentedViewController) top = top.presentedViewController;
+        }
+        if (!top) {
+            // Fallback: download HD if available, else SD
+            if (hd) [self downloadVideoURL:hd quality:@"HD"];
+            else if (sd) [self downloadVideoURL:sd quality:@"SD"];
+            return;
+        }
+        NSMutableString *msg = [NSMutableString string];
+        if (hd) [msg appendString:@"HD = 720p"];
+        if (sd) {
+            if (msg.length) [msg appendString:@"\n"];
+            [msg appendString:@"SD = 360p"];
+        }
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"📥 Tải video"
+                                                                       message:msg
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        if (hd) {
+            [alert addAction:[UIAlertAction actionWithTitle:@"📥 Tải HD (720p)"
+                                                      style:UIAlertActionStyleDefault
+                                                    handler:^(UIAlertAction *a) {
+                [self downloadVideoURL:hd quality:@"HD"];
+            }]];
+        }
+        if (sd) {
+            [alert addAction:[UIAlertAction actionWithTitle:@"📥 Tải SD (360p)"
+                                                      style:UIAlertActionStyleDefault
+                                                    handler:^(UIAlertAction *a) {
+                [self downloadVideoURL:sd quality:@"SD"];
+            }]];
+        }
+        [alert addAction:[UIAlertAction actionWithTitle:@"Hủy"
+                                                  style:UIAlertActionStyleCancel
+                                                handler:nil]];
+        if (alert.popoverPresentationController && srcView) {
+            alert.popoverPresentationController.sourceView = srcView;
+            alert.popoverPresentationController.sourceRect = srcView.bounds;
+        }
+        [top presentViewController:alert animated:YES completion:nil];
+    });
 }
 
 // Reels-specific: long press on Reel video view
@@ -1302,6 +1310,20 @@ static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *w
     }
 }
 
+// v8.2.37: UIGestureRecognizerDelegate method
+// Allow our long press to coexist with FB's existing gestures
+// (scroll, react, etc) so our press isn't eaten by them
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    return YES;
+}
+
+// v8.2.37: Don't wait for FB's gestures to fail before ours fires
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+       shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    return NO;
+}
+
 @end
 
 static GlowVideoDownloadHandler *g_videoHandler = nil;
@@ -1329,7 +1351,109 @@ static int g_glowStyleInstalled = 0;
 // video item on the Reels player VC. We capture the URL here because this
 // is the EXACT moment when player switches to a new Reel.
 static IMP orig_setVideoItem = NULL;
+static IMP orig_setVideoPlayer = NULL;
+static IMP orig_setPlaybackController = NULL;
+static IMP orig_configureWithVideo = NULL;
+static IMP orig_configureWithModel = NULL;
+
+// v8.2.37: Generic injectLongPressForObject helper
+// Called by all alternative method hooks to inject long press on a video context
+static void injectLongPressForObject(id obj, const char *callerLabel) {
+    @try {
+        if (!obj) return;
+        if (!g_videoHandler) g_videoHandler = [[GlowVideoDownloadHandler alloc] init];
+        // Check already injected
+        NSNumber *already = objc_getAssociatedObject(obj, "GlowNewsfeedLP");
+        if (already) return;
+        // Get target view
+        UIView *targetView = nil;
+        if ([obj isKindOfClass:[UIView class]]) {
+            targetView = (UIView *)obj;
+        } else if ([obj respondsToSelector:@selector(view)]) {
+            id v = [obj performSelector:@selector(view)];
+            if ([v isKindOfClass:[UIView class]]) targetView = v;
+        }
+        if (targetView) {
+            objc_setAssociatedObject(obj, "GlowNewsfeedLP", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
+                initWithTarget:g_videoHandler
+                        action:@selector(onNewsfeedLongPress:)];
+            lp.minimumPressDuration = 0.5;
+            lp.delegate = (id<UIGestureRecognizerDelegate>)g_videoHandler;
+            targetView.userInteractionEnabled = YES;
+            [targetView addGestureRecognizer:lp];
+            const char *cls = class_getName(object_getClass(obj));
+            LOG("[dl/news] GESTURE INJECTED via %s on %s (view=%s)\n",
+                callerLabel, cls, class_getName(object_getClass(targetView)));
+        }
+    } @catch (NSException *e) {
+        LOG("[dl/news] injectLP exc: %s\n", e.reason.UTF8String);
+    }
+}
+
+// v8.2.37: setVideoPlayer: hook
+static void hooked_setVideoPlayer(id self, SEL _cmd, id player) {
+    if (orig_setVideoPlayer) {
+        typedef void (*FnType)(id, SEL, id);
+        ((FnType)orig_setVideoPlayer)(self, _cmd, player);
+    }
+    LOG("[dl/debug_entrance] setVideoPlayer: VC=%s player=%s\n",
+        self ? class_getName(object_getClass(self)) : "nil",
+        player ? class_getName(object_getClass(player)) : "nil");
+    if (s_downloadVideo) {
+        injectLongPressForObject(self, "setVideoPlayer:");
+    }
+}
+
+// v8.2.37: setPlaybackController: hook
+static void hooked_setPlaybackController(id self, SEL _cmd, id ctrl) {
+    if (orig_setPlaybackController) {
+        typedef void (*FnType)(id, SEL, id);
+        ((FnType)orig_setPlaybackController)(self, _cmd, ctrl);
+    }
+    LOG("[dl/debug_entrance] setPlaybackController: VC=%s ctrl=%s\n",
+        self ? class_getName(object_getClass(self)) : "nil",
+        ctrl ? class_getName(object_getClass(ctrl)) : "nil");
+    if (s_downloadVideo) {
+        injectLongPressForObject(self, "setPlaybackController:");
+    }
+}
+
+// v8.2.37: configureWithVideo: hook
+static void hooked_configureWithVideo(id self, SEL _cmd, id video) {
+    if (orig_configureWithVideo) {
+        typedef void (*FnType)(id, SEL, id);
+        ((FnType)orig_configureWithVideo)(self, _cmd, video);
+    }
+    LOG("[dl/debug_entrance] configureWithVideo: VC=%s video=%s\n",
+        self ? class_getName(object_getClass(self)) : "nil",
+        video ? class_getName(object_getClass(video)) : "nil");
+    if (s_downloadVideo) {
+        injectLongPressForObject(self, "configureWithVideo:");
+    }
+}
+
+// v8.2.37: configureWithModel: hook
+static void hooked_configureWithModel(id self, SEL _cmd, id model) {
+    if (orig_configureWithModel) {
+        typedef void (*FnType)(id, SEL, id);
+        ((FnType)orig_configureWithModel)(self, _cmd, model);
+    }
+    LOG("[dl/debug_entrance] configureWithModel: VC=%s model=%s\n",
+        self ? class_getName(object_getClass(self)) : "nil",
+        model ? class_getName(object_getClass(model)) : "nil");
+    if (s_downloadVideo) {
+        injectLongPressForObject(self, "configureWithModel:");
+    }
+}
 static void hooked_setVideoItem(id self, SEL _cmd, id newItem) {
+    // v8.2.37: 💥 UNCONDITIONAL DEBUG LOG at entrance (per user diagnostic step)
+    // Tells us if setVideoItem: is even called for newsfeed videos
+    const char *selfClsDebug = self ? class_getName(object_getClass(self)) : "nil";
+    const char *itemClsDebug = newItem ? class_getName(object_getClass(newItem)) : "nil";
+    LOG("[dl/debug_entrance] HÀM ĐÃ CHẠY! Class cha: %s | Class Item: %s\n",
+        selfClsDebug, itemClsDebug);
+
     if (orig_setVideoItem) {
         typedef void (*FnType)(id, SEL, id);
         FnType fn = (FnType)(uintptr_t)orig_setVideoItem;
@@ -1362,14 +1486,23 @@ static void hooked_setVideoItem(id self, SEL _cmd, id newItem) {
             hd ? "YES" : "NO",
             sd ? "YES" : "NO");
 
-        // v8.2.36: GESTURE INJECTION (per user's pro approach)
+        // v8.2.36/37: GESTURE INJECTION (per user's pro approach)
         // Inject our UILongPressGestureRecognizer into the VC's view
-        // (NOT the video view) so it fires only on long-press, not
-        // interfere with FB's existing long press (reactions, copy, etc.)
-        //
         // Skip Reels VCs (they have their own button via layoutSubviews)
-        if (selfCls && strstr(selfCls, "FBVideoHome") != NULL) {
-            // Reels VC - skip
+        //
+        // v8.2.37: FIX - Loosen Reels filter. "FBVideoHome" matched Reels
+        // but also might match newsfeed-related classes. We just check
+        // for "FBVideoHomeViewController" / "FBVideoHomeUnifiedPlayer"
+        // (the actual Reels VCs).
+        BOOL isReelsVC = NO;
+        if (selfCls) {
+            if (strstr(selfCls, "FBVideoHomeUnifiedPlayer") != NULL) isReelsVC = YES;
+            else if (strstr(selfCls, "FBVideoHomeViewController") != NULL) isReelsVC = YES;
+            else if (strstr(selfCls, "FBVideoHomeFeed") != NULL) isReelsVC = YES;
+        }
+        if (isReelsVC) {
+            // Reels VC - skip (use button instead)
+            LOG("[dl/news] skip Reels VC: %s\n", selfCls);
         } else if (s_downloadVideo) {
             // Check if already injected
             NSNumber *alreadyInjected = objc_getAssociatedObject(self, "GlowNewsfeedLP");
@@ -1392,9 +1525,16 @@ static void hooked_setVideoItem(id self, SEL _cmd, id newItem) {
                     UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
                         initWithTarget:g_videoHandler
                                 action:@selector(onNewsfeedLongPress:)];
-                    lp.minimumPressDuration = 0.5;  // standard UX
+                    lp.minimumPressDuration = 0.5;
+                    // v8.2.37: Set delegate + enable simultaneous recognition
+                    // FB's own gestures would otherwise eat ours
+                    lp.delegate = (id<UIGestureRecognizerDelegate>)g_videoHandler;
+                    // v8.2.37: Ensure targetView receives touches (might be a non-interactive bg view)
+                    targetView.userInteractionEnabled = YES;
                     [targetView addGestureRecognizer:lp];
-                    LOG("[dl/news] GESTURE INJECTED on %s\n", selfCls);
+                    LOG("[dl/news] GESTURE INJECTED on %s (view=%s frame=%@)\n",
+                        selfCls, class_getName(object_getClass(targetView)),
+                        NSStringFromCGRect(targetView.frame));
                 }
             }
         }
@@ -1455,8 +1595,18 @@ void installGlowStyleReelsHook(void) {
 
         int setVideoItemHooked = 0;
         int cvpiHooked = 0;
+        int setPlayerHooked = 0;
+        int setPlayCtrlHooked = 0;
+        int cfgVideoHooked = 0;
+        int cfgModelHooked = 0;
         SEL setSel = sel_registerName("setVideoItem:");
         SEL getSel = sel_registerName("currentVideoPlaybackItem");
+        // v8.2.37: ALTERNATIVE METHODS (per user "Kịch bản B" diagnostic)
+        // If setVideoItem: doesn't fire on newsfeed, FB might use one of these
+        SEL setPlayerSel = sel_registerName("setVideoPlayer:");
+        SEL setPlayCtrlSel = sel_registerName("setPlaybackController:");
+        SEL cfgVideoSel = sel_registerName("configureWithVideo:");
+        SEL cfgModelSel = sel_registerName("configureWithModel:");
         for (int i = 0; i < count; i++) {
             Class cls = classes[i];
             if (!cls) continue;
@@ -1488,11 +1638,61 @@ void installGlowStyleReelsHook(void) {
                     cvpiHooked++;
                 }
             }
+
+            // v8.2.37: Alternative setVideoPlayer: - many FB classes use this
+            if (class_respondsToSelector(cls, setPlayerSel)) {
+                Method m = class_getInstanceMethod(cls, setPlayerSel);
+                if (m) {
+                    if (!orig_setVideoPlayer) {
+                        orig_setVideoPlayer = method_getImplementation(m);
+                    }
+                    method_setImplementation(m, (IMP)hooked_setVideoPlayer);
+                    setPlayerHooked++;
+                    LOG("[dl/reel] hooked setVideoPlayer: on %s\n", name);
+                }
+            }
+            // v8.2.37: setPlaybackController:
+            if (class_respondsToSelector(cls, setPlayCtrlSel)) {
+                Method m = class_getInstanceMethod(cls, setPlayCtrlSel);
+                if (m) {
+                    if (!orig_setPlaybackController) {
+                        orig_setPlaybackController = method_getImplementation(m);
+                    }
+                    method_setImplementation(m, (IMP)hooked_setPlaybackController);
+                    setPlayCtrlHooked++;
+                    LOG("[dl/reel] hooked setPlaybackController: on %s\n", name);
+                }
+            }
+            // v8.2.37: configureWithVideo:
+            if (class_respondsToSelector(cls, cfgVideoSel)) {
+                Method m = class_getInstanceMethod(cls, cfgVideoSel);
+                if (m) {
+                    if (!orig_configureWithVideo) {
+                        orig_configureWithVideo = method_getImplementation(m);
+                    }
+                    method_setImplementation(m, (IMP)hooked_configureWithVideo);
+                    cfgVideoHooked++;
+                    LOG("[dl/reel] hooked configureWithVideo: on %s\n", name);
+                }
+            }
+            // v8.2.37: configureWithModel:
+            if (class_respondsToSelector(cls, cfgModelSel)) {
+                Method m = class_getInstanceMethod(cls, cfgModelSel);
+                if (m) {
+                    if (!orig_configureWithModel) {
+                        orig_configureWithModel = method_getImplementation(m);
+                    }
+                    method_setImplementation(m, (IMP)hooked_configureWithModel);
+                    cfgModelHooked++;
+                    LOG("[dl/reel] hooked configureWithModel: on %s\n", name);
+                }
+            }
         }
         free(classes);
         g_glowStyleInstalled = 1;
-        LOG("[dl/reel] Glow-style hooks installed: setVideoItem:=%d currentVideoPlaybackItem=%d\n",
-            setVideoItemHooked, cvpiHooked);
+        LOG("[dl/reel] Glow-style hooks installed: setVideoItem:=%d currentVideoPlaybackItem=%d "
+            "setVideoPlayer:=%d setPlaybackController:=%d configureWithVideo:=%d configureWithModel:=%d\n",
+            setVideoItemHooked, cvpiHooked, setPlayerHooked, setPlayCtrlHooked, cfgVideoHooked, cfgModelHooked);
     } @catch (NSException *e) {
         LOG("[dl/reel] installGlowStyleReelsHook exc: %s\n", e.reason.UTF8String);
     } @catch (...) {
@@ -2619,7 +2819,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.36 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.37 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
