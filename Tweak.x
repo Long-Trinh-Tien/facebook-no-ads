@@ -202,36 +202,115 @@ static void prefsChanged(CFNotificationCenterRef center, void *observer, CFStrin
 
 @end
 
-// Open settings
+// Open settings - find root VC robustly
 static void openGlowSettings(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        GlowSettingsViewController *vc = [[GlowSettingsViewController alloc] init];
-        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
-        nav.modalPresentationStyle = UIModalPresentationFormSheet;
-        UIViewController *root = nil;
-        // Find root view controller
-        UIApplication *app = [UIApplication sharedApplication];
-        for (UIScene *scene in [app connectedScenes]) {
-            if ([scene isKindOfClass:[UIWindowScene class]]) {
-                UIWindowScene *ws = (UIWindowScene *)scene;
-                for (UIWindow *w in ws.windows) {
-                    if (w.rootViewController) { root = w.rootViewController; break; }
+        @try {
+            GlowSettingsViewController *vc = [[GlowSettingsViewController alloc] init];
+            UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+            nav.modalPresentationStyle = UIModalPresentationFormSheet;
+
+            UIViewController *target = nil;
+            UIApplication *app = [UIApplication sharedApplication];
+
+            // Try UIScene first
+            for (UIScene *scene in [app connectedScenes]) {
+                if ([scene isKindOfClass:[UIWindowScene class]]) {
+                    UIWindowScene *ws = (UIWindowScene *)scene;
+                    for (UIWindow *w in ws.windows) {
+                        if (!w.rootViewController) continue;
+                        // Find the topmost presented VC
+                        UIViewController *cur = w.rootViewController;
+                        while (cur.presentedViewController) {
+                            cur = cur.presentedViewController;
+                        }
+                        if (cur) { target = cur; break; }
+                    }
+                    if (target) break;
                 }
-                if (root) break;
             }
-        }
-        if (!root) {
-            // Fallback: app.keyWindow
-            UIWindow *w = [app keyWindow];
-            root = w.rootViewController;
-        }
-        if (root) {
-            [root presentViewController:nav animated:YES completion:nil];
-            LOG("[ui] settings presented\n");
-        } else {
-            LOG("[ui] no root view controller to present settings\n");
+
+            if (!target) {
+                UIWindow *w = [app keyWindow];
+                if (w) target = w.rootViewController;
+            }
+
+            if (target) {
+                [target presentViewController:nav animated:YES completion:^{
+                    LOG("[ui] settings presented on %s\n", class_getName(object_getClass(target)));
+                }];
+            } else {
+                LOG("[ui] no root VC found - app.windows=%lu\n", (unsigned long)app.windows.count);
+            }
+        } @catch (NSException *e) {
+            LOG("[ui] exc: %s\n", e.reason.UTF8String);
         }
     });
+}
+
+// Long press handler
+@interface GlowLongPressHandler : NSObject
+@end
+@implementation GlowLongPressHandler
+- (void)handleLongPress:(UILongPressGestureRecognizer *)gr {
+    if (gr.state == UIGestureRecognizerStateBegan) {
+        LOG("[ui] long press detected on %s\n", class_getName(object_getClass(gr.view)));
+        openGlowSettings();
+    }
+}
+@end
+
+static GlowLongPressHandler *g_longPressHandler = nil;
+static NSMutableSet *g_viewsWithLongPress = nil;
+
+// Add long press recognizer to a view (only once)
+static void tryAddLongPressToView(UIView *v) {
+    if (!v || !g_viewsWithLongPress) return;
+    if ([g_viewsWithLongPress containsObject:[NSValue valueWithNonretainedObject:v]]) return;
+    if (v.gestureRecognizers.count > 5) return;  // skip views with too many recognizers
+    if (![v isUserInteractionEnabled]) return;
+    if (v.frame.size.width < 100 || v.frame.size.height < 30) return;  // skip tiny views
+    // Only add to scroll views, tab bars, or top-level views
+    BOOL isTarget = [v isKindOfClass:[UIScrollView class]] ||
+                    [v isKindOfClass:[UITabBar class]] ||
+                    v.frame.size.height > 200;
+    if (!isTarget) return;
+
+    UILongPressGestureRecognizer *gr = [[UILongPressGestureRecognizer alloc]
+        initWithTarget:g_longPressHandler
+        action:@selector(handleLongPress:)];
+    gr.minimumPressDuration = 0.6;
+    gr.cancelsTouchesInView = NO;  // don't break other gestures
+    [v addGestureRecognizer:gr];
+    [g_viewsWithLongPress addObject:[NSValue valueWithNonretainedObject:v]];
+    LOG("[ui] added long press to %s frame=(%.0f,%.0f,%.0f,%.0f)\n",
+        class_getName(object_getClass(v)), v.frame.origin.x, v.frame.origin.y,
+        v.frame.size.width, v.frame.size.height);
+}
+
+// Walk view hierarchy to find candidates
+static void walkViewsForLongPress(UIView *v, int depth) {
+    if (!v || depth > 4) return;
+    tryAddLongPressToView(v);
+    for (UIView *sub in v.subviews) {
+        walkViewsForLongPress(sub, depth + 1);
+    }
+}
+
+static void installLongPressOnCurrentUI(void) {
+    if (!g_longPressHandler) {
+        g_longPressHandler = [[GlowLongPressHandler alloc] init];
+        g_viewsWithLongPress = [[NSMutableSet alloc] init];
+    }
+    UIApplication *app = [UIApplication sharedApplication];
+    for (UIScene *scene in [app connectedScenes]) {
+        if ([scene isKindOfClass:[UIWindowScene class]]) {
+            UIWindowScene *ws = (UIWindowScene *)scene;
+            for (UIWindow *w in ws.windows) {
+                walkViewsForLongPress(w, 0);
+            }
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -417,27 +496,10 @@ static void noop_seen_3(id self, SEL _cmd, id a, id b, id c, BOOL d, id e, id f)
 }
 
 // ═══════════════════════════════════════════════════════════════
-// SECTION 5: Long press to open settings (on any tab)
+// SECTION 5: Long press to open settings (on any view)
 // ═══════════════════════════════════════════════════════════════
 
-static IMP orig_tabBar_longPress = NULL;
-
-@interface GlowLongPress : UIGestureRecognizer
-@end
-@implementation GlowLongPress
-@end
-
-// Hook tabBar didSelect to detect long press on tab bar
-static IMP orig_tabBar_didSelect = NULL;
-static void hooked_tabBar_didSelect(id self, SEL _cmd, UITabBar *tabBar, UITabBarItem *item) {
-    if (orig_tabBar_didSelect) {
-        typedef void (*FnType)(id, SEL, id, id);
-        FnType fn = (FnType)(uintptr_t)orig_tabBar_didSelect;
-        fn(self, _cmd, (id)tabBar, (id)item);
-    }
-    // Open settings - long press on any tab opens Glow settings
-    openGlowSettings();
-}
+// (long press is added in installLongPressOnCurrentUI, called after hooks install)
 
 // ═══════════════════════════════════════════════════════════════
 // SECTION 6: Install hooks (deferred until NewsFeed is ready)
@@ -516,17 +578,9 @@ static void installHooks(void) {
             }
         }
 
-        // Hook 6: tab bar - long press to open settings
-        Class tabCls = objc_getClass("UITabBarController");
-        if (tabCls) {
-            SEL sel = sel_registerName("tabBar:didSelectItem:");
-            Method m = class_getInstanceMethod(tabCls, sel);
-            if (m) {
-                orig_tabBar_didSelect = method_getImplementation(m);
-                method_setImplementation(m, (IMP)hooked_tabBar_didSelect);
-                LOG("  hook #6: UITabBarController.tabBar:didSelectItem: -> opens settings\n");
-            }
-        }
+        // Hook 6: install long press on current view hierarchy
+        // (called once after hooks install, then re-called when new VCs appear)
+        installLongPressOnCurrentUI();
 
         LOG("=== Done ===\n");
     } @catch (NSException *e) {
@@ -542,10 +596,19 @@ static void hooked_viewDidAppear(id self, SEL _cmd, BOOL animated) {
         FnType fn = (FnType)(uintptr_t)orig_viewDidAppear;
         fn(self, _cmd, animated);
     }
-    if (setupDone) return;
-    const char *cn = class_getName(object_getClass(self));
-    if (cn && strstr(cn, "FBNewsFeedViewController")) {
-        dispatch_async(dispatch_get_main_queue(), ^{ installHooks(); });
+    if (!setupDone) {
+        const char *cn = class_getName(object_getClass(self));
+        if (cn && strstr(cn, "FBNewsFeedViewController")) {
+            dispatch_async(dispatch_get_main_queue(), ^{ installHooks(); });
+        }
+    } else {
+        // Re-install long press for new VCs (catches push/pop, tab switches)
+        const char *cn = class_getName(object_getClass(self));
+        if (cn && (strstr(cn, "ViewController") || strstr(cn, "View"))) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                @try { installLongPressOnCurrentUI(); } @catch (...) {}
+            });
+        }
     }
 }
 
@@ -585,5 +648,11 @@ static void glow_init(void) {
                 }
             }
         } @catch (...) {}
+
+        // Also install long press after a short delay (catches late UI)
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC),
+                       dispatch_get_main_queue(), ^{
+            @try { installLongPressOnCurrentUI(); } @catch (...) {}
+        });
     });
 }
