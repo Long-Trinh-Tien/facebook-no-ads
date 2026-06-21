@@ -2,3 +2,7 @@
 *.dylib
 *.deb
 *.ipa
+packages/
+*.deb
+*.ipa
+.theos/

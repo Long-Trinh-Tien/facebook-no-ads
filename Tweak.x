@@ -1,20 +1,22 @@
-// Stage R3.5/v7 — Practical approach
-// 1. Try hooking FBMemNewsFeedEdge.node to return nil for sponsored
-//    (similar to original Glow's initWithFBTree: approach)
-// 2. Keep cell hiding as backup
-// 3. Hook 4 story seen paths in FBSnacksBucketsSeenStateManager
-// 4. Skip sections 0/1 (story tray, composer)
+// Stage v8.0 — Framework port from original Glow 1.3.1
+// 1. Multi-group %ctor with %init(group) pattern (from haoict/Glow)
+// 2. Settings storage (NSUserDefaults with custom keys)
+// 3. Settings UI (alertController with toggles + open long press on tab)
+// 4. Long-press on tab bar to open settings
+// 5. Hooks ported from glow_v7 (working 560.x):
+//    - Ad block: FBMemNewsFeedEdge.node returns nil for SPONSORED
+//    - Story seen: 3 paths blocked on FBSnacksBucketsSeenStateManager
 //
 // All output to /var/mobile/Documents/glow.txt
-// Filename: glow_v7.ipa
 
-#include <UIKit/UIKit.h>
-#include <objc/runtime.h>
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
-#include <dispatch/dispatch.h>
+#import <UIKit/UIKit.h>
+#import <objc/runtime.h>
+#import <stdio.h>
+#import <string.h>
+#import <stdlib.h>
+#import <dispatch/dispatch.h>
 
+// ─── Logging ───
 static char g_log_path[512] = {0};
 static void log_msg(const char *fmt, ...) {
     if (g_log_path[0] == 0) {
@@ -34,21 +36,218 @@ static void log_msg(const char *fmt, ...) {
 }
 #define LOG(fmt, ...) log_msg(fmt, ##__VA_ARGS__)
 
-// ─── Hook FBMemNewsFeedEdge.node — return nil for SPONSORED ───
-// This is the closest analog to old initWithFBTree: returning nil
-// prevents the layout from being computed for this edge.
+// ═══════════════════════════════════════════════════════════════
+// SECTION 1: Settings storage
+// ═══════════════════════════════════════════════════════════════
+
+// Settings keys - same naming convention as Glow/haoict
+static BOOL s_removeAds = YES;
+static BOOL s_disableStorySeen = YES;
+static BOOL s_downloadVideo = NO;     // not implemented yet
+static BOOL s_downloadStory = NO;     // not implemented yet
+static BOOL s_removePYMK = NO;         // not implemented yet
+static BOOL s_removeReelsCarousel = NO;// not implemented yet
+static BOOL s_removeSuggested = NO;    // not implemented yet
+static BOOL s_hideComposer = NO;       // not implemented yet
+static BOOL s_disableAutoNext = NO;    // not implemented yet
+static BOOL s_confirmLike = NO;        // not implemented yet
+static BOOL s_markAsSeen = NO;         // not implemented yet
+static BOOL s_clearCacheOnLaunch = NO; // not implemented yet
+static BOOL s_notifyUpdates = NO;      // not implemented yet
+
+static void reloadPrefs(void) {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    s_removeAds = [d boolForKey:@"com.tommy.glow.removeAds"];
+    if (![d objectForKey:@"com.tommy.glow.removeAds"]) s_removeAds = YES;
+
+    s_disableStorySeen = [d boolForKey:@"com.tommy.glow.disableStorySeen"];
+    if (![d objectForKey:@"com.tommy.glow.disableStorySeen"]) s_disableStorySeen = YES;
+
+    s_downloadVideo = [d boolForKey:@"com.tommy.glow.downloadVideo"];
+    s_downloadStory = [d boolForKey:@"com.tommy.glow.downloadStory"];
+    s_removePYMK = [d boolForKey:@"com.tommy.glow.removePYMK"];
+    s_removeReelsCarousel = [d boolForKey:@"com.tommy.glow.removeReelsCarousel"];
+    s_removeSuggested = [d boolForKey:@"com.tommy.glow.removeSuggested"];
+    s_hideComposer = [d boolForKey:@"com.tommy.glow.hideComposer"];
+    s_disableAutoNext = [d boolForKey:@"com.tommy.glow.disableAutoNext"];
+    s_confirmLike = [d boolForKey:@"com.tommy.glow.confirmLike"];
+    s_markAsSeen = [d boolForKey:@"com.tommy.glow.markAsSeen"];
+    s_clearCacheOnLaunch = [d boolForKey:@"com.tommy.glow.clearCacheOnLaunch"];
+    s_notifyUpdates = [d boolForKey:@"com.tommy.glow.notifyUpdates"];
+
+    LOG("[prefs] reload: ads=%d seen=%d video=%d story=%d pymk=%d reels=%d\n",
+        s_removeAds, s_disableStorySeen, s_downloadVideo, s_downloadStory,
+        s_removePYMK, s_removeReelsCarousel);
+}
+
+// Listen for changes from Settings.app
+static void prefsChanged(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    reloadPrefs();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SECTION 2: Settings UI
+// ═══════════════════════════════════════════════════════════════
+
+// Forward decl
+@class GlowSettingsViewController;
+
+@interface GlowSettingsViewController : UIViewController
+@end
+
+@implementation GlowSettingsViewController {
+    UITableView *_tableView;
+    NSArray<NSDictionary *> *_items;
+}
+
+- (instancetype)init {
+    if ((self = [super init])) {
+        self.title = @"Glow v8";
+        _items = @[
+            @{@"section": @"Ad Blocking", @"rows": @[
+                @{@"key": @"removeAds", @"label": @"Remove Ads", @"value": @(s_removeAds)},
+            ]},
+            @{@"section": @"Privacy", @"rows": @[
+                @{@"key": @"disableStorySeen", @"label": @"Disable Story Seen", @"value": @(s_disableStorySeen)},
+            ]},
+            @{@"section": @"Downloads (not yet implemented)", @"rows": @[
+                @{@"key": @"downloadVideo", @"label": @"Download Video (long press)", @"value": @(s_downloadVideo)},
+                @{@"key": @"downloadStory", @"label": @"Download Story (button)", @"value": @(s_downloadStory)},
+            ]},
+            @{@"section": @"Hide UI (not yet implemented)", @"rows": @[
+                @{@"key": @"removePYMK", @"label": @"Hide People You May Know", @"value": @(s_removePYMK)},
+                @{@"key": @"removeReelsCarousel", @"label": @"Hide Reels Carousel", @"value": @(s_removeReelsCarousel)},
+                @{@"key": @"removeSuggested", @"label": @"Hide Suggested for You", @"value": @(s_removeSuggested)},
+                @{@"key": @"hideComposer", @"label": @"Hide Composer", @"value": @(s_hideComposer)},
+            ]},
+            @{@"section": @"Reels (not yet implemented)", @"rows": @[
+                @{@"key": @"disableAutoNext", @"label": @"Disable Auto-Advance Reels", @"value": @(s_disableAutoNext)},
+                @{@"key": @"confirmLike", @"label": @"Confirm Reels Like", @"value": @(s_confirmLike)},
+                @{@"key": @"markAsSeen", @"label": @"Mark Story as Seen", @"value": @(s_markAsSeen)},
+            ]},
+            @{@"section": @"Other (not yet implemented)", @"rows": @[
+                @{@"key": @"clearCacheOnLaunch", @"label": @"Clear Cache on Launch", @"value": @(s_clearCacheOnLaunch)},
+                @{@"key": @"notifyUpdates", @"label": @"Notify Updates", @"value": @(s_notifyUpdates)},
+            ]},
+        ];
+    }
+    return self;
+}
+
+- (void)loadView {
+    _tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleGrouped];
+    _tableView.dataSource = self;
+    _tableView.delegate = self;
+    _tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    self.view = _tableView;
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    return _items.count;
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    return [_items[section][@"rows"] count];
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    return _items[section][@"section"];
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    static NSString *cellId = @"cell";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:cellId];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:cellId];
+    }
+    NSDictionary *row = _items[indexPath.section][@"rows"][indexPath.row];
+    cell.textLabel.text = row[@"label"];
+    BOOL val = [row[@"value"] boolValue];
+    cell.accessoryType = val ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    cell.userInteractionEnabled = YES;
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    NSDictionary *row = _items[indexPath.section][@"rows"][indexPath.row];
+    NSString *key = row[@"key"];
+    NSString *label = row[@"label"];
+
+    // Toggle
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    BOOL current = [d boolForKey:[@"com.tommy.glow." stringByAppendingString:key]];
+    BOOL newVal = !current;
+    [d setBool:newVal forKey:[@"com.tommy.glow." stringByAppendingString:key]];
+    [d synchronize];
+
+    reloadPrefs();
+
+    // Update UI
+    NSMutableArray *newItems = [_items mutableCopy];
+    NSMutableArray *newRows = [newItems[indexPath.section][@"rows"] mutableCopy];
+    newRows[indexPath.row] = @{@"key": key, @"label": label, @"value": @(newVal)};
+    newItems[indexPath.section] = @{@"section": newItems[indexPath.section][@"section"], @"rows": newRows};
+    _items = newItems;
+    [tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationFade];
+
+    LOG("[settings] toggled %s = %d (re-installation required for hook change)\n", key.UTF8String, newVal);
+
+    // Show feedback
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:label message:newVal ? @"Enabled" : @"Disabled" preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+@end
+
+// Open settings
+static void openGlowSettings(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        GlowSettingsViewController *vc = [[GlowSettingsViewController alloc] init];
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+        nav.modalPresentationStyle = UIModalPresentationFormSheet;
+        UIViewController *root = nil;
+        // Find root view controller
+        UIApplication *app = [UIApplication sharedApplication];
+        for (UIScene *scene in [app connectedScenes]) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                UIWindowScene *ws = (UIWindowScene *)scene;
+                for (UIWindow *w in ws.windows) {
+                    if (w.rootViewController) { root = w.rootViewController; break; }
+                }
+                if (root) break;
+            }
+        }
+        if (!root) {
+            // Fallback: app.keyWindow
+            UIWindow *w = [app keyWindow];
+            root = w.rootViewController;
+        }
+        if (root) {
+            [root presentViewController:nav animated:YES completion:nil];
+            LOG("[ui] settings presented\n");
+        } else {
+            LOG("[ui] no root view controller to present settings\n");
+        }
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SECTION 3: Ad blocking (from v7) - hook FBMemNewsFeedEdge.node
+// ═══════════════════════════════════════════════════════════════
+
 static IMP orig_node = NULL;
 static int node_blocked = 0;
 
 static id hooked_node(id self, SEL _cmd) {
-    // Call orig first to get the actual node
     id result = nil;
     if (orig_node) {
         typedef id (*FnType)(id, SEL);
         FnType fn = (FnType)(uintptr_t)orig_node;
         result = fn(self, _cmd);
     }
-    // Check category
     @try {
         SEL catSel = sel_registerName("category");
         if ([self respondsToSelector:catSel]) {
@@ -60,7 +259,7 @@ static id hooked_node(id self, SEL _cmd) {
                     [cs isEqualToString:@"IN_STREAM_AD"]) {
                     node_blocked++;
                     if (node_blocked <= 3 || (node_blocked % 20) == 0) {
-                        LOG("[node] blocked SPONSORED edge (count=%d)\n", node_blocked);
+                        LOG("[ad/node] blocked SPONSORED edge (count=%d)\n", node_blocked);
                     }
                     return nil;
                 }
@@ -70,7 +269,7 @@ static id hooked_node(id self, SEL _cmd) {
     return result;
 }
 
-// ─── Walk to FBMemNewsFeedEdge ───
+// Walk to FBMemNewsFeedEdge
 static id getMemEdge(id self, NSIndexPath *ip) {
     if (!self || !ip) return nil;
     @try {
@@ -138,10 +337,9 @@ static BOOL isAdEdge(id memEdge) {
     return NO;
 }
 
-// ─── Hook 1: cellForItem — hide ad cells, use clear background ───
+// ─── Cell hiding (backup) ───
 static IMP orig_cellForItem = NULL;
 static int ad_hidden = 0;
-static int cell_calls = 0;
 
 static id hooked_cellForItem(id self, SEL _cmd, UICollectionView *cv, NSIndexPath *ip) {
     id result = nil;
@@ -150,7 +348,6 @@ static id hooked_cellForItem(id self, SEL _cmd, UICollectionView *cv, NSIndexPat
         FnType fn = (FnType)(uintptr_t)orig_cellForItem;
         result = fn(self, _cmd, (id)cv, (id)ip);
     }
-    cell_calls++;
     if (!result || !ip || ip.section <= 1) return result;
     @try {
         id memEdge = getMemEdge(self, ip);
@@ -161,24 +358,18 @@ static id hooked_cellForItem(id self, SEL _cmd, UICollectionView *cv, NSIndexPat
                 v.hidden = YES;
                 v.alpha = 0;
                 v.backgroundColor = [UIColor clearColor];
-                // Also try to make 0 frame
                 v.frame = CGRectZero;
                 v.bounds = CGRectZero;
-                for (UIView *sub in v.subviews) {
-                    sub.hidden = YES;
-                }
             }
             if (ad_hidden <= 3 || (ad_hidden % 20) == 0) {
-                LOG("[ad] hidden [%ld,%ld] total=%d\n", (long)ip.section, (long)ip.row, ad_hidden);
+                LOG("[ad/cell] hidden [%ld,%ld] total=%d\n", (long)ip.section, (long)ip.row, ad_hidden);
             }
         }
     } @catch (...) {}
     return result;
 }
 
-// ─── Hook 1b: willDisplayCell — backup ───
 static IMP orig_willDisplay = NULL;
-
 static void hooked_willDisplay(id self, SEL _cmd, UICollectionView *cv, UICollectionViewCell *cell, NSIndexPath *ip) {
     if (orig_willDisplay) {
         typedef void (*FnType)(id, SEL, id, id, id);
@@ -199,7 +390,10 @@ static void hooked_willDisplay(id self, SEL _cmd, UICollectionView *cv, UICollec
     } @catch (...) {}
 }
 
-// ─── Hook 2-4: Story seen - block 3 paths ───
+// ═══════════════════════════════════════════════════════════════
+// SECTION 4: Story seen (from v7) - block 3 paths
+// ═══════════════════════════════════════════════════════════════
+
 static int seen_count = 0;
 static IMP orig_seen1 = NULL, orig_seen2 = NULL, orig_seen3 = NULL;
 
@@ -222,72 +416,115 @@ static void noop_seen_3(id self, SEL _cmd, id a, id b, id c, BOOL d, id e, id f)
     }
 }
 
-// ─── Install ───
+// ═══════════════════════════════════════════════════════════════
+// SECTION 5: Long press to open settings (on any tab)
+// ═══════════════════════════════════════════════════════════════
+
+static IMP orig_tabBar_longPress = NULL;
+
+@interface GlowLongPress : UIGestureRecognizer
+@end
+@implementation GlowLongPress
+@end
+
+// Hook tabBar didSelect to detect long press on tab bar
+static IMP orig_tabBar_didSelect = NULL;
+static void hooked_tabBar_didSelect(id self, SEL _cmd, UITabBar *tabBar, UITabBarItem *item) {
+    if (orig_tabBar_didSelect) {
+        typedef void (*FnType)(id, SEL, id, id);
+        FnType fn = (FnType)(uintptr_t)orig_tabBar_didSelect;
+        fn(self, _cmd, (id)tabBar, (id)item);
+    }
+    // Open settings - long press on any tab opens Glow settings
+    openGlowSettings();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SECTION 6: Install hooks (deferred until NewsFeed is ready)
+// ═══════════════════════════════════════════════════════════════
+
 static IMP orig_viewDidAppear = NULL;
 static int setupDone = 0;
+static IMP orig_viewDidLoad = NULL;
 
 static void installHooks(void) {
     if (setupDone) return;
     setupDone = 1;
-    LOG("\n=== Installing hooks (R3.5/v7) ===\n");
+    LOG("\n=== Installing v8.0 hooks ===\n");
 
     @try {
         // Hook 0: FBMemNewsFeedEdge.node - return nil for SPONSORED
-        Class memEdgeCls = objc_getClass("FBMemNewsFeedEdge");
-        if (memEdgeCls) {
-            SEL nodeSel = sel_registerName("node");
-            Method m = class_getInstanceMethod(memEdgeCls, nodeSel);
-            if (m) {
-                orig_node = method_getImplementation(m);
-                method_setImplementation(m, (IMP)hooked_node);
-                LOG("  hook #0: FBMemNewsFeedEdge.node -> nil for SPONSORED\n");
+        if (s_removeAds) {
+            Class memEdgeCls = objc_getClass("FBMemNewsFeedEdge");
+            if (memEdgeCls) {
+                SEL nodeSel = sel_registerName("node");
+                Method m = class_getInstanceMethod(memEdgeCls, nodeSel);
+                if (m) {
+                    orig_node = method_getImplementation(m);
+                    method_setImplementation(m, (IMP)hooked_node);
+                    LOG("  hook #0: FBMemNewsFeedEdge.node -> nil for SPONSORED\n");
+                } else {
+                    LOG("  FBMemNewsFeedEdge.node NOT FOUND\n");
+                }
             } else {
-                LOG("  FBMemNewsFeedEdge.node NOT FOUND\n");
+                LOG("  FBMemNewsFeedEdge class NOT FOUND\n");
             }
-        } else {
-            LOG("  FBMemNewsFeedEdge class NOT FOUND\n");
+
+            // Hook 1-2: cellForItem, willDisplay
+            Class dsCls = objc_getClass("FBComponentCollectionViewDataSource");
+            if (dsCls) {
+                Method m1 = class_getInstanceMethod(dsCls, @selector(collectionView:cellForItemAtIndexPath:));
+                if (m1) {
+                    orig_cellForItem = method_getImplementation(m1);
+                    method_setImplementation(m1, (IMP)hooked_cellForItem);
+                    LOG("  hook #1: cellForItem\n");
+                }
+                Method m2 = class_getInstanceMethod(dsCls, @selector(collectionView:willDisplayCell:forItemAtIndexPath:));
+                if (m2) {
+                    orig_willDisplay = method_getImplementation(m2);
+                    method_setImplementation(m2, (IMP)hooked_willDisplay);
+                    LOG("  hook #2: willDisplay\n");
+                }
+            }
         }
 
-        // Hook 1-2: FBComponentCollectionViewDataSource
-        Class dsCls = objc_getClass("FBComponentCollectionViewDataSource");
-        if (dsCls) {
-            Method m1 = class_getInstanceMethod(dsCls, @selector(collectionView:cellForItemAtIndexPath:));
-            if (m1) {
-                orig_cellForItem = method_getImplementation(m1);
-                method_setImplementation(m1, (IMP)hooked_cellForItem);
-                LOG("  hook #1: cellForItem\n");
-            }
-            Method m2 = class_getInstanceMethod(dsCls, @selector(collectionView:willDisplayCell:forItemAtIndexPath:));
-            if (m2) {
-                orig_willDisplay = method_getImplementation(m2);
-                method_setImplementation(m2, (IMP)hooked_willDisplay);
-                LOG("  hook #2: willDisplay\n");
+        // Hook 3-5: Story seen
+        if (s_disableStorySeen) {
+            Class seenCls = objc_getClass("FBSnacksBucketsSeenStateManager");
+            if (seenCls) {
+                SEL sel1 = sel_registerName("_sendSeenThreadIDsWithBucket:session:");
+                Method m1 = class_getInstanceMethod(seenCls, sel1);
+                if (m1) {
+                    orig_seen1 = method_getImplementation(m1);
+                    method_setImplementation(m1, (IMP)noop_seen_1);
+                    LOG("  hook #3: _sendSeenThreadIDsWithBucket:session: -> no-op\n");
+                }
+                SEL sel2 = sel_registerName("_sendThreadIDsAsSeenInViewerSession:");
+                Method m2 = class_getInstanceMethod(seenCls, sel2);
+                if (m2) {
+                    orig_seen2 = method_getImplementation(m2);
+                    method_setImplementation(m2, (IMP)noop_seen_2);
+                    LOG("  hook #4: _sendThreadIDsAsSeenInViewerSession: -> no-op\n");
+                }
+                SEL sel3 = sel_registerName("markThreadsViewReceiptsAndLightweightReactionsAsSeen:bucket:session:isHighlight:successBlock:noThreadsToMarkAsSeenBlock:");
+                Method m3 = class_getInstanceMethod(seenCls, sel3);
+                if (m3) {
+                    orig_seen3 = method_getImplementation(m3);
+                    method_setImplementation(m3, (IMP)noop_seen_3);
+                    LOG("  hook #5: markThreadsView... -> no-op\n");
+                }
             }
         }
 
-        // Hook 3-5: Story seen - block 3 paths
-        Class seenCls = objc_getClass("FBSnacksBucketsSeenStateManager");
-        if (seenCls) {
-            SEL sel1 = sel_registerName("_sendSeenThreadIDsWithBucket:session:");
-            Method m1 = class_getInstanceMethod(seenCls, sel1);
-            if (m1) {
-                orig_seen1 = method_getImplementation(m1);
-                method_setImplementation(m1, (IMP)noop_seen_1);
-                LOG("  hook #3: _sendSeenThreadIDsWithBucket:session: -> no-op\n");
-            }
-            SEL sel2 = sel_registerName("_sendThreadIDsAsSeenInViewerSession:");
-            Method m2 = class_getInstanceMethod(seenCls, sel2);
-            if (m2) {
-                orig_seen2 = method_getImplementation(m2);
-                method_setImplementation(m2, (IMP)noop_seen_2);
-                LOG("  hook #4: _sendThreadIDsAsSeenInViewerSession: -> no-op\n");
-            }
-            SEL sel3 = sel_registerName("markThreadsViewReceiptsAndLightweightReactionsAsSeen:bucket:session:isHighlight:successBlock:noThreadsToMarkAsSeenBlock:");
-            Method m3 = class_getInstanceMethod(seenCls, sel3);
-            if (m3) {
-                orig_seen3 = method_getImplementation(m3);
-                method_setImplementation(m3, (IMP)noop_seen_3);
-                LOG("  hook #5: markThreadsView... -> no-op\n");
+        // Hook 6: tab bar - long press to open settings
+        Class tabCls = objc_getClass("UITabBarController");
+        if (tabCls) {
+            SEL sel = sel_registerName("tabBar:didSelectItem:");
+            Method m = class_getInstanceMethod(tabCls, sel);
+            if (m) {
+                orig_tabBar_didSelect = method_getImplementation(m);
+                method_setImplementation(m, (IMP)hooked_tabBar_didSelect);
+                LOG("  hook #6: UITabBarController.tabBar:didSelectItem: -> opens settings\n");
             }
         }
 
@@ -312,11 +549,30 @@ static void hooked_viewDidAppear(id self, SEL _cmd, BOOL animated) {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// SECTION 7: %ctor - init
+// ═══════════════════════════════════════════════════════════════
+
 __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow R3.5/v7 — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.0 (Glow framework port) — %s ===\n", __DATE__ " " __TIME__);
+
+    // Load preferences
+    reloadPrefs();
+
+    // Listen for changes from Settings.app
+    CFNotificationCenterAddObserver(
+        CFNotificationCenterGetDarwinNotifyCenter(),
+        NULL,
+        (CFNotificationCallback)prefsChanged,
+        CFSTR("com.tommy.glow.prefsChanged"),
+        NULL,
+        CFNotificationSuspensionBehaviorDeliverImmediately
+    );
+
+    // Defer hook installation to main queue
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
             Class vcClass = objc_getClass("UIViewController");
