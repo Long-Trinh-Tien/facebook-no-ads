@@ -1235,6 +1235,16 @@ static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *w
 
 static GlowVideoDownloadHandler *g_videoHandler = nil;
 
+// v8.2.28: Cache the last Reel video URLs (HD/SD). When FBVideoPlaybackItem's
+// HDPlaybackURL/SDPlaybackURL getter is called (which FB does to play the
+// video), we capture the URL into globals. On tap, use the cached URLs.
+// This is the most reliable way to get the URL.
+static NSURL *g_cachedHDURL = nil;
+static NSURL *g_cachedSDURL = nil;
+static NSDate *g_cachedAt = nil;
+static IMP orig_HDPlaybackURL = NULL;
+static IMP orig_SDPlaybackURL = NULL;
+
 // v8.2.18: Reels button is added by hooked_shortsSideBarLayoutSubviews.
 // No more viewWillAppear:/viewDidLoad hooks. No keyWindow button.
 
@@ -1277,11 +1287,41 @@ static GlowVideoDownloadHandler *g_videoHandler = nil;
 //      then try common property names (currentVideoPlaybackItem,
 //      currentItem, videoController, playbackController, etc.)
 //   3. Walk down from VC's view to find AVPlayerLayer and get URL
-//   4. Use cached URL (from layoutSubviews hook)
+//   4. Use cached URL (from hooked_HDPlaybackURL/SDPlaybackURL)
 - (void)downloadReelVideoFromView:(UIView *)startView {
     @try {
         SEL curSel = sel_registerName("currentVideoPlaybackItem");
         id item = nil;
+
+        // v8.2.28: Method 0 - check cached URL from FBVideoPlaybackItem
+        // hook. This is the most reliable - URL is captured when FB reads
+        // it for playback. Always check first.
+        if (g_cachedHDURL || g_cachedSDURL) {
+            LOG("[dl/reel] M0: using CACHED URL HD=%d SD=%d (age=%.1fs)\n",
+                g_cachedHDURL != nil, g_cachedSDURL != nil,
+                g_cachedAt ? -[g_cachedAt timeIntervalSinceNow] : 0);
+            // Skip all other methods, go directly to download
+            NSURL *hd = g_cachedHDURL;
+            NSURL *sd = g_cachedSDURL;
+            if (!g_videoHandler) g_videoHandler = [[GlowVideoDownloadHandler alloc] init];
+            // Visual feedback
+            UIButton *btn = (UIButton *)startView;
+            if ([btn isKindOfClass:[UIButton class]]) {
+                btn.enabled = NO;
+                btn.backgroundColor = [UIColor colorWithRed:0 green:0.7 blue:0 alpha:0.7];
+                [btn setTitle:@"✓" forState:UIControlStateNormal];
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                    btn.enabled = YES;
+                    btn.backgroundColor = [UIColor clearColor];
+                    [btn setTitle:@"⬇" forState:UIControlStateNormal];
+                });
+            }
+            [self showToast:@"⬇ Đang tải..."];
+            if (hd) [g_videoHandler downloadVideoURL:hd quality:@"reel_hd"];
+            if (sd && sd != hd) [g_videoHandler downloadVideoURL:sd quality:@"reel_sd"];
+            return;
+        }
+        LOG("[dl/reel] M0: no cached URL, trying other methods\n");
 
         // Method 1: walk up view hierarchy (existing)
         UIView *v = startView;
@@ -1578,6 +1618,9 @@ static GlowReelButtonHandler *g_reelButtonHandler = nil;
 static NSMutableSet *g_mainSideBarsWithButton = nil;
 static IMP orig_shortsSideBarLayoutSubviews = NULL;
 
+// g_cachedHDURL/g_cachedSDURL/g_cachedAt/orig_HDPlaybackURL/orig_SDPlaybackURL
+// are declared at the top of the file (before GlowReelButtonHandler)
+
 // v8.2.24: Reel download button - SEPARATE from Like (not overlap).
 // Hook FBShortsSideBarView.layoutSubviews. The MAIN sidebar has 4+
 // FDSTouchStateAnnouncingControl children. We add our button as a
@@ -1736,9 +1779,75 @@ static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
             class_getName(object_getClass(overlay)), fdsCount,
             btnX, btnY, btnW, btnH,
             sbFrameInOverlay.origin.x, sbFrameInOverlay.origin.y);
+
+        // v8.2.28: PRE-WARM - force FBVideoPlaybackItem.HDPlaybackURL/SDPlaybackURL
+        // to be read NOW, so our hook captures the URL. This ensures the
+        // URL is available when user taps the button.
+        // Walk from sidebar up to find the VC, then force-read URLs.
+        @try {
+            UIResponder *r = sideBar.nextResponder;
+            int rd = 0;
+            while (r && rd < 8) {
+                if ([r isKindOfClass:[UIViewController class]]) {
+                    UIViewController *vc = (UIViewController *)r;
+                    SEL curItemSel = sel_registerName("currentVideoPlaybackItem");
+                    if ([vc respondsToSelector:curItemSel]) {
+                        id item = [vc performSelector:curItemSel];
+                        if (item) {
+                            // Force read HD/SD URLs (triggers our hook)
+                            SEL hdSel = sel_registerName("HDPlaybackURL");
+                            SEL sdSel = sel_registerName("SDPlaybackURL");
+                            if ([item respondsToSelector:hdSel]) {
+                                NSURL *u = [item performSelector:hdSel];
+                                LOG("[reels/main] PRE-WARM HD: %s\n", u ? [[u absoluteString] UTF8String] : "nil");
+                            }
+                            if ([item respondsToSelector:sdSel]) {
+                                NSURL *u = [item performSelector:sdSel];
+                                LOG("[reels/main] PRE-WARM SD: %s\n", u ? [[u absoluteString] UTF8String] : "nil");
+                            }
+                        }
+                    }
+                    break;
+                }
+                r = r.nextResponder;
+                rd++;
+            }
+        } @catch (...) {}
     } @catch (NSException *e) {
         LOG("[reels/main] exc: %s\n", e.reason.UTF8String);
     }
+}
+
+// v8.2.28: Hook FBVideoPlaybackItem.HDPlaybackURL getter.
+// When FB reads the URL (to play the video), we capture it.
+// On Reels button tap, use the captured URL directly.
+static NSURL *hooked_HDPlaybackURL(id self, SEL _cmd) {
+    NSURL *url = nil;
+    if (orig_HDPlaybackURL) {
+        typedef NSURL *(*FnType)(id, SEL);
+        url = ((FnType)orig_HDPlaybackURL)(self, _cmd);
+    }
+    if (url) {
+        g_cachedHDURL = url;
+        g_cachedAt = [NSDate date];
+        LOG("[dl/reel] CAPTURED HD: %s\n", [[url absoluteString] UTF8String]);
+    }
+    return url;
+}
+
+// v8.2.28: Hook FBVideoPlaybackItem.SDPlaybackURL getter.
+static NSURL *hooked_SDPlaybackURL(id self, SEL _cmd) {
+    NSURL *url = nil;
+    if (orig_SDPlaybackURL) {
+        typedef NSURL *(*FnType)(id, SEL);
+        url = ((FnType)orig_SDPlaybackURL)(self, _cmd);
+    }
+    if (url) {
+        g_cachedSDURL = url;
+        g_cachedAt = [NSDate date];
+        LOG("[dl/reel] CAPTURED SD: %s\n", [[url absoluteString] UTF8String]);
+    }
+    return url;
 }
 
 static IMP orig_didLongPress = NULL;
@@ -1924,6 +2033,36 @@ static void installHooks(void) {
             }
         }
 
+        // Hook #12 (v8.2.28): FBVideoPlaybackItem.HDPlaybackURL/SDPlaybackURL
+        // Method swizzling to capture URLs when FB reads them for playback.
+        // The URLs are cached in globals and used by the Reels button tap.
+        // This is the most reliable way to get the URL - no view walking.
+        if (s_downloadVideo) {
+            Class vpiCls = objc_getClass("FBVideoPlaybackItem");
+            if (vpiCls) {
+                SEL hdSel = sel_registerName("HDPlaybackURL");
+                Method hdM = class_getInstanceMethod(vpiCls, hdSel);
+                if (hdM) {
+                    orig_HDPlaybackURL = method_getImplementation(hdM);
+                    method_setImplementation(hdM, (IMP)hooked_HDPlaybackURL);
+                    LOG("  hook #12a: FBVideoPlaybackItem.HDPlaybackURL -> capture URL\n");
+                } else {
+                    LOG("  FBVideoPlaybackItem.HDPlaybackURL NOT FOUND\n");
+                }
+                SEL sdSel = sel_registerName("SDPlaybackURL");
+                Method sdM = class_getInstanceMethod(vpiCls, sdSel);
+                if (sdM) {
+                    orig_SDPlaybackURL = method_getImplementation(sdM);
+                    method_setImplementation(sdM, (IMP)hooked_SDPlaybackURL);
+                    LOG("  hook #12b: FBVideoPlaybackItem.SDPlaybackURL -> capture URL\n");
+                } else {
+                    LOG("  FBVideoPlaybackItem.SDPlaybackURL NOT FOUND\n");
+                }
+            } else {
+                LOG("  FBVideoPlaybackItem NOT FOUND\n");
+            }
+        }
+
         LOG("=== Done ===\n");
     } @catch (NSException *e) {
         LOG("  EXC: %s\n", e.reason.UTF8String);
@@ -2018,7 +2157,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.27 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.28 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
