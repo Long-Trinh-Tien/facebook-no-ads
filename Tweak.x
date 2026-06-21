@@ -543,6 +543,29 @@ static BOOL isAdEdge(id memEdge) {
     return NO;
 }
 
+// ─── Category logger (v8.2 discovery) ───
+// Logs every UNIQUE category string seen, with section index
+// Helps discover PYMK, Suggested, etc. categories
+static NSMutableSet *g_seenCategories = nil;
+static void logCategoryIfNew(id memEdge, NSInteger section, NSInteger row) {
+    if (!memEdge) return;
+    if (!g_seenCategories) g_seenCategories = [[NSMutableSet alloc] init];
+    @try {
+        SEL catSel = sel_registerName("category");
+        if ([memEdge respondsToSelector:catSel]) {
+            id cat = [memEdge performSelector:catSel];
+            if ([cat isKindOfClass:[NSString class]]) {
+                NSString *cs = (NSString *)cat;
+                NSString *key = [NSString stringWithFormat:@"%@|sec=%ld|row=%ld", cs, (long)section, (long)row];
+                if (![g_seenCategories containsObject:key]) {
+                    [g_seenCategories addObject:key];
+                    LOG("[cat] sec=%ld row=%ld category=\"%s\"\n", (long)section, (long)row, cs.UTF8String);
+                }
+            }
+        }
+    } @catch (...) {}
+}
+
 // ─── Cell hiding (backup) ───
 static IMP orig_cellForItem = NULL;
 static int ad_hidden = 0;
@@ -557,6 +580,8 @@ static id hooked_cellForItem(id self, SEL _cmd, UICollectionView *cv, NSIndexPat
     if (!result || !ip || ip.section <= 1) return result;
     @try {
         id memEdge = getMemEdge(self, ip);
+        // Log all unique categories (v8.2 discovery)
+        logCategoryIfNew(memEdge, ip.section, ip.row);
         if (memEdge && isAdEdge(memEdge)) {
             ad_hidden++;
             if ([result isKindOfClass:[UIView class]]) {
