@@ -10,35 +10,60 @@
 // and fast.
 
 #import <UIKit/UIKit.h>
+#import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <stdio.h>
 #import <string.h>
 #import <stdlib.h>
 #import <dispatch/dispatch.h>
+#import <errno.h>
 
 static char g_log_path[512] = {0};
 static FILE *g_log_file = NULL;
 
 static void log_msg(const char *fmt, ...) {
+    char buf[2048];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+
+    // 1. NSLog — always works, visible in Console.app / syslog
+    NSLog(@"[GlowR4] %s", buf);
+
+    // 2. stderr — also works for cycript/Frida console
+    fprintf(stderr, "[GlowR4] %s", buf);
+    fflush(stderr);
+
+    // 3. File — best-effort, multiple paths
     if (g_log_path[0] == 0) {
         const char *home = getenv("HOME");
-        if (!home) home = "/var/mobile";
-        snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow_r4.txt", home);
-    }
-    if (!g_log_file) {
-        g_log_file = fopen(g_log_path, "w");
+        // Try multiple paths
+        const char *candidates[] = {
+            "%s/Documents/glow_r4.txt",       // normal sandbox
+            "/var/mobile/Documents/glow_r4.txt", // direct
+            "/tmp/glow_r4.txt",                  // fallback
+            NULL
+        };
+        for (int i = 0; candidates[i]; i++) {
+            if (i == 0 && !home) continue;
+            if (i == 0) {
+                snprintf(g_log_path, sizeof(g_log_path), candidates[i], home);
+            } else {
+                snprintf(g_log_path, sizeof(g_log_path), "%s", candidates[i]);
+            }
+            g_log_file = fopen(g_log_path, "a");  // append mode
+            if (g_log_file) {
+                setvbuf(g_log_file, NULL, _IOLBF, 0);
+                fprintf(stderr, "[GlowR4] logging to %s\n", g_log_path);
+                break;
+            }
+        }
     }
     if (g_log_file) {
-        va_list ap;
-        va_start(ap, fmt);
-        vfprintf(g_log_file, fmt, ap);
-        va_end(ap);
-        // Flush at end only, not per line (avoid IO pressure)
+        fputs(buf, g_log_file);
+        fflush(g_log_file);
     }
-    va_list ap2;
-    va_start(ap2, fmt);
-    vprintf(fmt, ap2);
-    va_end(ap2);
 }
 #define LOG(fmt, ...) log_msg(fmt, ##__VA_ARGS__)
 
@@ -186,11 +211,17 @@ static void dumpFBCurrentlyLoaded(void) {
 
 __attribute__((constructor))
 static void r4_init(void) {
-    LOG("=== R4 Verifier v3 (targeted) — %s ===\n\n", __DATE__ " " __TIME__);
+    @try {
+        LOG("=== R4 Verifier v1.4 (NSLog + multi-path) — %s ===\n", __DATE__ " " __TIME__);
+        LOG("=== Constructor entered. Will dispatch after 3s. ===\n");
+    } @catch (NSException *e) {
+        NSLog(@"[GlowR4] init LOG exc: %@", e.reason);
+    }
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{
         @try {
+            LOG("\n=== Dispatch fired after 3s ===\n");
             // ─── Phase 1: Critical classes (full dump) ───
             LOG("\n########## PHASE 1: Critical classes ##########\n");
             const char *critical[] = {
@@ -456,8 +487,15 @@ static void r4_init(void) {
 // Walk subviews recursively, up to maxDepth levels
 // Logs class + frame of each subview. Used to find like/share/comment
 // buttons in Reels.
+static int g_walkCount = 0;
 static void walkSubviews(UIView *view, int depth, int maxDepth) {
     if (!view || depth > maxDepth) return;
+    // Safety: don't walk forever
+    if (g_walkCount > 500) {
+        LOG("  ... (walkCount > 500, stopping)\n");
+        return;
+    }
+    g_walkCount++;
     @try {
         Class cls = object_getClass(view);
         const char *name = class_getName(cls);
@@ -467,17 +505,18 @@ static void walkSubviews(UIView *view, int depth, int maxDepth) {
         for (int i = 0; i < depth && i < 30; i++) indent[i] = ' ';
         // Print class + frame + subview count
         CGRect f = view.frame;
+        unsigned long subCount = (unsigned long)view.subviews.count;
         LOG("  %s[%d] %s frame=(%.0f,%.0f,%.0f,%.0f) subs=%lu hidden=%d alpha=%.2f\n",
             indent, depth, name,
             f.origin.x, f.origin.y, f.size.width, f.size.height,
-            (unsigned long)view.subviews.count,
+            subCount,
             view.hidden, view.alpha);
         // Recurse
         for (UIView *sub in view.subviews) {
             walkSubviews(sub, depth + 1, maxDepth);
         }
     } @catch (NSException *e) {
-        // silent
+        LOG("  ... walk exc at depth %d: %s\n", depth, e.reason.UTF8String);
     }
 }
 
@@ -513,8 +552,18 @@ static void hooked_vc_viewDidAppear(id self, SEL _cmd, BOOL animated) {
                         strstr(name, "SurfaceView") != NULL);
         if (isReels) {
             LOG("  --- Reels subview walk (3 levels) ---\n");
-            UIView *root = [(UIViewController *)self view];
-            walkSubviews(root, 0, 3);
+            g_walkCount = 0;
+            UIView *root = nil;
+            @try {
+                root = [(UIViewController *)self view];
+            } @catch (NSException *e) {
+                LOG("  exc getting self.view: %s\n", e.reason.UTF8String);
+            }
+            if (root) {
+                walkSubviews(root, 0, 3);
+            } else {
+                LOG("  no root view\n");
+            }
         }
     } @catch (NSException *e) {
         LOG("[VC] exc: %s\n", e.reason.UTF8String);
