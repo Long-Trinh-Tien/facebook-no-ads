@@ -362,4 +362,230 @@ cyan -i /path/to/facebook.ipa \
 ### Critical env vars
 - `getenv("HOME")` returns `/var/mobile`
 - Documents folder: `/var/mobile/Documents/`
+
+---
+
+## 7. Updating Tweak for New Facebook Versions
+
+> **Mục đích:** Khi Facebook update (mỗi 1-2 tuần), tránh phải investigate lại từ đầu như đã làm.
+> **Triết lý:** Invest NGAY từ đầu vào verifier + automation, sau này update chỉ mất vài phút.
+
+### 7.1. Facebook update thay đổi gì?
+
+| Loại thay đổi | Tần suất | Ví dụ |
+|---------------|----------|-------|
+| Method signature đổi | Thường xuyên | `initWithFBTree:` → `initWithFBTree_v2:` |
+| Class đổi tên | Thường xuyên | `FBMemNewsFeedEdge` → `FBXxxNewsFeedEdge` |
+| Category strings đổi | Thỉnh thoảng | `SPONSORED` → `AD` hoặc `PROMOTED` |
+| Selector obfuscation | Hiếm | `Bi:` → `Bj:` |
+| GraphQL fragment update | Mỗi release | `FBFeedUnitIsSponsoredGraphQLFragment` → v2 |
+| Internal structure | Thường xuyên | `_rootLayout` field offset thay đổi |
+| Hook target bị xóa | Hiếm | `FBMemFeedStory` (đã xóa) |
+
+### 7.2. Fast Triage Workflow (5-15 phút)
+
+Khi người dùng báo "không hoạt động sau khi update FB":
+
+```
+Step 1 (1 min): Build + install glow_verify.ipa (đã có sẵn)
+                → Log tự động list classes/methods còn tồn tại
+
+Step 2 (1 min): Đọc /var/mobile/Documents/glow_verify.txt
+                → Classes nào MISSING → đã đổi tên
+                → Methods nào MISSING → đã đổi signature
+
+Step 3 (3-5 min): Nếu class đổi tên, search binary:
+                strings FBSharedFramework | grep -iE "FeedUnit|Feed.*Edge|NewsFeed"
+                → Tìm class mới có cùng pattern
+
+Step 4 (2 min): Update Tweak.x với class name mới
+                → Đổi objc_getClass("OldName") → "NewName"
+                → Đổi selector nếu cần
+
+Step 5 (5 min): Rebuild + test
+
+Tổng: 10-15 phút vs 1-2 ngày nếu investigate từ đầu
+```
+
+### 7.3. Update Checklist
+
+Khi FB update, chạy checklist này:
+
+- [ ] Build `glow_verify.ipa` với binary mới
+- [ ] Install, đăng nhập, đợi 10s
+- [ ] Đọc `glow_verify.txt`:
+  - [ ] `FBMemNewsFeedEdge` còn tồn tại? (cần cho ad blocking)
+  - [ ] `FBSnacksBucketsSeenStateManager` còn tồn tại? (cần cho seen)
+  - [ ] `FBSnacksMediaContainerView` còn? (cho download story)
+  - [ ] `FBVideoOverlayPluginComponentBackgroundView` còn? (cho download video)
+  - [ ] `FBComponentCollectionViewDataSource` còn? (cho ad hiding backup)
+  - [ ] Các methods `_sendSeenThreadIDsWithBucket:session:`, `initWithFBTree:`, `node`, `category` còn?
+- [ ] Nếu class đổi tên: search binary bằng pattern
+- [ ] Update Tweak.x với class/method names mới
+- [ ] Rebuild, test
+- [ ] Update version comment trong Tweak.x
+- [ ] Commit + push
+
+### 7.4. Version Compatibility Matrix
+
+Maintain table này để track:
+
+```
+| FB Version | FBMemNewsFeedEdge | FBSnacksBuckets... | node method | Status |
+|------------|-------------------|---------------------|-------------|--------|
+| 555.0.0    | ✓                 | ✓                   | ✓           | Tested |
+| 560.x      | ✓ (3 methods)     | ✓                   | ✓           | Working |
+| 561.x      | ?                 | ?                   | ?           | Unknown |
+| 562.x      | ?                 | ?                   | ?           | Unknown |
+```
+
+**Khi nào update matrix:** Mỗi khi test trên version mới.
+
+### 7.5. Verifier Tweak — Standard Tool
+
+**`glow_verify.ipa`** (đã build sẵn ở `/home/tommy/test/glow/`) là tool chuẩn:
+
+- Inject vào FB binary
+- Tự động dump:
+  - 17 target classes (FOUND/MISSING)
+  - Methods của mỗi class
+  - Ivars của mỗi class
+  - 12 pattern searches (MemNewsFeed, FeedUnit, Snacks, etc.)
+- Output ra `/var/mobile/Documents/glow_verify.txt`
+
+**Cách dùng:**
+```bash
+# 1. Copy FB binary mới vào expected location
+cp /path/to/new/facebook.ipa /home/tommy/test/glow/facebook.ipa
+
+# 2. Re-inject verifier
+cyan -i /home/tommy/test/glow/facebook.ipa \
+     -o /home/tommy/test/glow/glow_verify_v2.ipa \
+     -f /home/tommy/test/glow/glowverify.deb \
+     --overwrite -s -d
+
+# 3. Install, đợi 10s, copy log
+# 4. Đọc log → biết class nào còn, class nào mất
+```
+
+### 7.6. Automation Ideas (Future)
+
+**A. Auto-detect API changes**
+
+```python
+# Script: compare_classes.py
+# Input: glow_verify.txt từ 2 versions FB
+# Output: list of changes
+
+def parse_log(path):
+    classes = {}
+    current = None
+    for line in open(path):
+        if 'FOUND  :' in line:
+            current = line.split(':')[1].strip()
+            classes[current] = {'methods': [], 'ivars': []}
+        elif '[T]' in line and current:
+            classes[current]['methods'].append(line.split('[T] ')[1].strip())
+        # ...
+    return classes
+
+old = parse_log('glow_verify_560.txt')
+new = parse_log('glow_verify_561.txt')
+
+print("REMOVED:", set(old) - set(new))
+print("ADDED:", set(new) - set(old))
+```
+
+**B. Auto-build matrix update**
+
+```python
+# Cập nhật VERSION_COMPAT.md tự động
+# từ log + version number (lấy từ Info.plist)
+```
+
+**C. Smart version detection**
+
+```objc
+// Trong Tweak.x, detect FB version tại runtime
+NSDictionary *info = [[NSBundle mainBundle] infoDictionary];
+NSString *version = [info objectForKey:@"CFBundleShortVersionString"];
+LOG("[fb] version=%s\n", version.UTF8String);
+```
+
+**D. Fallback hooks**
+
+```objc
+// Try multiple class names
+NSArray *candidateClasses = @[@"FBMemNewsFeedEdge", @"FBXxxNewsFeedEdge", @"FBNewFeedEdge"];
+Class edgeCls = nil;
+for (NSString *name in candidateClasses) {
+    edgeCls = objc_getClass(name);
+    if (edgeCls) {
+        LOG("[hook] using class: %s\n", name.UTF8String);
+        break;
+    }
+}
+```
+
+### 7.7. Time-Saving Tips
+
+**1. Maintain "known good" snapshot**
+```bash
+# Save current FB binary + glow.txt as reference
+mkdir -p ~/glow-snapshots/560.x
+cp /path/to/facebook.ipa ~/glow-snapshots/560.x/
+cp glow.txt ~/glow-snapshots/560.x/
+```
+
+**2. Don't re-investigate — diff instead**
+```bash
+# So sánh binary mới với snapshot cũ
+diff <(strings ~/glow-snapshots/560.x/FBSharedFramework | sort) \
+     <(strings /path/to/new/FBSharedFramework | sort) | head -50
+```
+
+**3. Reuse findings**
+- Ghi lại class + method + version vào `VERSION_COMPAT.md`
+- Mỗi version chỉ cần 5-10 phút check
+- Không bao giờ investigate lại từ đầu
+
+**4. Build pipeline chuẩn hóa**
+```bash
+# Script: build_and_test.sh
+#!/bin/bash
+set -e
+THEOS=/home/tommy/theos make package FINALPACKAGE=1
+cp packages/com.tommy.glowv3_1.0.0_iphoneos-arm.deb glowv7.deb
+cyan -i facebook.ipa -o glow_v7.ipa -f glowv7.deb --overwrite -s -d
+echo "Built glow_v7.ipa"
+```
+
+**5. Test trên ít nhất 2 versions**
+- Nếu chỉ test 1 version, có thể break ở version khác
+- Maintain multiple devices hoặc test trên cùng device với multiple FB versions
+
+### 7.8. Red Flags — Khi nào cần investigate lại
+
+- ❌ Verifier log: 5+ classes MISSING (large refactor)
+- ❌ Categories đổi tên hết (e.g., "SPONSORED" → "AD_TYPE_2")
+- ❌ Hook methods trả về EXC cho 50%+ items
+- ❌ New FB version thay đổi UI architecture hoàn toàn
+
+Nếu thấy red flags, fall back to:
+1. Search github cho version mới (có tweak authors update?)
+2. Đọc FB changelog (nếu public)
+3. Investigate class mới với class-dump + runtime verification
+
+### 7.9. Maintenance Schedule
+
+- **Hàng tuần:** Check FB version có update không (App Store)
+- **Khi update:** Chạy verifier (5 min)
+- **Nếu broken:** Update tweak theo checklist (10-15 min)
+- **Hàng tháng:** Review log, optimize code
+- **Mỗi version lớn:** Full regression test
+
+**Time investment vs value:**
+- 15 phút update = tiết kiệm 1-2 ngày investigate
+- 30 phút setup automation = tiết kiệm nhiều giờ sau này
+- 1 giờ viết docs = tiết kiệm nhiều giờ cho người khác (và chính mình)
 - Filter bundles: `com.facebook.Facebook`, `com.facebook.Facebook6`

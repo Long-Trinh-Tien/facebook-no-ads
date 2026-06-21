@@ -47,9 +47,12 @@ cyan -i /path/to/facebook.ipa \
 
 ## Documentation
 
+- **[README.md](README.md)** — Overview
 - **[AGENTS.md](AGENTS.md)** — Session context, investigation journey, key files
 - **[INVESTIGATION_GUIDE.md](INVESTIGATION_GUIDE.md)** — Teaching guide: methods, tools, when to use
 - **[BUILD_GUIDE.md](BUILD_GUIDE.md)** — Build & test instructions, troubleshooting
+- **[UPDATE_GUIDE.md](UPDATE_GUIDE.md)** — 15-min workflow khi FB update version mới
+- **[VERSION_COMPAT.md](VERSION_COMPAT.md)** — Compatibility matrix qua các FB versions
 
 ## How It Works
 
