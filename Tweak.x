@@ -878,22 +878,39 @@ static id hooked_storyContainer_init(id self, SEL _cmd, id thread, id bucket, id
     } else {
         return result;
     }
-    if (!s_downloadStory) return result;
-    if (!result) return result;
+    // NOTE: Do NOT add gesture recognizer here - view is not laid out yet.
+    // Instead, hook didMoveToWindow below to add it when view is in window.
+    return result;
+}
+
+// Track which story containers already have long press
+static NSMutableSet *g_storyContainersWithLongPress = nil;
+
+// Hook didMoveToWindow: add long press when view enters window
+static IMP orig_storyContainer_didMoveToWindow = NULL;
+static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *window) {
+    if (orig_storyContainer_didMoveToWindow) {
+        typedef void (*FnType)(id, SEL, id);
+        FnType fn = (FnType)(uintptr_t)orig_storyContainer_didMoveToWindow;
+        fn(self, _cmd, (id)window);
+    }
+    if (!s_downloadStory) return;
+    if (!window) return;  // removing from window
+    if (!g_storyContainersWithLongPress) g_storyContainersWithLongPress = [[NSMutableSet alloc] init];
     @try {
+        if ([g_storyContainersWithLongPress containsObject:[NSValue valueWithNonretainedObject:self]]) return;
         if (!g_storyHandler) g_storyHandler = [[GlowStoryDownloadHandler alloc] init];
-        // Add LONG PRESS recognizer (not button - button caused crash)
         UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
             initWithTarget:g_storyHandler
             action:@selector(onStoryLongPress:)];
         lp.minimumPressDuration = 0.5;
         lp.cancelsTouchesInView = NO;
-        [result addGestureRecognizer:lp];
+        [self addGestureRecognizer:lp];
+        [g_storyContainersWithLongPress addObject:[NSValue valueWithNonretainedObject:self]];
         LOG("[dl/story] added long press to container\n");
     } @catch (NSException *e) {
-        LOG("[dl/story] init exc: %s\n", e.reason.UTF8String);
+        LOG("[dl/story] didMoveToWindow exc: %s\n", e.reason.UTF8String);
     }
-    return result;
 }
 
 // ─── Feature 4: Download Video (long press) ───
@@ -1151,6 +1168,7 @@ static void installHooks(void) {
         }
 
         // Hook 8: Download Story - hook FBSnacksMediaContainerView new init
+        // (long press added in didMoveToWindow to avoid lifecycle crash)
         if (s_downloadStory) {
             Class cls = objc_getClass("FBSnacksMediaContainerView");
             if (cls) {
@@ -1159,9 +1177,19 @@ static void installHooks(void) {
                 if (m) {
                     orig_storyContainer_init = method_getImplementation(m);
                     method_setImplementation(m, (IMP)hooked_storyContainer_init);
-                    LOG("  hook #8: FBSnacksMediaContainerView init (new sig) -> add download button\n");
+                    LOG("  hook #8: FBSnacksMediaContainerView init (new sig)\n");
                 } else {
                     LOG("  FBSnacksMediaContainerView new init NOT FOUND\n");
+                }
+                // Also hook didMoveToWindow to add long press safely
+                SEL dmwSel = sel_registerName("didMoveToWindow");
+                Method dmwM = class_getInstanceMethod(cls, dmwSel);
+                if (dmwM) {
+                    orig_storyContainer_didMoveToWindow = method_getImplementation(dmwM);
+                    method_setImplementation(dmwM, (IMP)hooked_storyContainer_didMoveToWindow);
+                    LOG("  hook #8b: FBSnacksMediaContainerView didMoveToWindow -> add long press\n");
+                } else {
+                    LOG("  didMoveToWindow NOT FOUND\n");
                 }
             }
         }
@@ -1220,7 +1248,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.0 (Glow framework port) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.1 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
