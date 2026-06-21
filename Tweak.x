@@ -1073,10 +1073,57 @@ static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *w
 // Hook FBVideoOverlayPluginComponentBackgroundView.didLongPress:
 // Walk view hierarchy to find VideoContainerView, get current playback item.
 @interface GlowVideoDownloadHandler : NSObject
+- (void)showToast:(NSString *)msg;
 @end
 @implementation GlowVideoDownloadHandler
 
+// v8.2.33: Helper - present action sheet for quality choice
+// Used by both Reel button tap and long-press paths.
+// If action sheet fails (e.g. no top VC), fall back to HD if available, else SD.
+- (void)presentQualityActionSheetHD:(NSURL *)hd
+                                  sd:(NSURL *)sd
+                          sourceView:(UIView *)srcView {
+    UIWindow *win = nil;
+    for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+        if ([s isKindOfClass:[UIWindowScene class]]) {
+            for (UIWindow *w in ((UIWindowScene *)s).windows) {
+                if (w.isKeyWindow) { win = w; break; }
+            }
+        }
+        if (win) break;
+    }
+    UIViewController *top = nil;
+    if (win) {
+        top = win.rootViewController;
+        while (top.presentedViewController) top = top.presentedViewController;
+    }
+    if (!top) {
+        // Fallback: download HD if available, else SD
+        if (hd) [self downloadVideoURL:hd quality:@"hd"];
+        else if (sd) [self downloadVideoURL:sd quality:@"sd"];
+        return;
+    }
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Tải video Reels?" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+    if (hd) {
+        [alert addAction:[UIAlertAction actionWithTitle:@"Tải HD (720p)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            [self downloadVideoURL:hd quality:@"hd"];
+        }]];
+    }
+    if (sd) {
+        [alert addAction:[UIAlertAction actionWithTitle:@"Tải SD (360p)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            [self downloadVideoURL:sd quality:@"sd"];
+        }]];
+    }
+    [alert addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
+    if (alert.popoverPresentationController) {
+        alert.popoverPresentationController.sourceView = srcView ?: top.view;
+        alert.popoverPresentationController.sourceRect = (srcView ?: top.view).bounds;
+    }
+    [top presentViewController:alert animated:YES completion:nil];
+}
+
 // Reels-specific: long press on Reel video view
+// v8.2.33: Show action sheet (HD/SD/Cancel) instead of auto-downloading both
 - (void)onReelLongPress:(UILongPressGestureRecognizer *)gr {
     if (gr.state != UIGestureRecognizerStateBegan) return;
     if (!s_downloadVideo) return;
@@ -1096,27 +1143,41 @@ static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *w
             LOG("[dl/reel] item has no URLs\n");
             return;
         }
-        LOG("[dl/reel] downloading HD=%d SD=%d\n", hd != nil, sd != nil);
-        if (hd) [self downloadVideoURL:hd quality:@"reel_hd"];
-        if (sd) [self downloadVideoURL:sd quality:@"reel_sd"];
+        LOG("[dl/reel] LP: action sheet HD=%d SD=%d\n", hd != nil, sd != nil);
+        [self presentQualityActionSheetHD:hd sd:sd sourceView:gr.view];
     } @catch (NSException *e) {
         LOG("[dl/reel] exc: %s\n", e.reason.UTF8String);
     }
 }
 
+// v8.2.33: Download with proper completion callback.
+// On success: save to Photos, show "Đã lưu" toast, success haptic.
+// On failure: show "Lỗi tải" toast, error haptic.
+// Use quality label in toast so user knows which quality was saved.
 - (void)downloadVideoURL:(NSURL *)url quality:(NSString *)q {
     if (!url) return;
     NSString *name = [NSString stringWithFormat:@"video_%@_%lld.mp4", q, (long long)[[NSDate date] timeIntervalSince1970]];
     NSURLRequest *req = [NSURLRequest requestWithURL:url];
     NSURLSession *session = [NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration defaultSessionConfiguration]];
     NSURLSessionDownloadTask *task = [session downloadTaskWithRequest:req completionHandler:^(NSURL *loc, NSURLResponse *resp, NSError *err) {
-        if (err || !loc) { LOG("[dl/video] err: %s\n", err ? [[err localizedDescription] UTF8String] : "nil"); return; }
+        if (err || !loc) {
+            LOG("[dl/video] err: %s\n", err ? [[err localizedDescription] UTF8String] : "nil");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self showToast:[NSString stringWithFormat:@"❌ Lỗi tải %@", q]];
+                UINotificationFeedbackGenerator *gen = [[UINotificationFeedbackGenerator alloc] init];
+                [gen notificationOccurred:UINotificationFeedbackTypeError];
+            });
+            return;
+        }
         NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:name];
         [[NSFileManager defaultManager] moveItemAtURL:loc toURL:[NSURL fileURLWithPath:path] error:nil];
         LOG("[dl/video] saved to %s\n", [path UTF8String]);
         dispatch_async(dispatch_get_main_queue(), ^{
             UISaveVideoAtPathToSavedPhotosAlbum(path, nil, nil, NULL);
+            [self showToast:[NSString stringWithFormat:@"✅ Đã lưu %@ vào Photos", q]];
             LOG("[dl/video] saved video to Photos\n");
+            UINotificationFeedbackGenerator *gen = [[UINotificationFeedbackGenerator alloc] init];
+            [gen notificationOccurred:UINotificationFeedbackTypeSuccess];
         });
     }];
     [task resume];
@@ -1553,56 +1614,9 @@ static NSMutableDictionary *g_urlCacheBySidebar = nil;
             }
         }
         if (hd || sd) {
-            // v8.2.29: Show action sheet for quality choice (1 tap = 1 download)
-            // Match existing in-feed video long press behavior
-            UIWindow *win = nil;
-            for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
-                if ([s isKindOfClass:[UIWindowScene class]]) {
-                    for (UIWindow *w in ((UIWindowScene *)s).windows) {
-                        if (w.isKeyWindow) { win = w; break; }
-                    }
-                }
-                if (win) break;
-            }
-            UIViewController *top = win.rootViewController;
-            while (top.presentedViewController) top = top.presentedViewController;
-            if (!top) {
-                // Fallback: download HD if available, else SD
-                if (!g_videoHandler) g_videoHandler = [[GlowVideoDownloadHandler alloc] init];
-                if (hd) [g_videoHandler downloadVideoURL:hd quality:@"reel_hd"];
-                else if (sd) [g_videoHandler downloadVideoURL:sd quality:@"reel_sd"];
-                return;
-            }
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Tải video Reels?" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
-            if (hd) {
-                [alert addAction:[UIAlertAction actionWithTitle:@"Tải HD (720p)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-                    if (!g_videoHandler) g_videoHandler = [[GlowVideoDownloadHandler alloc] init];
-                    [self showToast:@"⬇ Đang tải HD..."];
-                    [g_videoHandler downloadVideoURL:hd quality:@"reel_hd"];
-                    // Haptic feedback
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-                        UINotificationFeedbackGenerator *gen = [[UINotificationFeedbackGenerator alloc] init];
-                        [gen notificationOccurred:UINotificationFeedbackTypeSuccess];
-                    });
-                }]];
-            }
-            if (sd) {
-                [alert addAction:[UIAlertAction actionWithTitle:@"Tải SD (360p)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-                    if (!g_videoHandler) g_videoHandler = [[GlowVideoDownloadHandler alloc] init];
-                    [self showToast:@"⬇ Đang tải SD..."];
-                    [g_videoHandler downloadVideoURL:sd quality:@"reel_sd"];
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-                        UINotificationFeedbackGenerator *gen = [[UINotificationFeedbackGenerator alloc] init];
-                        [gen notificationOccurred:UINotificationFeedbackTypeSuccess];
-                    });
-                }]];
-            }
-            [alert addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
-            if (alert.popoverPresentationController) {
-                alert.popoverPresentationController.sourceView = btnView;
-                alert.popoverPresentationController.sourceRect = btnView.bounds;
-            }
-            [top presentViewController:alert animated:YES completion:nil];
+            // v8.2.33: Use shared action sheet helper (1 tap = 1 download)
+            if (!g_videoHandler) g_videoHandler = [[GlowVideoDownloadHandler alloc] init];
+            [g_videoHandler presentQualityActionSheetHD:hd sd:sd sourceView:btnView];
             return;
         }
         LOG("[dl/reel] M0: no per-sidebar cache, trying other methods\n");
@@ -2485,7 +2499,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.32 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.33 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
