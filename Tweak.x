@@ -697,68 +697,67 @@ static void hooked_newsFeed_viewDidLoad(id self, SEL _cmd) {
 
 // ─── Feature 3: Download Story (button on FBSnacksMediaContainerView) ───
 // Hook the NEW init signature: initWithThread:bucket:mediaViewDelegate:mediaViewGenerator:toolbox:shouldBlurMedia:
-// Add a download button to the view.
+// ─── Feature 3: Download Story (LONG PRESS - matching Glow 1.3.1) ───
+// Hook the NEW init signature: initWithThread:bucket:mediaViewDelegate:mediaViewGenerator:toolbox:shouldBlurMedia:
+// Add a long-press recognizer to the view (not a button - that crashed).
 
 @interface GlowStoryDownloadHandler : NSObject
 @end
 @implementation GlowStoryDownloadHandler
 
-- (void)onStoryDownloadTap:(UIButton *)sender {
+// Find a playable item (URL) by walking FBSnacksMediaContainerView -> mediaView
+// Returns NSURL or nil. Sets outIsVideo YES/NO.
+- (NSURL *)findMediaURLInContainer:(UIView *)container isVideo:(BOOL *)outIsVideo {
+    if (outIsVideo) *outIsVideo = NO;
+    if (!container) return nil;
     @try {
-        UIView *container = (UIView *)sender.superview;
-        Class storyCls = NSClassFromString(@"FBSnacksMediaContainerView");
-        while (container && ![container isKindOfClass:storyCls]) {
-            container = container.superview;
-        }
-        if (!container) { LOG("[dl/story] container not found\n"); return; }
-        // Get mediaView via ivar _mediaView (UIView<FBSnacksMediaViewProtocol>)
         Ivar mvIvar = class_getInstanceVariable(object_getClass(container), "_mediaView");
         id mediaView = mvIvar ? object_getIvar(container, mvIvar) : nil;
-        if (!mediaView) { LOG("[dl/story] mediaView nil\n"); return; }
+        if (!mediaView) {
+            LOG("[dl/story] mediaView nil\n");
+            return nil;
+        }
 
         // Try FBSnacksNewVideoView
         Class videoCls = NSClassFromString(@"FBSnacksNewVideoView");
         if (videoCls && [mediaView isKindOfClass:videoCls]) {
-            // Get manager
+            if (outIsVideo) *outIsVideo = YES;
             SEL mgrSel = sel_registerName("manager");
             id mgr = [mediaView respondsToSelector:mgrSel] ? [mediaView performSelector:mgrSel] : nil;
-            if (!mgr) { LOG("[dl/story] manager nil\n"); return; }
+            if (!mgr) { LOG("[dl/story] manager nil\n"); return nil; }
             SEL curSel = sel_registerName("currentVideoPlaybackItem");
             id item = [mgr respondsToSelector:curSel] ? [mgr performSelector:curSel] : nil;
-            if (!item) { LOG("[dl/story] no playback item\n"); return; }
+            if (!item) { LOG("[dl/story] no playback item\n"); return nil; }
             SEL hdSel = sel_registerName("HDPlaybackURL");
             NSURL *url = [item respondsToSelector:hdSel] ? [item performSelector:hdSel] : nil;
             if (!url) {
                 SEL sdSel = sel_registerName("SDPlaybackURL");
                 url = [item respondsToSelector:sdSel] ? [item performSelector:sdSel] : nil;
             }
-            if (url) {
-                LOG("[dl/story] video URL: %s\n", [[url absoluteString] UTF8String]);
-                [self downloadURL:url toFileName:[NSString stringWithFormat:@"story_video_%lld.mp4", (long long)[[NSDate date] timeIntervalSince1970]]];
-            }
-            return;
+            if (url) LOG("[dl/story] video URL: %s\n", [[url absoluteString] UTF8String]);
+            return url;
         }
 
         // Try FBSnacksPhotoView
         Class photoCls = NSClassFromString(@"FBSnacksPhotoView");
         if (photoCls && [mediaView isKindOfClass:photoCls]) {
-            // Walk: FBSnacksPhotoView._photoView (FBSnacksWebPhotoView) -> _photoView (FBWebPhotoView) -> .photo
             Ivar swpvIvar = class_getInstanceVariable(object_getClass(mediaView), "_photoView");
             id swpv = swpvIvar ? object_getIvar(mediaView, swpvIvar) : nil;
-            if (!swpv) { LOG("[dl/story] FBSnacksWebPhotoView nil\n"); return; }
+            if (!swpv) { LOG("[dl/story] FBSnacksWebPhotoView nil\n"); return nil; }
             Class webPhotoCls = NSClassFromString(@"FBSnacksWebPhotoView");
-            if (![swpv isKindOfClass:webPhotoCls]) { LOG("[dl/story] not FBSnacksWebPhotoView: %s\n", class_getName(object_getClass(swpv))); return; }
+            if (![swpv isKindOfClass:webPhotoCls]) {
+                LOG("[dl/story] not FBSnacksWebPhotoView: %s\n", class_getName(object_getClass(swpv)));
+                return nil;
+            }
             Ivar wpvIvar = class_getInstanceVariable(object_getClass(swpv), "_photoView");
             id wpv = wpvIvar ? object_getIvar(swpv, wpvIvar) : nil;
-            if (!wpv) { LOG("[dl/story] FBWebPhotoView nil\n"); return; }
-            // .photo
+            if (!wpv) { LOG("[dl/story] FBWebPhotoView nil\n"); return nil; }
             SEL photoSel = sel_registerName("photo");
             id photo = [wpv respondsToSelector:photoSel] ? [wpv performSelector:photoSel] : nil;
-            if (!photo) { LOG("[dl/story] photo nil\n"); return; }
-            // imageSpecifier — try KVC
+            if (!photo) { LOG("[dl/story] photo nil\n"); return nil; }
             @try {
                 id imageSpecifier = [photo valueForKey:@"imageSpecifier"];
-                if (!imageSpecifier) { LOG("[dl/story] imageSpecifier nil\n"); return; }
+                if (!imageSpecifier) { LOG("[dl/story] imageSpecifier nil\n"); return nil; }
                 Class netSpecCls = NSClassFromString(@"FBWebImageNetworkSpecifier");
                 Class memSpecCls = NSClassFromString(@"FBWebImageMemorySpecifier");
                 if (netSpecCls && [imageSpecifier isKindOfClass:netSpecCls]) {
@@ -768,25 +767,74 @@ static void hooked_newsFeed_viewDidLoad(id self, SEL _cmd) {
                         NSURL *url = urls[0];
                         if ([url isKindOfClass:[NSURL class]]) {
                             LOG("[dl/story] photo URL: %s\n", [[url absoluteString] UTF8String]);
-                            [self downloadURL:url toFileName:[NSString stringWithFormat:@"story_photo_%lld.jpg", (long long)[[NSDate date] timeIntervalSince1970]]];
+                            return url;
                         }
                     }
                 } else if (memSpecCls && [imageSpecifier isKindOfClass:memSpecCls]) {
                     SEL imgSel = sel_registerName("image");
                     UIImage *img = [imageSpecifier respondsToSelector:imgSel] ? [imageSpecifier performSelector:imgSel] : nil;
                     if (img) {
+                        // Return special sentinel via global var
+                        LOG("[dl/story] photo is in-memory\n");
+                        // Save directly
                         UIImageWriteToSavedPhotosAlbum(img, nil, nil, nil);
-                        LOG("[dl/story] saved photo to Photos\n");
+                        return nil;  // tell caller to skip download
                     }
                 }
             } @catch (NSException *e) {
                 LOG("[dl/story] photo exc: %s\n", e.reason.UTF8String);
             }
-            return;
+            return nil;
         }
         LOG("[dl/story] unknown mediaView class: %s\n", class_getName(object_getClass(mediaView)));
     } @catch (NSException *e) {
         LOG("[dl/story] exc: %s\n", e.reason.UTF8String);
+    }
+    return nil;
+}
+
+- (void)onStoryLongPress:(UILongPressGestureRecognizer *)gr {
+    if (gr.state != UIGestureRecognizerStateBegan) return;
+    if (!s_downloadStory) return;
+    @try {
+        UIView *container = gr.view;
+        if (!container) return;
+        BOOL isVideo = NO;
+        NSURL *url = [self findMediaURLInContainer:container isVideo:&isVideo];
+        if (!url) { LOG("[dl/story] no URL found (maybe already saved)\n"); return; }
+
+        // Show action sheet (like Glow 1.3.1)
+        UIWindow *win = nil;
+        for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+            if ([s isKindOfClass:[UIWindowScene class]]) {
+                UIWindowScene *ws = (UIWindowScene *)s;
+                for (UIWindow *w in ws.windows) { if (w.isKeyWindow) { win = w; break; } }
+                if (win) break;
+            }
+        }
+        if (!win) win = [UIApplication sharedApplication].keyWindow;
+        UIViewController *top = win.rootViewController;
+        while (top.presentedViewController) top = top.presentedViewController;
+        if (!top) { LOG("[dl/story] no top VC\n"); return; }
+
+        NSString *title = isVideo ? @"Tải video story?" : @"Tải ảnh story?";
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+                                                                       message:nil
+                                                                preferredStyle:UIAlertControllerStyleActionSheet];
+        [alert addAction:[UIAlertAction actionWithTitle:isVideo ? @"Tải HD" : @"Tải ảnh" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            [self downloadURL:url toFileName:[NSString stringWithFormat:@"story_%@_%lld.%@",
+                                              isVideo ? @"video" : @"photo",
+                                              (long long)[[NSDate date] timeIntervalSince1970],
+                                              isVideo ? @"mp4" : @"jpg"]];
+        }]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
+        if (alert.popoverPresentationController) {
+            alert.popoverPresentationController.sourceView = container;
+            alert.popoverPresentationController.sourceRect = container.bounds;
+        }
+        [top presentViewController:alert animated:YES completion:nil];
+    } @catch (NSException *e) {
+        LOG("[dl/story] LP exc: %s\n", e.reason.UTF8String);
     }
 }
 
@@ -799,7 +847,6 @@ static void hooked_newsFeed_viewDidLoad(id self, SEL _cmd) {
             LOG("[dl/story] download err: %s\n", error ? [[error localizedDescription] UTF8String] : "nil");
             return;
         }
-        // Save to Photos
         NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:name];
         [[NSFileManager defaultManager] moveItemAtURL:location toURL:[NSURL fileURLWithPath:path] error:nil];
         LOG("[dl/story] saved to %s\n", [path UTF8String]);
@@ -809,7 +856,6 @@ static void hooked_newsFeed_viewDidLoad(id self, SEL _cmd) {
                 UIImageWriteToSavedPhotosAlbum(img, nil, nil, nil);
                 LOG("[dl/story] saved image to Photos\n");
             } else {
-                // Treat as video
                 UISaveVideoAtPathToSavedPhotosAlbum(path, nil, nil, NULL);
                 LOG("[dl/story] saved video to Photos\n");
             }
@@ -834,26 +880,16 @@ static id hooked_storyContainer_init(id self, SEL _cmd, id thread, id bucket, id
     }
     if (!s_downloadStory) return result;
     if (!result) return result;
-    if (!g_storyHandler) g_storyHandler = [[GlowStoryDownloadHandler alloc] init];
     @try {
-        UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
-        btn.frame = CGRectMake(0, 0, 32, 32);
-        [btn setTitle:@"⬇" forState:UIControlStateNormal];
-        [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        btn.titleLabel.font = [UIFont systemFontOfSize:18];
-        btn.layer.cornerRadius = 16;
-        btn.backgroundColor = [UIColor colorWithWhite:0 alpha:0.6];
-        [btn addTarget:g_storyHandler action:@selector(onStoryDownloadTap:) forControlEvents:UIControlEventTouchUpInside];
-        [result addSubview:btn];
-        // Top-right corner
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-            @try {
-                UIView *parent = (UIView *)result;
-                CGFloat w = parent.bounds.size.width;
-                btn.frame = CGRectMake(w - 44, 60, 32, 32);
-            } @catch (...) {}
-        });
-        LOG("[dl/story] added button to container\n");
+        if (!g_storyHandler) g_storyHandler = [[GlowStoryDownloadHandler alloc] init];
+        // Add LONG PRESS recognizer (not button - button caused crash)
+        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
+            initWithTarget:g_storyHandler
+            action:@selector(onStoryLongPress:)];
+        lp.minimumPressDuration = 0.5;
+        lp.cancelsTouchesInView = NO;
+        [result addGestureRecognizer:lp];
+        LOG("[dl/story] added long press to container\n");
     } @catch (NSException *e) {
         LOG("[dl/story] init exc: %s\n", e.reason.UTF8String);
     }
@@ -885,49 +921,110 @@ static id hooked_storyContainer_init(id self, SEL _cmd, id thread, id bucket, id
     [task resume];
 }
 
+// Helper: search up the view hierarchy for an object that responds to selector
+// Returns the object or nil. Logs the class if found.
+- (id)findObjectRespondingTo:(SEL)sel startingAt:(UIView *)start {
+    UIView *v = start;
+    int depth = 0;
+    while (v && depth < 12) {
+        // Check self
+        @try {
+            if ([v respondsToSelector:sel]) {
+                id result = [v performSelector:sel];
+                if (result) {
+                    LOG("[dl/video] found at depth %d: %s\n", depth, class_getName(object_getClass(v)));
+                    return result;
+                }
+            }
+        } @catch (...) {}
+        // Check KVC for controller
+        if (sel == @selector(currentVideoPlaybackItem) || sel == sel_registerName("currentVideoPlaybackItem")) {
+            @try {
+                id controller = [v valueForKey:@"controller"];
+                if (controller && [controller respondsToSelector:sel]) {
+                    id result = [controller performSelector:sel];
+                    if (result) {
+                        LOG("[dl/video] found via controller at depth %d: %s\n", depth, class_getName(object_getClass(v)));
+                        return result;
+                    }
+                }
+            } @catch (...) {}
+            // Try manager ivar
+            Ivar mgrIvar = class_getInstanceVariable(object_getClass(v), "_manager");
+            if (mgrIvar) {
+                @try {
+                    id mgr = object_getIvar(v, mgrIvar);
+                    if (mgr && [mgr respondsToSelector:sel]) {
+                        id result = [mgr performSelector:sel];
+                        if (result) {
+                            LOG("[dl/video] found via _manager at depth %d: %s\n", depth, class_getName(object_getClass(v)));
+                            return result;
+                        }
+                    }
+                } @catch (...) {}
+            }
+        }
+        v = v.superview;
+        depth++;
+    }
+    return nil;
+}
+
 - (void)onLongPress:(UILongPressGestureRecognizer *)gr {
     if (gr.state != UIGestureRecognizerStateBegan) return;
     if (!s_downloadVideo) return;
     @try {
         UIView *v = gr.view;
-        // Walk up to find VideoContainerView
-        UIView *container = v;
-        Class videoContainerCls = NSClassFromString(@"VideoContainerView");
-        int maxDepth = 8;
-        while (container && maxDepth-- > 0) {
-            if (videoContainerCls && [container isKindOfClass:videoContainerCls]) break;
-            container = container.superview;
-        }
-        if (!container) {
-            LOG("[dl/video] no VideoContainerView found\n");
+        SEL curSel = sel_registerName("currentVideoPlaybackItem");
+        // Walk the view hierarchy looking for currentVideoPlaybackItem
+        id item = [self findObjectRespondingTo:curSel startingAt:v];
+        if (!item) {
+            LOG("[dl/video] no current playback item in hierarchy\n");
             return;
         }
-        // Get currentVideoPlaybackItem from container.controller (per Glow 1.3.1)
-        // Try KVC: container -> controller -> currentVideoPlaybackItem
-        id controller = nil;
-        @try {
-            controller = [container valueForKey:@"controller"];
-        } @catch (...) {}
-        if (!controller) {
-            // Walk siblings
-            for (UIView *sub in container.subviews) {
-                @try {
-                    controller = [sub valueForKey:@"controller"];
-                    if (controller) break;
-                } @catch (...) {}
-            }
-        }
-        if (!controller) { LOG("[dl/video] no controller\n"); return; }
-        SEL curSel = sel_registerName("currentVideoPlaybackItem");
-        id item = [controller respondsToSelector:curSel] ? [controller performSelector:curSel] : nil;
-        if (!item) { LOG("[dl/video] no current playback item\n"); return; }
         SEL hdSel = sel_registerName("HDPlaybackURL");
         SEL sdSel = sel_registerName("SDPlaybackURL");
         NSURL *hd = [item respondsToSelector:hdSel] ? [item performSelector:hdSel] : nil;
         NSURL *sd = [item respondsToSelector:sdSel] ? [item performSelector:sdSel] : nil;
-        if (hd) [self downloadVideoURL:hd quality:@"hd"];
-        if (sd) [self downloadVideoURL:sd quality:@"sd"];
-        LOG("[dl/video] downloaded HD=%d SD=%d\n", hd != nil, sd != nil);
+        if (!hd && !sd) {
+            LOG("[dl/video] item has no URLs\n");
+            return;
+        }
+        // Show action sheet to pick quality (matches Glow 1.3.1)
+        UIWindow *win = nil;
+        for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+            if ([s isKindOfClass:[UIWindowScene class]]) {
+                UIWindowScene *ws = (UIWindowScene *)s;
+                for (UIWindow *w in ws.windows) { if (w.isKeyWindow) { win = w; break; } }
+                if (win) break;
+            }
+        }
+        if (!win) win = [UIApplication sharedApplication].keyWindow;
+        UIViewController *top = win.rootViewController;
+        while (top.presentedViewController) top = top.presentedViewController;
+        if (!top) {
+            // Just download both if no UI
+            if (hd) [self downloadVideoURL:hd quality:@"hd"];
+            if (sd) [self downloadVideoURL:sd quality:@"sd"];
+            return;
+        }
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Tải video?" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+        if (hd) {
+            [alert addAction:[UIAlertAction actionWithTitle:@"Tải HD" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+                [self downloadVideoURL:hd quality:@"hd"];
+            }]];
+        }
+        if (sd) {
+            [alert addAction:[UIAlertAction actionWithTitle:@"Tải SD" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+                [self downloadVideoURL:sd quality:@"sd"];
+            }]];
+        }
+        [alert addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
+        if (alert.popoverPresentationController) {
+            alert.popoverPresentationController.sourceView = v;
+            alert.popoverPresentationController.sourceRect = v.bounds;
+        }
+        [top presentViewController:alert animated:YES completion:nil];
     } @catch (NSException *e) {
         LOG("[dl/video] exc: %s\n", e.reason.UTF8String);
     }
