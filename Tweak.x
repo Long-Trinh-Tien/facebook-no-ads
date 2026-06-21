@@ -1362,10 +1362,30 @@ static void hooked_reelsViewWillDisappear(id self, SEL _cmd, BOOL animated) {
     }
 }
 
-// v8.2.15: Find FBVideoHomePassthroughView (full-screen overlay) and add
-// button at right edge, same column as like/share. PassthroughView is the
-// overlay that sits on top of video and has the action buttons.
-// Walk the view tree to find it (might be nested).
+// v8.2.16: Find FBShortsSideBarView (the right action column) and add
+// button DIRECTLY inside it, as a sibling of Like/Comment/Share.
+// FBShortsSideBarView contains the like/share column at the right side
+// of every Reel. Adding our button as its child ensures:
+// 1. Same parent as native action buttons (correct z-order, correct layer)
+// 2. Auto-cleanup with the Reel
+// 3. Position automatically below the "More" button
+static UIView *findShortsSideBarView(UIView *root) {
+    if (!root) return nil;
+    @try {
+        Class cls = object_getClass(root);
+        const char *name = class_getName(cls);
+        if (name && strstr(name, "FBShortsSideBarView") != NULL) {
+            return root;
+        }
+        for (UIView *sub in root.subviews) {
+            UIView *found = findShortsSideBarView(sub);
+            if (found) return found;
+        }
+    } @catch (...) {}
+    return nil;
+}
+
+// v8.2.15: Keep for fallback
 static UIView *findPassthroughView(UIView *root) {
     if (!root) return nil;
     @try {
@@ -1548,6 +1568,76 @@ static void hooked_reelsViewDidLoad(id self, SEL _cmd) {
     }
 }
 
+// v8.2.16: Hook FBShortsSideBarView.layoutSubviews to add download button
+// DIRECTLY as a child of the sidebar (same parent as like/share).
+// This guarantees the button is in the same column with correct z-order.
+//
+// From R4 v1.6 log, the structure is:
+//   FBShortsViewerOverlayComponentView
+//     FBPassthroughView (content overlay)
+//       FBShortsSideBarView (360,0,56,333) — RIGHT ACTION COLUMN
+//         FDSTouchStateAnnouncingControl (0,0,56,72)   Like
+//         FDSTouchStateAnnouncingControl (0,72,56,72)  Comment
+//         FDSTouchStateAnnouncingControl (0,145,56,72) Share
+//         FDSTouchStateAnnouncingControl (0,217,56,72) Save
+//         FDSTouchStateAnnouncingControl (0,289,56,44) More
+//       FBShortsDescriptionView
+//       ...
+//
+// We add our button at (0, 333, 56, 72) - right below "More".
+static NSMutableSet *g_sideBarsWithButton = nil;
+static IMP orig_shortsSideBarLayoutSubviews = NULL;
+static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
+    if (orig_shortsSideBarLayoutSubviews) {
+        typedef void (*FnType)(id, SEL);
+        FnType fn = (FnType)(uintptr_t)orig_shortsSideBarLayoutSubviews;
+        fn(self, _cmd);
+    }
+    if (!s_downloadVideo) return;
+    @try {
+        if (![self isKindOfClass:[UIView class]]) return;
+        UIView *sideBar = (UIView *)self;
+        if (!g_sideBarsWithButton) g_sideBarsWithButton = [[NSMutableSet alloc] init];
+        if (!g_reelButtonHandler) g_reelButtonHandler = [[GlowReelButtonHandler alloc] init];
+        NSValue *vkey = [NSValue valueWithNonretainedObject:sideBar];
+        if ([g_sideBarsWithButton containsObject:vkey]) return;
+        // Skip if hidden (suggests off-screen)
+        if (sideBar.hidden || sideBar.alpha < 0.01) return;
+        // Skip if size is too small (0x0 or 56x0)
+        if (sideBar.bounds.size.width < 20 || sideBar.bounds.size.height < 100) return;
+        [g_sideBarsWithButton addObject:vkey];
+
+        // Sidebar width 56, height varies (333 in test, but we use bounds)
+        CGFloat W = sideBar.bounds.size.width;
+        CGFloat H = sideBar.bounds.size.height;
+        CGFloat btnW = 40;   // smaller than like (56) to fit
+        CGFloat btnH = 40;
+        // Place at top-right of sidebar (above "Like") so it's
+        // at the start of the action column, very visible
+        CGFloat btnX = (W - btnW) / 2.0;  // center horizontally
+        CGFloat btnY = -btnH - 8;  // ABOVE the sidebar (negative y)
+
+        UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+        btn.frame = CGRectMake(btnX, btnY, btnW, btnH);
+        btn.layer.cornerRadius = btnH / 2.0;
+        btn.backgroundColor = [UIColor colorWithRed:1.0 green:0.2 blue:0.2 alpha:1.0];
+        [btn setTitle:@"⬇" forState:UIControlStateNormal];
+        [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        btn.titleLabel.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBold];
+        btn.layer.borderWidth = 2;
+        btn.layer.borderColor = [UIColor whiteColor].CGColor;
+        btn.accessibilityIdentifier = @"GlowReelButton";
+        btn.layer.zPosition = 9999;
+        [btn addTarget:g_reelButtonHandler action:@selector(onReelButtonTap:) forControlEvents:UIControlEventTouchUpInside];
+        [sideBar addSubview:btn];
+        [sideBar bringSubviewToFront:btn];
+        LOG("[reels/sidebar] ADDED button to %s W=%.0f H=%.0f at (%.0f,%.0f,%.0f,%.0f)\n",
+            class_getName(object_getClass(sideBar)), W, H, btnX, btnY, btnW, btnH);
+    } @catch (NSException *e) {
+        LOG("[reels/sidebar] exc: %s\n", e.reason.UTF8String);
+    }
+}
+
 static IMP orig_didLongPress = NULL;
 static void hooked_didLongPress(id self, SEL _cmd, id recognizer) {
     // Always call orig first
@@ -1724,6 +1814,28 @@ static void installHooks(void) {
             } else {
                 LOG("  FBVideoHomeUnifiedPlayerViewController NOT FOUND\n");
             }
+
+            // v8.2.16: Hook FBShortsSideBarView.layoutSubviews
+            // FBShortsSideBarView is the right action column in Reels
+            // (contains like/comment/share/save/more). Adding our button
+            // as its child puts it in the same view as the native buttons,
+            // guaranteeing correct layer and z-order.
+            Class sideBarCls = objc_getClass("FBShortsSideBarView");
+            if (sideBarCls) {
+                SEL lsSel = @selector(layoutSubviews);
+                Method m2 = class_getInstanceMethod(sideBarCls, lsSel);
+                if (m2) {
+                    orig_shortsSideBarLayoutSubviews = method_getImplementation(m2);
+                    method_setImplementation(m2, (IMP)hooked_shortsSideBarLayoutSubviews);
+                    LOG("  hook #11: FBShortsSideBarView.layoutSubviews -> add download button as child\n");
+                } else {
+                    LOG("  FBShortsSideBarView.layoutSubviews NOT FOUND\n");
+                }
+            } else {
+                LOG("  FBShortsSideBarView NOT FOUND (will retry when Reels opens)\n");
+                // Lazy install when Reels VC appears
+                orig_shortsSideBarLayoutSubviews = NULL;  // mark for lazy install
+            }
         }
 
         LOG("=== Done ===\n");
@@ -1857,7 +1969,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.15 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.16 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
