@@ -1299,7 +1299,13 @@ static void hooked_reelsViewDidLoad(id self, SEL _cmd) {
     @try {
         if (!g_reelsViewsWithButton) g_reelsViewsWithButton = [[NSMutableSet alloc] init];
         if (!g_reelButtonHandler) g_reelButtonHandler = [[GlowReelButtonHandler alloc] init];
-        UIView *v = (UIView *)self;
+        UIView *v = nil;
+        if ([self isKindOfClass:[UIViewController class]]) {
+            v = [(UIViewController *)self view];
+        } else if ([self isKindOfClass:[UIView class]]) {
+            v = (UIView *)self;
+        }
+        if (!v) { LOG("[reels] no view found\n"); return; }
         if (![v isKindOfClass:[UIView class]]) return;
         if ([g_reelsViewsWithButton containsObject:[NSValue valueWithNonretainedObject:v]]) return;
         // Use dispatch_after to wait for layout to complete
@@ -1615,7 +1621,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.9 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.10 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();

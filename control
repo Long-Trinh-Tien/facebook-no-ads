@@ -1,8 +1,8 @@
 Package: com.tommy.glowv3
 Name: GlowV3
-Version: 1.2.9
+Version: 1.2.10
 Architecture: iphoneos-arm
-Description: Facebook ad blocker + Reels button with delay v8.2.9
+Description: Facebook ad blocker + Reels button fix v8.2.10
 Maintainer: tommy
 Author: tommy
 Section: Tweaks
