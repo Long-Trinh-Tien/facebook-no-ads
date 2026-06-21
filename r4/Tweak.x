@@ -1,10 +1,13 @@
-// R4 Verifier — Comprehensive class/method/ivar dump
-// Output to /var/mobile/Documents/glow_r4.txt
+// R4 Verifier v3 — Targeted class discovery (no global enumeration)
+// Output: /var/mobile/Documents/glow_r4.txt
 //
-// Purpose: discover correct 560.x classes/methods for v8.2+ features
-// (download story, download video, hide composer, hide Reels, etc.)
+// Why v3: v1/v2 crashed in Phase 2 because objc_getClassList
+// returns ~10000 classes, and iterating with strstr + fflush per line
+// caused memory/IO pressure, killing the process.
 //
-// No hooks installed — read-only introspection.
+// Fix: Skip global enumeration. Hardcode candidate class names for
+// v8.2 features. Use objc_getClass to check each. Output is bounded
+// and fast.
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -30,9 +33,8 @@ static void log_msg(const char *fmt, ...) {
         va_start(ap, fmt);
         vfprintf(g_log_file, fmt, ap);
         va_end(ap);
-        fflush(g_log_file);
+        // Flush at end only, not per line (avoid IO pressure)
     }
-    // Also printf so we can see in console
     va_list ap2;
     va_start(ap2, fmt);
     vprintf(fmt, ap2);
@@ -40,7 +42,7 @@ static void log_msg(const char *fmt, ...) {
 }
 #define LOG(fmt, ...) log_msg(fmt, ##__VA_ARGS__)
 
-// Dump a single class
+// Dump a single class (full methods + ivars + properties + superclass)
 static void dumpClass(const char *name) {
     Class cls = objc_getClass(name);
     if (!cls) {
@@ -52,7 +54,6 @@ static void dumpClass(const char *name) {
     LOG("\n=== %s ===\n", name);
     LOG("  Address: %p\n", cls);
 
-    // Superclass chain
     LOG("  Superclass chain:\n");
     Class cur = cls;
     int depth = 0;
@@ -61,7 +62,6 @@ static void dumpClass(const char *name) {
         cur = class_getSuperclass(cur);
     }
 
-    // Methods
     unsigned int mc = 0;
     Method *methods = class_copyMethodList(cls, &mc);
     LOG("  Methods (%u):\n", mc);
@@ -69,7 +69,6 @@ static void dumpClass(const char *name) {
         SEL sel = method_getName(methods[i]);
         const char *n = sel_getName(sel);
         const char *t = method_getTypeEncoding(methods[i]);
-        // Get return type and arg types
         if (t) {
             LOG("    - %s  // %s\n", n, t);
         } else {
@@ -78,7 +77,6 @@ static void dumpClass(const char *name) {
     }
     free(methods);
 
-    // Ivars
     unsigned int ic = 0;
     Ivar *ivars = class_copyIvarList(cls, &ic);
     LOG("  Ivars (%u):\n", ic);
@@ -89,7 +87,6 @@ static void dumpClass(const char *name) {
     }
     free(ivars);
 
-    // Properties
     unsigned int pc = 0;
     objc_property_t *props = class_copyPropertyList(cls, &pc);
     LOG("  Properties (%u):\n", pc);
@@ -101,73 +98,36 @@ static void dumpClass(const char *name) {
     free(props);
 }
 
-// Enumerate all classes with a substring match (just names, not full dump)
-static void dumpClassesMatching(const char *substring, int maxResults) {
-    int numClasses = 0;
-    Class *classes = NULL;
-
-    numClasses = objc_getClassList(NULL, 0);
-    if (numClasses <= 0) return;
-
-    classes = (Class *)malloc(sizeof(Class) * numClasses);
-    numClasses = objc_getClassList(classes, numClasses);
-
-    int shown = 0;
-    for (int i = 0; i < numClasses && shown < maxResults; i++) {
-        const char *name = class_getName(classes[i]);
-        if (name && strstr(name, substring)) {
-            // Only top-level classes (no $Subclass)
-            if (strchr(name, '$') == NULL) {
-                LOG("  %s\n", name);
-                shown++;
-            }
-        }
-    }
-    free(classes);
-    LOG("--- %d classes matching '%s' ---\n\n", shown, substring);
-}
-
-// Enumerate ALL FB* classes
-static void dumpAllFBClasses(void) {
-    int numClasses = 0;
-    Class *classes = NULL;
-    numClasses = objc_getClassList(NULL, 0);
-    if (numClasses <= 0) return;
-
-    classes = (Class *)malloc(sizeof(Class) * numClasses);
-    numClasses = objc_getClassList(classes, numClasses);
-
-    int total = 0;
-    for (int i = 0; i < numClasses; i++) {
-        const char *name = class_getName(classes[i]);
-        if (!name) continue;
-        if (strncmp(name, "FB", 2) == 0 && strchr(name, '$') == NULL) {
-            // Just print name, not full dump
-            LOG("  %s\n", name);
-            total++;
-        }
-    }
-    free(classes);
-    LOG("\n--- Total %d FB* classes ---\n", total);
-}
-
-// Check if class exists and dump
-static void checkClasses(int argc, const char *names[], int n) {
+// Check list of class names, dump only those that exist
+static void checkCandidates(const char *category, const char *names[], int n) {
+    LOG("\n### %s ###\n", category);
+    int found = 0;
     for (int i = 0; i < n; i++) {
-        dumpClass(names[i]);
+        Class c = objc_getClass(names[i]);
+        if (c) {
+            LOG("  [FOUND] %s\n", names[i]);
+            found++;
+        }
+    }
+    LOG("--- %d/%d found ---\n", found, n);
+}
+
+// Check then dump full if found
+static void checkAndDump(const char *name) {
+    if (objc_getClass(name)) {
+        dumpClass(name);
     }
 }
 
 __attribute__((constructor))
 static void r4_init(void) {
-    LOG("=== R4 Verifier — %s ===\n\n", __DATE__ " " __TIME__);
+    LOG("=== R4 Verifier v3 (targeted) — %s ===\n\n", __DATE__ " " __TIME__);
 
-    // Defer to main queue (wait for FB classes to be loaded)
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{
         @try {
-            // ─── Phase 1: Critical classes for v8.2 features ───
-            LOG("\n########## PHASE 1: Critical classes (v8.2 features) ##########\n");
+            // ─── Phase 1: Critical classes (full dump) ───
+            LOG("\n########## PHASE 1: Critical classes ##########\n");
             const char *critical[] = {
                 // Ad block / story seen
                 "FBMemNewsFeedEdge",
@@ -190,74 +150,176 @@ static void r4_init(void) {
                 "FBVideoPlaybackItem",
                 "FBVideoOverlayPluginComponentBackgroundView",
 
-                // PYMK / Suggested (verify removed or renamed)
-                "FBMemFeedStory",
-                "FBVideoChannelPlaylistItem",
+                // PYMK / Suggested
                 "FBMemPeopleYouMayKnowEdge",
                 "FBMemSuggestedForYouEdge",
             };
-            checkClasses(NULL, critical, sizeof(critical)/sizeof(critical[0]));
-
-            // ─── Phase 2: Search by substring ───
-            LOG("\n########## PHASE 2: Classes matching keywords ##########\n");
-
-            LOG("\n### 'Reel' ###\n");
-            dumpClassesMatching("Reel", 30);
-
-            LOG("\n### 'Snacks' ###\n");
-            dumpClassesMatching("Snacks", 30);
-
-            LOG("\n### 'Stories' ###\n");
-            dumpClassesMatching("Stories", 30);
-
-            LOG("\n### 'Pymk' or 'PYMK' ###\n");
-            dumpClassesMatching("Pymk", 10);
-            dumpClassesMatching("PYMK", 10);
-            dumpClassesMatching("YouMayKnow", 10);
-
-            LOG("\n### 'Suggest' ###\n");
-            dumpClassesMatching("Suggest", 20);
-
-            LOG("\n### 'Shorts' ###\n");
-            dumpClassesMatching("Shorts", 10);
-
-            LOG("\n### 'Video' ###\n");
-            dumpClassesMatching("Video", 40);
-
-            LOG("\n### 'Download' ###\n");
-            dumpClassesMatching("Download", 20);
-
-            // ─── Phase 3: All FB* classes (just names) ───
-            LOG("\n########## PHASE 3: All FB* classes (names only) ##########\n");
-            dumpAllFBClasses();
-
-            // ─── Phase 4: Class hierarchy info ───
-            LOG("\n########## PHASE 4: Class hierarchy ##########\n");
-            const char *hierarchy[] = {
-                "FBMemNewsFeedEdge",
-                "FBSnacksMediaContainerView",
-                "FBVideoPlaybackItem",
-            };
-            for (int i = 0; i < 3; i++) {
-                Class c = objc_getClass(hierarchy[i]);
-                if (!c) continue;
-                LOG("\n%s superclass chain:\n", hierarchy[i]);
-                Class cur = c;
-                int depth = 0;
-                while (cur && depth < 15) {
-                    LOG("  [%d] %s\n", depth++, class_getName(cur));
-                    cur = class_getSuperclass(cur);
-                }
+            for (int i = 0; i < (int)(sizeof(critical)/sizeof(critical[0])); i++) {
+                checkAndDump(critical[i]);
             }
+
+            // ─── Phase 2: Reels candidates ───
+            LOG("\n########## PHASE 2: Reels candidates ##########\n");
+            const char *reels[] = {
+                // Reels carousel (tab icon)
+                "FBReelsTabViewController",
+                "FBReelsTabContainerView",
+                "FBReelsTabView",
+                "FBReelTabBarItem",
+                // Reels feed
+                "FBReelsFeedViewController",
+                "FBReelsFeedView",
+                "FBReelsCollectionView",
+                "FBReelsCollectionViewDataSource",
+                "FBReelsCollectionViewLayout",
+                "FBReelViewController",
+                "FBReelPlayerViewController",
+                "FBReelView",
+                "FBReelPlayerView",
+                "FBReelContainerView",
+                "FBReelUnitView",
+                "FBReelTrayView",
+                "FBReelCarouselView",
+                "FBReelHeaderView",
+                "FBReelVideoContainerView",
+                "FBReelsUnit",
+                "FBReelsUnitView",
+                "FBReelsUnitLayout",
+                // Reel data
+                "FBMemReelEdge",
+                "FBMemReelTrayEdge",
+                "FBMemReelUnitEdge",
+                "FBMemReelItem",
+                "FBMemReelUnit",
+                // Reels overlay
+                "FBReelOverlayView",
+                "FBReelCommentsView",
+                "FBReelsOverlayContainerView",
+            };
+            checkCandidates("Reels", reels, sizeof(reels)/sizeof(reels[0]));
+
+            // ─── Phase 3: Video container candidates ───
+            LOG("\n########## PHASE 3: Video container candidates ##########\n");
+            const char *videos[] = {
+                // Old name from Glow
+                "VideoContainerView",
+                // Possible replacements
+                "FBVideoContainerView",
+                "FBFeedVideoContainerView",
+                "FBInlineVideoContainerView",
+                "FBNewsFeedVideoContainerView",
+                "FBReelVideoContainerView",
+                "FBVideoPlayerView",
+                "FBVideoView",
+                "FBVideoWrapperView",
+                "FBVideoBackgroundView",
+                "FBVideoOverlayView",
+                // Compositional
+                "CKComponentView",
+                // Pager for reels
+                "FBPagingView",
+                "FBReelPagingView",
+                // Snacks video
+                "FBSnacksVideoView",
+                "FBSnacksVideoContainer",
+                "FBSnacksReelContainerView",
+            };
+            checkCandidates("Video containers", videos, sizeof(videos)/sizeof(videos[0]));
+
+            // ─── Phase 4: Story viewer candidates ───
+            LOG("\n########## PHASE 4: Story viewer candidates ##########\n");
+            const char *story[] = {
+                "FBSnacksStoryViewerViewController",
+                "FBSnacksStoryViewer",
+                "FBSnacksStoryViewController",
+                "FBSnacksStoryView",
+                "FBSnacksThreadViewerViewController",
+                "FBSnacksThreadViewer",
+                "FBSnacksBucketViewerViewController",
+                "FBSnacksBucketViewer",
+                "FBSnacksViewerController",
+                "FBSnacksViewer",
+                "FBSnacksContainerViewController",
+                "FBSnacksTrayViewController",
+                "FBSnacksTrayView",
+                "FBSnacksViewController",
+            };
+            checkCandidates("Story viewer", story, sizeof(story)/sizeof(story[0]));
+
+            // ─── Phase 5: Composer / PYMK / Suggested ───
+            LOG("\n########## PHASE 5: UI Hide candidates ##########\n");
+            const char *hide[] = {
+                // Composer
+                "FBComposerViewController",
+                "FBNewsFeedComposerView",
+                "FBNewsFeedComposerViewController",
+                "FBComposerPublishTargetView",
+                "FBFeedComposerView",
+                "FBStatusComposerView",
+                "FBInlineComposerView",
+                // PYMK variants
+                "FBMemPYMKEdge",
+                "FBMemPYMKUnit",
+                "FBMemPYMKRow",
+                "FBMemPeopleYouMayKnowUnit",
+                "FBMemPeopleYouMayKnowItem",
+                "FBMemPeopleYouMayKnowFeedUnit",
+                "FBMemPeopleYouMayKnowRow",
+                "FBMemPeopleYouMayKnowCard",
+                "FBMemPeopleYouMayKnowCell",
+                "FBMemPeopleYouMayKnowView",
+                "FBMemPeopleYouMayKnowComponent",
+                // Suggested
+                "FBMemSuggestedEdge",
+                "FBMemSuggestedRow",
+                "FBMemSuggestedUnit",
+                "FBMemSuggestedItem",
+                "FBMemSuggestedCell",
+                "FBMemSuggestedView",
+                "FBMemSuggestedComponent",
+                "FBMemSuggestedForYouItem",
+                "FBMemSuggestedForYouUnit",
+                "FBMemSuggestedForYouRow",
+                // Reel carousel (tab)
+                "FBReelsTrayViewController",
+                "FBReelsTrayView",
+                "FBReelsCarouselView",
+                "FBReelsCarouselViewController",
+                "FBReelsCarouselDataSource",
+            };
+            checkCandidates("UI Hide", hide, sizeof(hide)/sizeof(hide[0]));
+
+            // ─── Phase 6: Download / share / save candidates ───
+            LOG("\n########## PHASE 6: Download/share candidates ##########\n");
+            const char *dl[] = {
+                "FBDownloadManager",
+                "FBDownloader",
+                "FBFeedUnitDownloader",
+                "FBVideoDownloader",
+                "FBStoryDownloader",
+                "FBPhotoDownloader",
+                "FBSaveToPhotosAction",
+                "FBSaveActionSheet",
+                "FBLongPressMenu",
+                "FBContextMenuAction",
+                "FBContextMenuProvider",
+                "FBLongPressGestureHandler",
+            };
+            checkCandidates("Download/share", dl, sizeof(dl)/sizeof(dl[0]));
 
             LOG("\n=== R4 Verification Complete ===\n");
             LOG("Output: %s\n", g_log_path);
-            if (g_log_file) fclose(g_log_file);
+            if (g_log_file) {
+                fflush(g_log_file);
+                fclose(g_log_file);
+            }
             g_log_file = NULL;
         } @catch (NSException *e) {
             LOG("EXC: %s\n", e.reason.UTF8String);
+            if (g_log_file) { fflush(g_log_file); fclose(g_log_file); }
         } @catch (...) {
             LOG("EXC(c++)\n");
+            if (g_log_file) { fflush(g_log_file); fclose(g_log_file); }
         }
     });
 }
