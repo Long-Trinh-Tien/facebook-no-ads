@@ -527,6 +527,13 @@ static id getMemEdge(id self, NSIndexPath *ip) {
 static BOOL isAdEdge(id memEdge) {
     if (!memEdge) return NO;
     @try {
+        // PYMK check (FBMemPeopleYouMayKnowEdge has 0 methods, only class check works)
+        if (s_removePYMK) {
+            Class pymkCls = objc_getClass("FBMemPeopleYouMayKnowEdge");
+            if (pymkCls && [memEdge isKindOfClass:pymkCls]) {
+                return YES;
+            }
+        }
         SEL catSel = sel_registerName("category");
         if ([memEdge respondsToSelector:catSel]) {
             id cat = [memEdge performSelector:catSel];
@@ -648,6 +655,303 @@ static void noop_seen_3(id self, SEL _cmd, id a, id b, id c, BOOL d, id e, id f)
 }
 
 // ═══════════════════════════════════════════════════════════════
+// SECTION 4.5: v8.2 features (Hide Composer, PYMK, Download Story/Video)
+// ═══════════════════════════════════════════════════════════════
+
+// ─── Feature 1: Hide Composer (FBNewsFeedViewControllerConfiguration) ───
+// We hook FBNewsFeedViewController viewDidLoad to walk to _configuration
+// and force _shouldHideComposer = YES.
+static IMP orig_newsFeed_viewDidLoad = NULL;
+static int composer_hide_count = 0;
+
+static void hooked_newsFeed_viewDidLoad(id self, SEL _cmd) {
+    if (orig_newsFeed_viewDidLoad) {
+        typedef void (*FnType)(id, SEL);
+        FnType fn = (FnType)(uintptr_t)orig_newsFeed_viewDidLoad;
+        fn(self, _cmd);
+    }
+    if (!s_hideComposer) return;
+    @try {
+        Class nfcCls = object_getClass(self);
+        Ivar configIvar = class_getInstanceVariable(nfcCls, "_configuration");
+        if (!configIvar) return;
+        id config = object_getIvar(self, configIvar);
+        if (!config) return;
+        Class configCls = object_getClass(config);
+        Ivar hideIvar = class_getInstanceVariable(configCls, "_shouldHideComposer");
+        if (!hideIvar) return;
+        // BOOL ivar — set to YES
+        BOOL yes = YES;
+        *(BOOL *)((uintptr_t)config + ivar_getOffset(hideIvar)) = yes;
+        composer_hide_count++;
+        LOG("[composer] hid (count=%d)\n", composer_hide_count);
+    } @catch (...) {
+        LOG("[composer] exc\n");
+    }
+}
+
+// ─── Feature 2: PYMK hide (via isKindOfClass FBMemPeopleYouMayKnowEdge) ───
+// Extend isAdEdge to also flag PYMK edges.
+// FBMemPeopleYouMayKnowEdge has 0 methods (GraphQL stub only).
+// Update isAdEdge to also check the class.
+
+// ─── Feature 3: Download Story (button on FBSnacksMediaContainerView) ───
+// Hook the NEW init signature: initWithThread:bucket:mediaViewDelegate:mediaViewGenerator:toolbox:shouldBlurMedia:
+// Add a download button to the view.
+
+@interface GlowStoryDownloadHandler : NSObject
+@end
+@implementation GlowStoryDownloadHandler
+
+- (void)onStoryDownloadTap:(UIButton *)sender {
+    @try {
+        UIView *container = (UIView *)sender.superview;
+        Class storyCls = NSClassFromString(@"FBSnacksMediaContainerView");
+        while (container && ![container isKindOfClass:storyCls]) {
+            container = container.superview;
+        }
+        if (!container) { LOG("[dl/story] container not found\n"); return; }
+        // Get mediaView via ivar _mediaView (UIView<FBSnacksMediaViewProtocol>)
+        Ivar mvIvar = class_getInstanceVariable(object_getClass(container), "_mediaView");
+        id mediaView = mvIvar ? object_getIvar(container, mvIvar) : nil;
+        if (!mediaView) { LOG("[dl/story] mediaView nil\n"); return; }
+
+        // Try FBSnacksNewVideoView
+        Class videoCls = NSClassFromString(@"FBSnacksNewVideoView");
+        if (videoCls && [mediaView isKindOfClass:videoCls]) {
+            // Get manager
+            SEL mgrSel = sel_registerName("manager");
+            id mgr = [mediaView respondsToSelector:mgrSel] ? [mediaView performSelector:mgrSel] : nil;
+            if (!mgr) { LOG("[dl/story] manager nil\n"); return; }
+            SEL curSel = sel_registerName("currentVideoPlaybackItem");
+            id item = [mgr respondsToSelector:curSel] ? [mgr performSelector:curSel] : nil;
+            if (!item) { LOG("[dl/story] no playback item\n"); return; }
+            SEL hdSel = sel_registerName("HDPlaybackURL");
+            NSURL *url = [item respondsToSelector:hdSel] ? [item performSelector:hdSel] : nil;
+            if (!url) {
+                SEL sdSel = sel_registerName("SDPlaybackURL");
+                url = [item respondsToSelector:sdSel] ? [item performSelector:sdSel] : nil;
+            }
+            if (url) {
+                LOG("[dl/story] video URL: %s\n", [[url absoluteString] UTF8String]);
+                [self downloadURL:url toFileName:[NSString stringWithFormat:@"story_video_%lld.mp4", (long long)[[NSDate date] timeIntervalSince1970]]];
+            }
+            return;
+        }
+
+        // Try FBSnacksPhotoView
+        Class photoCls = NSClassFromString(@"FBSnacksPhotoView");
+        if (photoCls && [mediaView isKindOfClass:photoCls]) {
+            // Walk: FBSnacksPhotoView._photoView (FBSnacksWebPhotoView) -> _photoView (FBWebPhotoView) -> .photo
+            Ivar swpvIvar = class_getInstanceVariable(object_getClass(mediaView), "_photoView");
+            id swpv = swpvIvar ? object_getIvar(mediaView, swpvIvar) : nil;
+            if (!swpv) { LOG("[dl/story] FBSnacksWebPhotoView nil\n"); return; }
+            Class webPhotoCls = NSClassFromString(@"FBSnacksWebPhotoView");
+            if (![swpv isKindOfClass:webPhotoCls]) { LOG("[dl/story] not FBSnacksWebPhotoView: %s\n", class_getName(object_getClass(swpv))); return; }
+            Ivar wpvIvar = class_getInstanceVariable(object_getClass(swpv), "_photoView");
+            id wpv = wpvIvar ? object_getIvar(swpv, wpvIvar) : nil;
+            if (!wpv) { LOG("[dl/story] FBWebPhotoView nil\n"); return; }
+            // .photo
+            SEL photoSel = sel_registerName("photo");
+            id photo = [wpv respondsToSelector:photoSel] ? [wpv performSelector:photoSel] : nil;
+            if (!photo) { LOG("[dl/story] photo nil\n"); return; }
+            // imageSpecifier — try KVC
+            @try {
+                id imageSpecifier = [photo valueForKey:@"imageSpecifier"];
+                if (!imageSpecifier) { LOG("[dl/story] imageSpecifier nil\n"); return; }
+                Class netSpecCls = NSClassFromString(@"FBWebImageNetworkSpecifier");
+                Class memSpecCls = NSClassFromString(@"FBWebImageMemorySpecifier");
+                if (netSpecCls && [imageSpecifier isKindOfClass:netSpecCls]) {
+                    SEL urlsSel = sel_registerName("allInfoURLsSortedByDescImageFlag");
+                    NSArray *urls = [imageSpecifier respondsToSelector:urlsSel] ? [imageSpecifier performSelector:urlsSel] : nil;
+                    if ([urls isKindOfClass:[NSArray class]] && urls.count > 0) {
+                        NSURL *url = urls[0];
+                        if ([url isKindOfClass:[NSURL class]]) {
+                            LOG("[dl/story] photo URL: %s\n", [[url absoluteString] UTF8String]);
+                            [self downloadURL:url toFileName:[NSString stringWithFormat:@"story_photo_%lld.jpg", (long long)[[NSDate date] timeIntervalSince1970]]];
+                        }
+                    }
+                } else if (memSpecCls && [imageSpecifier isKindOfClass:memSpecCls]) {
+                    SEL imgSel = sel_registerName("image");
+                    UIImage *img = [imageSpecifier respondsToSelector:imgSel] ? [imageSpecifier performSelector:imgSel] : nil;
+                    if (img) {
+                        UIImageWriteToSavedPhotosAlbum(img, nil, nil, nil);
+                        LOG("[dl/story] saved photo to Photos\n");
+                    }
+                }
+            } @catch (NSException *e) {
+                LOG("[dl/story] photo exc: %s\n", e.reason.UTF8String);
+            }
+            return;
+        }
+        LOG("[dl/story] unknown mediaView class: %s\n", class_getName(object_getClass(mediaView)));
+    } @catch (NSException *e) {
+        LOG("[dl/story] exc: %s\n", e.reason.UTF8String);
+    }
+}
+
+- (void)downloadURL:(NSURL *)url toFileName:(NSString *)name {
+    NSURLRequest *req = [NSURLRequest requestWithURL:url];
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+    NSURLSessionDownloadTask *task = [session downloadTaskWithRequest:req completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
+        if (error || !location) {
+            LOG("[dl/story] download err: %s\n", error ? [[error localizedDescription] UTF8String] : "nil");
+            return;
+        }
+        // Save to Photos
+        NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:name];
+        [[NSFileManager defaultManager] moveItemAtURL:location toURL:[NSURL fileURLWithPath:path] error:nil];
+        LOG("[dl/story] saved to %s\n", [path UTF8String]);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIImage *img = [UIImage imageWithContentsOfFile:path];
+            if (img) {
+                UIImageWriteToSavedPhotosAlbum(img, nil, nil, nil);
+                LOG("[dl/story] saved image to Photos\n");
+            } else {
+                // Treat as video
+                UISaveVideoAtPathToSavedPhotosAlbum(path, nil, nil, NULL);
+                LOG("[dl/story] saved video to Photos\n");
+            }
+        });
+    }];
+    [task resume];
+}
+
+@end
+
+static GlowStoryDownloadHandler *g_storyHandler = nil;
+
+static IMP orig_storyContainer_init = NULL;
+static id hooked_storyContainer_init(id self, SEL _cmd, id thread, id bucket, id mediaViewDelegate, id mediaViewGenerator, id toolbox, BOOL shouldBlurMedia) {
+    id result = nil;
+    if (orig_storyContainer_init) {
+        typedef id (*FnType)(id, SEL, id, id, id, id, id, BOOL);
+        FnType fn = (FnType)(uintptr_t)orig_storyContainer_init;
+        result = fn(self, _cmd, thread, bucket, mediaViewDelegate, mediaViewGenerator, toolbox, shouldBlurMedia);
+    } else {
+        return result;
+    }
+    if (!s_downloadStory) return result;
+    if (!result) return result;
+    if (!g_storyHandler) g_storyHandler = [[GlowStoryDownloadHandler alloc] init];
+    @try {
+        UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+        btn.frame = CGRectMake(0, 0, 32, 32);
+        [btn setTitle:@"⬇" forState:UIControlStateNormal];
+        [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        btn.titleLabel.font = [UIFont systemFontOfSize:18];
+        btn.layer.cornerRadius = 16;
+        btn.backgroundColor = [UIColor colorWithWhite:0 alpha:0.6];
+        [btn addTarget:g_storyHandler action:@selector(onStoryDownloadTap:) forControlEvents:UIControlEventTouchUpInside];
+        [result addSubview:btn];
+        // Top-right corner
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            @try {
+                UIView *parent = (UIView *)result;
+                CGFloat w = parent.bounds.size.width;
+                btn.frame = CGRectMake(w - 44, 60, 32, 32);
+            } @catch (...) {}
+        });
+        LOG("[dl/story] added button to container\n");
+    } @catch (NSException *e) {
+        LOG("[dl/story] init exc: %s\n", e.reason.UTF8String);
+    }
+    return result;
+}
+
+// ─── Feature 4: Download Video (long press) ───
+// Hook FBVideoOverlayPluginComponentBackgroundView.didLongPress:
+// Walk view hierarchy to find VideoContainerView, get current playback item.
+@interface GlowVideoDownloadHandler : NSObject
+@end
+@implementation GlowVideoDownloadHandler
+
+- (void)downloadVideoURL:(NSURL *)url quality:(NSString *)q {
+    if (!url) return;
+    NSString *name = [NSString stringWithFormat:@"video_%@_%lld.mp4", q, (long long)[[NSDate date] timeIntervalSince1970]];
+    NSURLRequest *req = [NSURLRequest requestWithURL:url];
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration defaultSessionConfiguration]];
+    NSURLSessionDownloadTask *task = [session downloadTaskWithRequest:req completionHandler:^(NSURL *loc, NSURLResponse *resp, NSError *err) {
+        if (err || !loc) { LOG("[dl/video] err: %s\n", err ? [[err localizedDescription] UTF8String] : "nil"); return; }
+        NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:name];
+        [[NSFileManager defaultManager] moveItemAtURL:loc toURL:[NSURL fileURLWithPath:path] error:nil];
+        LOG("[dl/video] saved to %s\n", [path UTF8String]);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UISaveVideoAtPathToSavedPhotosAlbum(path, nil, nil, NULL);
+            LOG("[dl/video] saved video to Photos\n");
+        });
+    }];
+    [task resume];
+}
+
+- (void)onLongPress:(UILongPressGestureRecognizer *)gr {
+    if (gr.state != UIGestureRecognizerStateBegan) return;
+    if (!s_downloadVideo) return;
+    @try {
+        UIView *v = gr.view;
+        // Walk up to find VideoContainerView
+        UIView *container = v;
+        Class videoContainerCls = NSClassFromString(@"VideoContainerView");
+        int maxDepth = 8;
+        while (container && maxDepth-- > 0) {
+            if (videoContainerCls && [container isKindOfClass:videoContainerCls]) break;
+            container = container.superview;
+        }
+        if (!container) {
+            LOG("[dl/video] no VideoContainerView found\n");
+            return;
+        }
+        // Get currentVideoPlaybackItem from container.controller (per Glow 1.3.1)
+        // Try KVC: container -> controller -> currentVideoPlaybackItem
+        id controller = nil;
+        @try {
+            controller = [container valueForKey:@"controller"];
+        } @catch (...) {}
+        if (!controller) {
+            // Walk siblings
+            for (UIView *sub in container.subviews) {
+                @try {
+                    controller = [sub valueForKey:@"controller"];
+                    if (controller) break;
+                } @catch (...) {}
+            }
+        }
+        if (!controller) { LOG("[dl/video] no controller\n"); return; }
+        SEL curSel = sel_registerName("currentVideoPlaybackItem");
+        id item = [controller respondsToSelector:curSel] ? [controller performSelector:curSel] : nil;
+        if (!item) { LOG("[dl/video] no current playback item\n"); return; }
+        SEL hdSel = sel_registerName("HDPlaybackURL");
+        SEL sdSel = sel_registerName("SDPlaybackURL");
+        NSURL *hd = [item respondsToSelector:hdSel] ? [item performSelector:hdSel] : nil;
+        NSURL *sd = [item respondsToSelector:sdSel] ? [item performSelector:sdSel] : nil;
+        if (hd) [self downloadVideoURL:hd quality:@"hd"];
+        if (sd) [self downloadVideoURL:sd quality:@"sd"];
+        LOG("[dl/video] downloaded HD=%d SD=%d\n", hd != nil, sd != nil);
+    } @catch (NSException *e) {
+        LOG("[dl/video] exc: %s\n", e.reason.UTF8String);
+    }
+}
+
+@end
+
+static GlowVideoDownloadHandler *g_videoHandler = nil;
+
+static IMP orig_didLongPress = NULL;
+static void hooked_didLongPress(id self, SEL _cmd, id recognizer) {
+    // Always call orig first
+    if (orig_didLongPress) {
+        typedef void (*FnType)(id, SEL, id);
+        FnType fn = (FnType)(uintptr_t)orig_didLongPress;
+        fn(self, _cmd, recognizer);
+    }
+    if (!g_videoHandler) g_videoHandler = [[GlowVideoDownloadHandler alloc] init];
+    if (recognizer && [recognizer isKindOfClass:[UILongPressGestureRecognizer class]]) {
+        [g_videoHandler onLongPress:(UILongPressGestureRecognizer *)recognizer];
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // SECTION 5: Long press to open settings (on any view)
 // ═══════════════════════════════════════════════════════════════
 
@@ -733,6 +1037,53 @@ static void installHooks(void) {
         // Hook 6: install long press on current view hierarchy
         // (called once after hooks install, then re-called when new VCs appear)
         installLongPressOnCurrentUI();
+
+        // Hook 7: Hide Composer - hook FBNewsFeedViewController.viewDidLoad
+        if (s_hideComposer) {
+            Class nfcCls = objc_getClass("FBNewsFeedViewController");
+            if (nfcCls) {
+                Method m = class_getInstanceMethod(nfcCls, @selector(viewDidLoad));
+                if (m) {
+                    orig_newsFeed_viewDidLoad = method_getImplementation(m);
+                    method_setImplementation(m, (IMP)hooked_newsFeed_viewDidLoad);
+                    LOG("  hook #7: FBNewsFeedViewController.viewDidLoad -> _shouldHideComposer=YES\n");
+                } else {
+                    LOG("  FBNewsFeedViewController.viewDidLoad NOT FOUND\n");
+                }
+            }
+        }
+
+        // Hook 8: Download Story - hook FBSnacksMediaContainerView new init
+        if (s_downloadStory) {
+            Class cls = objc_getClass("FBSnacksMediaContainerView");
+            if (cls) {
+                SEL sel = sel_registerName("initWithThread:bucket:mediaViewDelegate:mediaViewGenerator:toolbox:shouldBlurMedia:");
+                Method m = class_getInstanceMethod(cls, sel);
+                if (m) {
+                    orig_storyContainer_init = method_getImplementation(m);
+                    method_setImplementation(m, (IMP)hooked_storyContainer_init);
+                    LOG("  hook #8: FBSnacksMediaContainerView init (new sig) -> add download button\n");
+                } else {
+                    LOG("  FBSnacksMediaContainerView new init NOT FOUND\n");
+                }
+            }
+        }
+
+        // Hook 9: Download Video - hook didLongPress:
+        if (s_downloadVideo) {
+            Class cls = objc_getClass("FBVideoOverlayPluginComponentBackgroundView");
+            if (cls) {
+                SEL sel = sel_registerName("didLongPress:");
+                Method m = class_getInstanceMethod(cls, sel);
+                if (m) {
+                    orig_didLongPress = method_getImplementation(m);
+                    method_setImplementation(m, (IMP)hooked_didLongPress);
+                    LOG("  hook #9: FBVideoOverlayPluginComponentBackgroundView.didLongPress: -> download video\n");
+                } else {
+                    LOG("  didLongPress: NOT FOUND\n");
+                }
+            }
+        }
 
         LOG("=== Done ===\n");
     } @catch (NSException *e) {
