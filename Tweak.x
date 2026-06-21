@@ -1077,9 +1077,10 @@ static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *w
 @end
 @implementation GlowVideoDownloadHandler
 
-// v8.2.33: Helper - present action sheet for quality choice
-// Used by both Reel button tap and long-press paths.
-// If action sheet fails (e.g. no top VC), fall back to HD if available, else SD.
+// v8.2.34: Helper - present MODAL alert (not action sheet) for quality choice.
+// UIAlertControllerStyleAlert is more reliable than action sheet in Reels
+// fullscreen context where action sheet gets dismissed by Reels gestures.
+// For newsfeed long press, used as backup if UIMenu doesn't work.
 - (void)presentQualityActionSheetHD:(NSURL *)hd
                                   sd:(NSURL *)sd
                           sourceView:(UIView *)srcView {
@@ -1103,22 +1104,31 @@ static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *w
         else if (sd) [self downloadVideoURL:sd quality:@"sd"];
         return;
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Tải video Reels?" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+    // v8.2.34: Use UIAlertControllerStyleAlert (modal) instead of action sheet
+    // Modal alerts are more visible and harder to dismiss accidentally
+    NSMutableString *msg = [NSMutableString string];
+    if (hd) [msg appendString:@"HD = 720p\n"];
+    if (sd) [msg appendString:@"SD = 360p"];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"📥 Tải video"
+                                                                   message:msg
+                                                            preferredStyle:UIAlertControllerStyleAlert];
     if (hd) {
-        [alert addAction:[UIAlertAction actionWithTitle:@"Tải HD (720p)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-            [self downloadVideoURL:hd quality:@"hd"];
+        [alert addAction:[UIAlertAction actionWithTitle:@"📥 Tải HD (720p)"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *a) {
+            [self downloadVideoURL:hd quality:@"HD"];
         }]];
     }
     if (sd) {
-        [alert addAction:[UIAlertAction actionWithTitle:@"Tải SD (360p)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-            [self downloadVideoURL:sd quality:@"sd"];
+        [alert addAction:[UIAlertAction actionWithTitle:@"📥 Tải SD (360p)"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *a) {
+            [self downloadVideoURL:sd quality:@"SD"];
         }]];
     }
-    [alert addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
-    if (alert.popoverPresentationController) {
-        alert.popoverPresentationController.sourceView = srcView ?: top.view;
-        alert.popoverPresentationController.sourceRect = (srcView ?: top.view).bounds;
-    }
+    [alert addAction:[UIAlertAction actionWithTitle:@"Hủy"
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
     [top presentViewController:alert animated:YES completion:nil];
 }
 
@@ -1315,6 +1325,63 @@ static IMP orig_SDPlaybackURL = NULL;
 static NSMutableDictionary *g_vcToURLDict = nil;
 static int g_glowStyleInstalled = 0;
 
+// v8.2.34: didLongPress: hook for NEWSFEED video long press.
+// The class name "FBVideoOverlayPluginComponentBackgroundView" was REMOVED
+// in FB 560.x. We use runtime enumeration: find ALL FB classes that
+// respond to didLongPress:, hook them all.
+// When the hook fires, check if the long-pressed view is a video context
+// (has AVPlayer or currentVideoPlaybackItem in hierarchy). If yes,
+// show action sheet for HD/SD download.
+static IMP orig_didLongPress_newsfeed = NULL;
+static void hooked_didLongPress_newsfeed(id self, SEL _cmd, id arg) {
+    // Always call original first (don't break FB's normal long press)
+    if (orig_didLongPress_newsfeed) {
+        typedef void (*FnType)(id, SEL, id);
+        FnType fn = (FnType)(uintptr_t)orig_didLongPress_newsfeed;
+        fn(self, _cmd, arg);
+    }
+    @try {
+        // Check if the long-pressed view is a video view
+        // (has AVPlayer or currentVideoPlaybackItem in hierarchy)
+        UIView *view = nil;
+        if ([self isKindOfClass:[UIView class]]) {
+            view = (UIView *)self;
+        } else if ([arg isKindOfClass:[UIGestureRecognizer class]]) {
+            view = [(UIGestureRecognizer *)arg view];
+        }
+        if (!view) {
+            LOG("[dl/news] long press but no view\n");
+            return;
+        }
+        // Walk up to find a VC with currentVideoPlaybackItem
+        UIView *v = view;
+        int depth = 0;
+        SEL curItemSel = sel_registerName("currentVideoPlaybackItem");
+        while (v && depth < 8) {
+            if ([v respondsToSelector:curItemSel]) {
+                id item = [v performSelector:curItemSel];
+                if (item) {
+                    SEL hdSel = sel_registerName("HDPlaybackURL");
+                    SEL sdSel = sel_registerName("SDPlaybackURL");
+                    NSURL *hd = [item respondsToSelector:hdSel] ? [item performSelector:hdSel] : nil;
+                    NSURL *sd = [item respondsToSelector:sdSel] ? [item performSelector:sdSel] : nil;
+                    if (hd || sd) {
+                        LOG("[dl/news] long press on video: HD=%d SD=%d class=%s\n",
+                            hd != nil, sd != nil, class_getName(object_getClass(self)));
+                        if (!g_videoHandler) g_videoHandler = [[GlowVideoDownloadHandler alloc] init];
+                        [g_videoHandler presentQualityActionSheetHD:hd sd:sd sourceView:view];
+                    }
+                    return;
+                }
+            }
+            v = v.superview;
+            depth++;
+        }
+    } @catch (NSException *e) {
+        LOG("[dl/news] exc: %s\n", e.reason.UTF8String);
+    }
+}
+
 // v8.2.32: setVideoItem: hook implementation. Called when FB sets a new
 // video item on the Reels player VC. We capture the URL here because this
 // is the EXACT moment when player switches to a new Reel.
@@ -1407,8 +1474,10 @@ void installGlowStyleReelsHook(void) {
 
         int setVideoItemHooked = 0;
         int cvpiHooked = 0;
+        int didLongPressHooked = 0;
         SEL setSel = sel_registerName("setVideoItem:");
         SEL getSel = sel_registerName("currentVideoPlaybackItem");
+        SEL lpSel = sel_registerName("didLongPress:");
         for (int i = 0; i < count; i++) {
             Class cls = classes[i];
             if (!cls) continue;
@@ -1442,11 +1511,28 @@ void installGlowStyleReelsHook(void) {
                     cvpiHooked++;
                 }
             }
+
+            // v8.2.34: Hook didLongPress: for NEWSFEED video long press
+            // Skip obvious wrong classes (BugReport etc.)
+            if (class_respondsToSelector(cls, lpSel)) {
+                // Skip if it's a known non-video class
+                if (strstr(name, "BugReport") != NULL) continue;
+                if (strstr(name, "NavigationCoordinator") != NULL) continue;
+                Method m = class_getInstanceMethod(cls, lpSel);
+                if (m) {
+                    if (!orig_didLongPress_newsfeed) {
+                        orig_didLongPress_newsfeed = method_getImplementation(m);
+                    }
+                    method_setImplementation(m, (IMP)hooked_didLongPress_newsfeed);
+                    didLongPressHooked++;
+                    LOG("[dl/news] hooked didLongPress: on %s\n", name);
+                }
+            }
         }
         free(classes);
         g_glowStyleInstalled = 1;
-        LOG("[dl/reel] Glow-style hooks installed: setVideoItem:=%d currentVideoPlaybackItem=%d\n",
-            setVideoItemHooked, cvpiHooked);
+        LOG("[dl/reel] Glow-style hooks installed: setVideoItem:=%d currentVideoPlaybackItem=%d didLongPress:=%d\n",
+            setVideoItemHooked, cvpiHooked, didLongPressHooked);
     } @catch (NSException *e) {
         LOG("[dl/reel] installGlowStyleReelsHook exc: %s\n", e.reason.UTF8String);
     } @catch (...) {
@@ -2077,14 +2163,20 @@ static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
         // No border
         btn.accessibilityIdentifier = @"GlowReelButton";
         btn.layer.zPosition = 9999;  // on top
-        [btn addTarget:g_reelButtonHandler action:@selector(onReelButtonTap:) forControlEvents:UIControlEventTouchUpInside];
-        // Backup: UILongPress in case tap is somehow eaten
-        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
-            initWithTarget:g_reelButtonHandler action:@selector(onReelButtonLongPress:)];
-        lp.minimumPressDuration = 0.15;
-        lp.cancelsTouchesInView = NO;
-        lp.delaysTouchesBegan = NO;
-        [btn addGestureRecognizer:lp];
+        // v8.2.34: Use UIMenu as primary action (replaces action sheet)
+        // UIMenu is iOS 14+ native menu - shows on tap, no alert controller needed
+        // More reliable in Reels context where alert sheet gets dismissed by gestures
+        // v8.2.34b: REMOVED long-press recognizer (it was firing BOTH tap+longpress,
+        // causing duplicate download of HD+SD). UIMenu is the only path now.
+        if (@available(iOS 14.0, *)) {
+            btn.showsMenuAsPrimaryAction = YES;
+            // Menu is set LATER (after URLs are captured in pre-warm below)
+            // Mark as pending menu setup
+            objc_setAssociatedObject(btn, "GlowMenuPending", @YES, OBJC_ASSOCIATION_RETAIN);
+        } else {
+            // iOS < 14: use target/action (no UIMenu)
+            [btn addTarget:g_reelButtonHandler action:@selector(onReelButtonTap:) forControlEvents:UIControlEventTouchUpInside];
+        }
         [overlay addSubview:btn];
         [overlay bringSubviewToFront:btn];
         [g_overlaysWithButton addObject:okey];
@@ -2098,6 +2190,7 @@ static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
         // URL is available when user taps the button.
         // v8.2.29: Store URL PER-SIDEBAR in g_urlCacheBySidebar dictionary
         // to prevent wrong-Reel downloads (FB preloads next Reel).
+        // v8.2.34: After pre-warm, set the UIMenu on the button with the URLs
         @try {
             if (!g_urlCacheBySidebar) g_urlCacheBySidebar = [[NSMutableDictionary alloc] init];
             UIResponder *r = sideBar.nextResponder;
@@ -2128,6 +2221,42 @@ static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
                                 g_urlCacheBySidebar[sbKey] = entry;
                                 LOG("[reels/main] PRE-WARM cached for sidebar: HD=%d SD=%d\n",
                                     hdURL != nil, sdURL != nil);
+
+                                // v8.2.34: Set UIMenu on button with HD/SD options
+                                if (@available(iOS 14.0, *)) {
+                                    id pending = objc_getAssociatedObject(btn, "GlowMenuPending");
+                                    if (pending) {
+                                        objc_setAssociatedObject(btn, "GlowMenuPending", nil, OBJC_ASSOCIATION_RETAIN);
+                                        if (!g_videoHandler) g_videoHandler = [[GlowVideoDownloadHandler alloc] init];
+                                        NSMutableArray *actions = [NSMutableArray array];
+                                        if (hdURL) {
+                                            [actions addObject:[UIAction actionWithTitle:@"📥 Tải HD (720p)"
+                                                                                 image:nil
+                                                                            identifier:nil
+                                                                               handler:^(UIAction *a) {
+                                                [g_videoHandler downloadVideoURL:hdURL quality:@"HD"];
+                                            }]];
+                                        }
+                                        if (sdURL) {
+                                            [actions addObject:[UIAction actionWithTitle:@"📥 Tải SD (360p)"
+                                                                                 image:nil
+                                                                            identifier:nil
+                                                                               handler:^(UIAction *a) {
+                                                [g_videoHandler downloadVideoURL:sdURL quality:@"SD"];
+                                            }]];
+                                        }
+                                        if (actions.count > 0) {
+                                            UIMenu *menu = [UIMenu menuWithTitle:@""
+                                                                              image:nil
+                                                                         identifier:nil
+                                                                            options:UIMenuOptionsDisplayInline
+                                                                           children:actions];
+                                            btn.menu = menu;
+                                            LOG("[reels/main] UIMenu SET on button (HD=%d SD=%d)\n",
+                                                hdURL != nil, sdURL != nil);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -2316,8 +2445,13 @@ static void installHooks(void) {
             }
         }
 
-        // Hook 9: Download Video - hook didLongPress:
+        // Hook 9: Download Video - newsfeed long press
+        // v8.2.34: REMOVED hardcoded class name. The class
+        // FBVideoOverlayPluginComponentBackgroundView doesn't exist in FB 560.x.
+        // Replaced by runtime enumeration in installGlowStyleReelsHook (called below).
+        // We keep a stub here for backward compat with hook # numbering.
         if (s_downloadVideo) {
+            // Legacy: try the class name (will fail in 560.x, no harm)
             Class cls = objc_getClass("FBVideoOverlayPluginComponentBackgroundView");
             if (cls) {
                 SEL sel = sel_registerName("didLongPress:");
@@ -2326,9 +2460,10 @@ static void installHooks(void) {
                     orig_didLongPress = method_getImplementation(m);
                     method_setImplementation(m, (IMP)hooked_didLongPress);
                     LOG("  hook #9: FBVideoOverlayPluginComponentBackgroundView.didLongPress: -> download video\n");
-                } else {
-                    LOG("  didLongPress: NOT FOUND\n");
                 }
+            } else {
+                // The real hook is via runtime enumeration in installGlowStyleReelsHook
+                LOG("  hook #9: legacy class NOT FOUND, using runtime enum\n");
             }
         }
 
@@ -2499,7 +2634,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.33 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.34 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
