@@ -1245,6 +1245,14 @@ static NSDate *g_cachedAt = nil;
 static IMP orig_HDPlaybackURL = NULL;
 static IMP orig_SDPlaybackURL = NULL;
 
+// v8.2.29: Per-sidebar URL cache. Key = sidebar instance, Value = NSDictionary
+// with HD/SD URLs. Solves:
+// - "download next Reel": URL was global, didn't change when user scrolled
+// - "download from story": URL was global, captured from wrong context
+// - "duplicate download": global cache reused old URL
+// Now each sidebar has its own URL. Different Reels = different sidebars.
+static NSMutableDictionary *g_urlCacheBySidebar = nil;
+
 // v8.2.18: Reels button is added by hooked_shortsSideBarLayoutSubviews.
 // No more viewWillAppear:/viewDidLoad hooks. No keyWindow button.
 
@@ -1293,35 +1301,76 @@ static IMP orig_SDPlaybackURL = NULL;
         SEL curSel = sel_registerName("currentVideoPlaybackItem");
         id item = nil;
 
-        // v8.2.28: Method 0 - check cached URL from FBVideoPlaybackItem
-        // hook. This is the most reliable - URL is captured when FB reads
-        // it for playback. Always check first.
-        if (g_cachedHDURL || g_cachedSDURL) {
-            LOG("[dl/reel] M0: using CACHED URL HD=%d SD=%d (age=%.1fs)\n",
-                g_cachedHDURL != nil, g_cachedSDURL != nil,
-                g_cachedAt ? -[g_cachedAt timeIntervalSinceNow] : 0);
-            // Skip all other methods, go directly to download
-            NSURL *hd = g_cachedHDURL;
-            NSURL *sd = g_cachedSDURL;
-            if (!g_videoHandler) g_videoHandler = [[GlowVideoDownloadHandler alloc] init];
-            // Visual feedback
-            UIButton *btn = (UIButton *)startView;
-            if ([btn isKindOfClass:[UIButton class]]) {
-                btn.enabled = NO;
-                btn.backgroundColor = [UIColor colorWithRed:0 green:0.7 blue:0 alpha:0.7];
-                [btn setTitle:@"✓" forState:UIControlStateNormal];
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-                    btn.enabled = YES;
-                    btn.backgroundColor = [UIColor clearColor];
-                    [btn setTitle:@"⬇" forState:UIControlStateNormal];
-                });
+        // v8.2.29: Method 0 - check PER-SIDEBAR cached URL
+        // Key = sidebar instance the URL was captured for. This prevents
+        // downloading wrong Reel when FB preloads next Reel in background.
+        UIView *btnView = (UIView *)startView;
+        UIView *thisSideBar = btnView.superview;
+        NSValue *sbKey = [NSValue valueWithNonretainedObject:thisSideBar];
+        NSDictionary *cached = g_urlCacheBySidebar[sbKey];
+        NSURL *hd = nil, *sd = nil;
+        if (cached) {
+            id hdObj = cached[@"HD"];
+            id sdObj = cached[@"SD"];
+            if (hdObj && hdObj != [NSNull null] && [hdObj isKindOfClass:[NSURL class]]) hd = (NSURL *)hdObj;
+            if (sdObj && sdObj != [NSNull null] && [sdObj isKindOfClass:[NSURL class]]) sd = (NSURL *)sdObj;
+            LOG("[dl/reel] M0: per-sidebar cache HD=%d SD=%d for sidebar=%s\n",
+                hd != nil, sd != nil, class_getName(object_getClass(thisSideBar)));
+        }
+        if (hd || sd) {
+            // v8.2.29: Show action sheet for quality choice (1 tap = 1 download)
+            // Match existing in-feed video long press behavior
+            UIWindow *win = nil;
+            for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+                if ([s isKindOfClass:[UIWindowScene class]]) {
+                    for (UIWindow *w in ((UIWindowScene *)s).windows) {
+                        if (w.isKeyWindow) { win = w; break; }
+                    }
+                }
+                if (win) break;
             }
-            [self showToast:@"⬇ Đang tải..."];
-            if (hd) [g_videoHandler downloadVideoURL:hd quality:@"reel_hd"];
-            if (sd && sd != hd) [g_videoHandler downloadVideoURL:sd quality:@"reel_sd"];
+            UIViewController *top = win.rootViewController;
+            while (top.presentedViewController) top = top.presentedViewController;
+            if (!top) {
+                // Fallback: download HD if available, else SD
+                if (!g_videoHandler) g_videoHandler = [[GlowVideoDownloadHandler alloc] init];
+                if (hd) [g_videoHandler downloadVideoURL:hd quality:@"reel_hd"];
+                else if (sd) [g_videoHandler downloadVideoURL:sd quality:@"reel_sd"];
+                return;
+            }
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Tải video Reels?" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+            if (hd) {
+                [alert addAction:[UIAlertAction actionWithTitle:@"Tải HD (720p)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+                    if (!g_videoHandler) g_videoHandler = [[GlowVideoDownloadHandler alloc] init];
+                    [self showToast:@"⬇ Đang tải HD..."];
+                    [g_videoHandler downloadVideoURL:hd quality:@"reel_hd"];
+                    // Haptic feedback
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                        UINotificationFeedbackGenerator *gen = [[UINotificationFeedbackGenerator alloc] init];
+                        [gen notificationOccurred:UINotificationFeedbackTypeSuccess];
+                    });
+                }]];
+            }
+            if (sd) {
+                [alert addAction:[UIAlertAction actionWithTitle:@"Tải SD (360p)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+                    if (!g_videoHandler) g_videoHandler = [[GlowVideoDownloadHandler alloc] init];
+                    [self showToast:@"⬇ Đang tải SD..."];
+                    [g_videoHandler downloadVideoURL:sd quality:@"reel_sd"];
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                        UINotificationFeedbackGenerator *gen = [[UINotificationFeedbackGenerator alloc] init];
+                        [gen notificationOccurred:UINotificationFeedbackTypeSuccess];
+                    });
+                }]];
+            }
+            [alert addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
+            if (alert.popoverPresentationController) {
+                alert.popoverPresentationController.sourceView = btnView;
+                alert.popoverPresentationController.sourceRect = btnView.bounds;
+            }
+            [top presentViewController:alert animated:YES completion:nil];
             return;
         }
-        LOG("[dl/reel] M0: no cached URL, trying other methods\n");
+        LOG("[dl/reel] M0: no per-sidebar cache, trying other methods\n");
 
         // Method 1: walk up view hierarchy (existing)
         UIView *v = startView;
@@ -1512,7 +1561,6 @@ static IMP orig_SDPlaybackURL = NULL;
             return;
         }
 
-        NSURL *hd = nil, *sd = nil;
         if (item) {
             SEL hdSel = sel_registerName("HDPlaybackURL");
             SEL sdSel = sel_registerName("SDPlaybackURL");
@@ -1783,8 +1831,10 @@ static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
         // v8.2.28: PRE-WARM - force FBVideoPlaybackItem.HDPlaybackURL/SDPlaybackURL
         // to be read NOW, so our hook captures the URL. This ensures the
         // URL is available when user taps the button.
-        // Walk from sidebar up to find the VC, then force-read URLs.
+        // v8.2.29: Store URL PER-SIDEBAR in g_urlCacheBySidebar dictionary
+        // to prevent wrong-Reel downloads (FB preloads next Reel).
         @try {
+            if (!g_urlCacheBySidebar) g_urlCacheBySidebar = [[NSMutableDictionary alloc] init];
             UIResponder *r = sideBar.nextResponder;
             int rd = 0;
             while (r && rd < 8) {
@@ -1797,13 +1847,22 @@ static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
                             // Force read HD/SD URLs (triggers our hook)
                             SEL hdSel = sel_registerName("HDPlaybackURL");
                             SEL sdSel = sel_registerName("SDPlaybackURL");
+                            NSURL *hdURL = nil, *sdURL = nil;
                             if ([item respondsToSelector:hdSel]) {
-                                NSURL *u = [item performSelector:hdSel];
-                                LOG("[reels/main] PRE-WARM HD: %s\n", u ? [[u absoluteString] UTF8String] : "nil");
+                                hdURL = [item performSelector:hdSel];
                             }
                             if ([item respondsToSelector:sdSel]) {
-                                NSURL *u = [item performSelector:sdSel];
-                                LOG("[reels/main] PRE-WARM SD: %s\n", u ? [[u absoluteString] UTF8String] : "nil");
+                                sdURL = [item performSelector:sdSel];
+                            }
+                            // v8.2.29: cache per-sidebar
+                            if (hdURL || sdURL) {
+                                NSValue *sbKey = [NSValue valueWithNonretainedObject:sideBar];
+                                NSMutableDictionary *entry = [NSMutableDictionary dictionary];
+                                if (hdURL) entry[@"HD"] = hdURL; else entry[@"HD"] = [NSNull null];
+                                if (sdURL) entry[@"SD"] = sdURL; else entry[@"SD"] = [NSNull null];
+                                g_urlCacheBySidebar[sbKey] = entry;
+                                LOG("[reels/main] PRE-WARM cached for sidebar: HD=%d SD=%d\n",
+                                    hdURL != nil, sdURL != nil);
                             }
                         }
                     }
@@ -2157,7 +2216,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.28 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.29 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
