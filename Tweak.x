@@ -1554,6 +1554,24 @@ static void hooked_viewDidAppear(id self, SEL _cmd, BOOL animated) {
             if (!common) {
                 LOG("[disc] VC: %s\n", cn);
             }
+            // Lazy install: hook Reels classes when they appear
+            if (s_downloadVideo && !orig_reelsViewDidLoad &&
+                (strstr(cn, "FBVideoHome") != NULL || strstr(cn, "FBReel") != NULL)) {
+                // Strip NSKVONotifying_ prefix
+                const char *real = cn;
+                if (strncmp(cn, "NSKVONotifying_", 15) == 0) real = cn + 15;
+                NSString *clsName = [NSString stringWithUTF8String:real];
+                Class reelsCls = NSClassFromString(clsName);
+                if (reelsCls) {
+                    SEL vdlSel = @selector(viewDidLoad);
+                    Method m = class_getInstanceMethod(reelsCls, vdlSel);
+                    if (m) {
+                        orig_reelsViewDidLoad = method_getImplementation(m);
+                        method_setImplementation(m, (IMP)hooked_reelsViewDidLoad);
+                        LOG("[reels] LAZY hook installed on %s\n", [clsName UTF8String]);
+                    }
+                }
+            }
         }
         // Reels discovery: try to find video view in this VC
         if (cn) {
@@ -1590,7 +1608,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.7 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.8 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
