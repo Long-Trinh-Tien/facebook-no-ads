@@ -423,28 +423,13 @@ static void r4_init(void) {
             };
             checkCandidates("Reels action buttons", reelsActions, sizeof(reelsActions)/sizeof(reelsActions[0]));
 
-            // ─── Phase 8: Dump ALL FB-prefixed UI classes ───
-            // Because Phase 2-7 found 0/30, 0/37 candidates, we need to
-            // actually enumerate. This dumps all FB classes that are
-            // UIView or UIViewController subclasses, to glow_fb_classes.txt.
-            // User navigates to Reels first, then we dump after 5s.
-            LOG("\n########## PHASE 8: FB class enumeration ##########\n");
-            dumpFBCurrentlyLoaded();
+            // ─── Phase 8: REMOVED in v1.3 (was objc_copyClassList - causes crash) ───
+            // Previous v1.2 used objc_copyClassList which returns 10000+ classes.
+            // Buffering + iterating all 10000 caused memory pressure -> crash.
+            // New approach: walk subviews in Phase 9 hook (proven safe).
+            LOG("\n########## PHASE 8: (removed - see Phase 9 subview walk) ##########\n");
 
-            // Schedule more dumps at 5s, 15s, 30s
-            for (int t = 5; t <= 30; t += 10) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, t * NSEC_PER_SEC),
-                               dispatch_get_main_queue(), ^{
-                    @try {
-                        LOG("\n=== Phase 8 snapshot at +%ds ===\n", t);
-                        dumpFBCurrentlyLoaded();
-                    } @catch (NSException *e) {
-                        LOG("Phase 8 snapshot exc: %s\n", e.reason.UTF8String);
-                    }
-                });
-            }
-
-            LOG("\n=== R4 Verification Complete ===\n");
+            LOG("\n=== R4 Verification Complete (Phase 9 hook active) ===\n");
             LOG("Output: %s\n", g_log_path);
             if (g_log_file) {
                 fflush(g_log_file);
@@ -462,11 +447,40 @@ static void r4_init(void) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// PHASE 9: Hook UIViewController.viewDidAppear: to log FB classes
+// PHASE 9: Hook UIViewController.viewDidAppear: + walk subviews
 // Why: dumps only happen at startup, but Reels classes load later.
 // Hooking viewDidAppear: gives us the real class name of every VC
-// the user navigates to.
+// the user navigates to. Then walk subviews to find action buttons.
 // ═══════════════════════════════════════════════════════════════
+
+// Walk subviews recursively, up to maxDepth levels
+// Logs class + frame of each subview. Used to find like/share/comment
+// buttons in Reels.
+static void walkSubviews(UIView *view, int depth, int maxDepth) {
+    if (!view || depth > maxDepth) return;
+    @try {
+        Class cls = object_getClass(view);
+        const char *name = class_getName(cls);
+        if (!name) return;
+        // Indent
+        char indent[64] = {0};
+        for (int i = 0; i < depth && i < 30; i++) indent[i] = ' ';
+        // Print class + frame + subview count
+        CGRect f = view.frame;
+        LOG("  %s[%d] %s frame=(%.0f,%.0f,%.0f,%.0f) subs=%lu hidden=%d alpha=%.2f\n",
+            indent, depth, name,
+            f.origin.x, f.origin.y, f.size.width, f.size.height,
+            (unsigned long)view.subviews.count,
+            view.hidden, view.alpha);
+        // Recurse
+        for (UIView *sub in view.subviews) {
+            walkSubviews(sub, depth + 1, maxDepth);
+        }
+    } @catch (NSException *e) {
+        // silent
+    }
+}
+
 static IMP orig_vc_viewDidAppear = NULL;
 static int g_vcLog_count = 0;
 static void hooked_vc_viewDidAppear(id self, SEL _cmd, BOOL animated) {
@@ -491,6 +505,16 @@ static void hooked_vc_viewDidAppear(id self, SEL _cmd, BOOL animated) {
             LOG("  [%d] %s\n", d, class_getName(sup));
             sup = class_getSuperclass(sup);
             d++;
+        }
+        // Walk self.view subviews to find action buttons (3 levels deep)
+        // Trigger only for Reels-related VCs to avoid spam
+        BOOL isReels = (strstr(name, "VideoHome") != NULL ||
+                        strstr(name, "Reel") != NULL ||
+                        strstr(name, "SurfaceView") != NULL);
+        if (isReels) {
+            LOG("  --- Reels subview walk (3 levels) ---\n");
+            UIView *root = [(UIViewController *)self view];
+            walkSubviews(root, 0, 3);
         }
     } @catch (NSException *e) {
         LOG("[VC] exc: %s\n", e.reason.UTF8String);
