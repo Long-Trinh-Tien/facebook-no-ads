@@ -1325,63 +1325,6 @@ static IMP orig_SDPlaybackURL = NULL;
 static NSMutableDictionary *g_vcToURLDict = nil;
 static int g_glowStyleInstalled = 0;
 
-// v8.2.34: didLongPress: hook for NEWSFEED video long press.
-// The class name "FBVideoOverlayPluginComponentBackgroundView" was REMOVED
-// in FB 560.x. We use runtime enumeration: find ALL FB classes that
-// respond to didLongPress:, hook them all.
-// When the hook fires, check if the long-pressed view is a video context
-// (has AVPlayer or currentVideoPlaybackItem in hierarchy). If yes,
-// show action sheet for HD/SD download.
-static IMP orig_didLongPress_newsfeed = NULL;
-static void hooked_didLongPress_newsfeed(id self, SEL _cmd, id arg) {
-    // Always call original first (don't break FB's normal long press)
-    if (orig_didLongPress_newsfeed) {
-        typedef void (*FnType)(id, SEL, id);
-        FnType fn = (FnType)(uintptr_t)orig_didLongPress_newsfeed;
-        fn(self, _cmd, arg);
-    }
-    @try {
-        // Check if the long-pressed view is a video view
-        // (has AVPlayer or currentVideoPlaybackItem in hierarchy)
-        UIView *view = nil;
-        if ([self isKindOfClass:[UIView class]]) {
-            view = (UIView *)self;
-        } else if ([arg isKindOfClass:[UIGestureRecognizer class]]) {
-            view = [(UIGestureRecognizer *)arg view];
-        }
-        if (!view) {
-            LOG("[dl/news] long press but no view\n");
-            return;
-        }
-        // Walk up to find a VC with currentVideoPlaybackItem
-        UIView *v = view;
-        int depth = 0;
-        SEL curItemSel = sel_registerName("currentVideoPlaybackItem");
-        while (v && depth < 8) {
-            if ([v respondsToSelector:curItemSel]) {
-                id item = [v performSelector:curItemSel];
-                if (item) {
-                    SEL hdSel = sel_registerName("HDPlaybackURL");
-                    SEL sdSel = sel_registerName("SDPlaybackURL");
-                    NSURL *hd = [item respondsToSelector:hdSel] ? [item performSelector:hdSel] : nil;
-                    NSURL *sd = [item respondsToSelector:sdSel] ? [item performSelector:sdSel] : nil;
-                    if (hd || sd) {
-                        LOG("[dl/news] long press on video: HD=%d SD=%d class=%s\n",
-                            hd != nil, sd != nil, class_getName(object_getClass(self)));
-                        if (!g_videoHandler) g_videoHandler = [[GlowVideoDownloadHandler alloc] init];
-                        [g_videoHandler presentQualityActionSheetHD:hd sd:sd sourceView:view];
-                    }
-                    return;
-                }
-            }
-            v = v.superview;
-            depth++;
-        }
-    } @catch (NSException *e) {
-        LOG("[dl/news] exc: %s\n", e.reason.UTF8String);
-    }
-}
-
 // v8.2.32: setVideoItem: hook implementation. Called when FB sets a new
 // video item on the Reels player VC. We capture the URL here because this
 // is the EXACT moment when player switches to a new Reel.
@@ -1412,11 +1355,49 @@ static void hooked_setVideoItem(id self, SEL _cmd, id newItem) {
         entry[@"item"] = newItem;
         entry[@"at"] = [NSDate date];
         g_vcToURLDict[key] = entry;
+        const char *selfCls = class_getName(object_getClass(self));
         LOG("[dl/reel] setVideoItem: VC=%s item=%s HD=%s SD=%s\n",
-            class_getName(object_getClass(self)),
+            selfCls,
             class_getName(object_getClass(newItem)),
             hd ? "YES" : "NO",
             sd ? "YES" : "NO");
+
+        // v8.2.36: GESTURE INJECTION (per user's pro approach)
+        // Inject our UILongPressGestureRecognizer into the VC's view
+        // (NOT the video view) so it fires only on long-press, not
+        // interfere with FB's existing long press (reactions, copy, etc.)
+        //
+        // Skip Reels VCs (they have their own button via layoutSubviews)
+        if (selfCls && strstr(selfCls, "FBVideoHome") != NULL) {
+            // Reels VC - skip
+        } else if (s_downloadVideo) {
+            // Check if already injected
+            NSNumber *alreadyInjected = objc_getAssociatedObject(self, "GlowNewsfeedLP");
+            if (!alreadyInjected && !g_videoHandler) {
+                g_videoHandler = [[GlowVideoDownloadHandler alloc] init];
+            }
+            if (!alreadyInjected) {
+                // Mark as injected
+                objc_setAssociatedObject(self, "GlowNewsfeedLP", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+                // Get VC's view (or self if it's a view)
+                UIView *targetView = nil;
+                if ([self isKindOfClass:[UIView class]]) {
+                    targetView = (UIView *)self;
+                } else if ([self respondsToSelector:@selector(view)]) {
+                    id v = [self performSelector:@selector(view)];
+                    if ([v isKindOfClass:[UIView class]]) targetView = v;
+                }
+                if (targetView) {
+                    UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
+                        initWithTarget:g_videoHandler
+                                action:@selector(onNewsfeedLongPress:)];
+                    lp.minimumPressDuration = 0.5;  // standard UX
+                    [targetView addGestureRecognizer:lp];
+                    LOG("[dl/news] GESTURE INJECTED on %s\n", selfCls);
+                }
+            }
+        }
     } @catch (NSException *e) {
         LOG("[dl/reel] setVideoItem exc: %s\n", e.reason.UTF8String);
     }
@@ -1474,10 +1455,8 @@ void installGlowStyleReelsHook(void) {
 
         int setVideoItemHooked = 0;
         int cvpiHooked = 0;
-        int didLongPressHooked = 0;
         SEL setSel = sel_registerName("setVideoItem:");
         SEL getSel = sel_registerName("currentVideoPlaybackItem");
-        SEL lpSel = sel_registerName("didLongPress:");
         for (int i = 0; i < count; i++) {
             Class cls = classes[i];
             if (!cls) continue;
@@ -1490,11 +1469,9 @@ void installGlowStyleReelsHook(void) {
             if (class_respondsToSelector(cls, setSel)) {
                 Method m = class_getInstanceMethod(cls, setSel);
                 if (m) {
-                    // If we haven't hooked any setVideoItem: yet, save the original
                     if (!orig_setVideoItem) {
                         orig_setVideoItem = method_getImplementation(m);
                     }
-                    // Always replace (the original is the same across all classes)
                     method_setImplementation(m, (IMP)hooked_setVideoItem);
                     setVideoItemHooked++;
                 }
@@ -1511,28 +1488,11 @@ void installGlowStyleReelsHook(void) {
                     cvpiHooked++;
                 }
             }
-
-            // v8.2.34: Hook didLongPress: for NEWSFEED video long press
-            // Skip obvious wrong classes (BugReport etc.)
-            if (class_respondsToSelector(cls, lpSel)) {
-                // Skip if it's a known non-video class
-                if (strstr(name, "BugReport") != NULL) continue;
-                if (strstr(name, "NavigationCoordinator") != NULL) continue;
-                Method m = class_getInstanceMethod(cls, lpSel);
-                if (m) {
-                    if (!orig_didLongPress_newsfeed) {
-                        orig_didLongPress_newsfeed = method_getImplementation(m);
-                    }
-                    method_setImplementation(m, (IMP)hooked_didLongPress_newsfeed);
-                    didLongPressHooked++;
-                    LOG("[dl/news] hooked didLongPress: on %s\n", name);
-                }
-            }
         }
         free(classes);
         g_glowStyleInstalled = 1;
-        LOG("[dl/reel] Glow-style hooks installed: setVideoItem:=%d currentVideoPlaybackItem=%d didLongPress:=%d\n",
-            setVideoItemHooked, cvpiHooked, didLongPressHooked);
+        LOG("[dl/reel] Glow-style hooks installed: setVideoItem:=%d currentVideoPlaybackItem=%d\n",
+            setVideoItemHooked, cvpiHooked);
     } @catch (NSException *e) {
         LOG("[dl/reel] installGlowStyleReelsHook exc: %s\n", e.reason.UTF8String);
     } @catch (...) {
@@ -1552,6 +1512,8 @@ static NSMutableDictionary *g_urlCacheBySidebar = nil;
 // No more viewWillAppear:/viewDidLoad hooks. No keyWindow button.
 
 @interface GlowReelButtonHandler : NSObject
+- (void)downloadReelVideoFromView:(UIView *)view;
+- (void)presentQualityActionSheetHD:(NSURL *)hd sd:(NSURL *)sd sourceView:(UIView *)srcView;
 @end
 @implementation GlowReelButtonHandler
 // Track taps in Reels - logs class of any tapped view
@@ -1575,6 +1537,74 @@ static NSMutableDictionary *g_urlCacheBySidebar = nil;
         class_getName(object_getClass(sender)),
         class_getName(object_getClass(sender.superview)));
     [self downloadReelVideoFromView:sender];
+}
+
+// v8.2.36: Newsfeed long press handler (Gesture Injection approach).
+// Fires when user long-presses the VC's view (the newsfeed video).
+// The gesture was injected by hooked_setVideoItem (see v8.2.36 comment).
+// We look up the URL in g_vcToURLDict by walking up to the VC.
+- (void)onNewsfeedLongPress:(UILongPressGestureRecognizer *)gr {
+    if (gr.state != UIGestureRecognizerStateBegan) return;
+    if (!s_downloadVideo) return;
+    UIView *v = gr.view;
+    if (!v) return;
+    LOG("[dl/news] long press on view %s\n", class_getName(object_getClass(v)));
+    // Haptic feedback on press
+    UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    [gen impactOccurred];
+    @try {
+        // Walk up nextResponder to find the VC
+        UIResponder *r = v.nextResponder;
+        int depth = 0;
+        UIViewController *vc = nil;
+        while (r && depth < 10) {
+            if ([r isKindOfClass:[UIViewController class]]) {
+                vc = (UIViewController *)r;
+                break;
+            }
+            r = r.nextResponder;
+            depth++;
+        }
+        if (!vc) {
+            LOG("[dl/news] no VC found via nextResponder\n");
+            return;
+        }
+        // Look up URL in g_vcToURLDict (populated by hooked_setVideoItem)
+        NSValue *vcKey = [NSValue valueWithNonretainedObject:vc];
+        NSDictionary *entry = g_vcToURLDict[vcKey];
+        if (!entry) {
+            // Fallback: try to read currentVideoPlaybackItem directly
+            SEL curItemSel = sel_registerName("currentVideoPlaybackItem");
+            if ([vc respondsToSelector:curItemSel]) {
+                id item = [vc performSelector:curItemSel];
+                if (item) {
+                    SEL hdSel = sel_registerName("HDPlaybackURL");
+                    SEL sdSel = sel_registerName("SDPlaybackURL");
+                    NSURL *hd = [item respondsToSelector:hdSel] ? [item performSelector:hdSel] : nil;
+                    NSURL *sd = [item respondsToSelector:sdSel] ? [item performSelector:sdSel] : nil;
+                    if (hd || sd) {
+                        [self presentQualityActionSheetHD:hd sd:sd sourceView:v];
+                        return;
+                    }
+                }
+            }
+            LOG("[dl/news] no URL in g_vcToURLDict and no currentVideoPlaybackItem\n");
+            return;
+        }
+        id hdObj = entry[@"HD"];
+        id sdObj = entry[@"SD"];
+        NSURL *hd = (hdObj && hdObj != [NSNull null] && [hdObj isKindOfClass:[NSURL class]]) ? hdObj : nil;
+        NSURL *sd = (sdObj && sdObj != [NSNull null] && [sdObj isKindOfClass:[NSURL class]]) ? sdObj : nil;
+        if (hd || sd) {
+            LOG("[dl/news] long press VC=%s HD=%d SD=%d\n",
+                class_getName(object_getClass(vc)), hd != nil, sd != nil);
+            [self presentQualityActionSheetHD:hd sd:sd sourceView:v];
+        } else {
+            LOG("[dl/news] VC has no URLs\n");
+        }
+    } @catch (NSException *e) {
+        LOG("[dl/news] long press exc: %s\n", e.reason.UTF8String);
+    }
 }
 
 // v8.2.22: Backup long-press handler
@@ -2163,20 +2193,11 @@ static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
         // No border
         btn.accessibilityIdentifier = @"GlowReelButton";
         btn.layer.zPosition = 9999;  // on top
-        // v8.2.34: Use UIMenu as primary action (replaces action sheet)
-        // UIMenu is iOS 14+ native menu - shows on tap, no alert controller needed
-        // More reliable in Reels context where alert sheet gets dismissed by gestures
-        // v8.2.34b: REMOVED long-press recognizer (it was firing BOTH tap+longpress,
-        // causing duplicate download of HD+SD). UIMenu is the only path now.
-        if (@available(iOS 14.0, *)) {
-            btn.showsMenuAsPrimaryAction = YES;
-            // Menu is set LATER (after URLs are captured in pre-warm below)
-            // Mark as pending menu setup
-            objc_setAssociatedObject(btn, "GlowMenuPending", @YES, OBJC_ASSOCIATION_RETAIN);
-        } else {
-            // iOS < 14: use target/action (no UIMenu)
-            [btn addTarget:g_reelButtonHandler action:@selector(onReelButtonTap:) forControlEvents:UIControlEventTouchUpInside];
-        }
+        // v8.2.35: REVERT to simple target/action tap (no UIMenu, no long press)
+        // UIMenu approach failed because menu is set after pre-warm, which
+        // may run before URLs are captured. Simple tap is more reliable.
+        // Action sheet is shown on tap.
+        [btn addTarget:g_reelButtonHandler action:@selector(onReelButtonTap:) forControlEvents:UIControlEventTouchUpInside];
         [overlay addSubview:btn];
         [overlay bringSubviewToFront:btn];
         [g_overlaysWithButton addObject:okey];
@@ -2221,42 +2242,6 @@ static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
                                 g_urlCacheBySidebar[sbKey] = entry;
                                 LOG("[reels/main] PRE-WARM cached for sidebar: HD=%d SD=%d\n",
                                     hdURL != nil, sdURL != nil);
-
-                                // v8.2.34: Set UIMenu on button with HD/SD options
-                                if (@available(iOS 14.0, *)) {
-                                    id pending = objc_getAssociatedObject(btn, "GlowMenuPending");
-                                    if (pending) {
-                                        objc_setAssociatedObject(btn, "GlowMenuPending", nil, OBJC_ASSOCIATION_RETAIN);
-                                        if (!g_videoHandler) g_videoHandler = [[GlowVideoDownloadHandler alloc] init];
-                                        NSMutableArray *actions = [NSMutableArray array];
-                                        if (hdURL) {
-                                            [actions addObject:[UIAction actionWithTitle:@"📥 Tải HD (720p)"
-                                                                                 image:nil
-                                                                            identifier:nil
-                                                                               handler:^(UIAction *a) {
-                                                [g_videoHandler downloadVideoURL:hdURL quality:@"HD"];
-                                            }]];
-                                        }
-                                        if (sdURL) {
-                                            [actions addObject:[UIAction actionWithTitle:@"📥 Tải SD (360p)"
-                                                                                 image:nil
-                                                                            identifier:nil
-                                                                               handler:^(UIAction *a) {
-                                                [g_videoHandler downloadVideoURL:sdURL quality:@"SD"];
-                                            }]];
-                                        }
-                                        if (actions.count > 0) {
-                                            UIMenu *menu = [UIMenu menuWithTitle:@""
-                                                                              image:nil
-                                                                         identifier:nil
-                                                                            options:UIMenuOptionsDisplayInline
-                                                                           children:actions];
-                                            btn.menu = menu;
-                                            LOG("[reels/main] UIMenu SET on button (HD=%d SD=%d)\n",
-                                                hdURL != nil, sdURL != nil);
-                                        }
-                                    }
-                                }
                             }
                         }
                     }
@@ -2634,7 +2619,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.34 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.36 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
