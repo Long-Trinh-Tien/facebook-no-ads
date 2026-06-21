@@ -1420,7 +1420,7 @@ static GlowVideoDownloadHandler *g_videoHandler = nil;
             [btn setTitle:@"✓" forState:UIControlStateNormal];
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
                 btn.enabled = YES;
-                btn.backgroundColor = [UIColor colorWithWhite:0 alpha:0.25];
+                btn.backgroundColor = [UIColor clearColor];
                 [btn setTitle:@"⬇" forState:UIControlStateNormal];
             });
         }
@@ -1535,26 +1535,31 @@ static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
         NSValue *skey = [NSValue valueWithNonretainedObject:sideBar];
         if ([g_mainSideBarsWithButton containsObject:skey]) return;  // already added
 
-        // Position: directly above Like, same width as native buttons (56)
+        // v8.2.23: Position INSIDE the sidebar frame (so it's tappable).
+        // User feedback: 'button không ấn được' - because y=-72 is OUTSIDE
+        // the sidebar's frame, UIView.hitTest returns nil for taps there.
+        // Now: place at (0, 0, 56, 40) - top 40px of sidebar, overlapping
+        // with Like (Like is 72px, our button is 40px, so bottom 32px of
+        // Like is still visible and tappable).
         CGFloat W = sideBar.bounds.size.width;  // 56
-        CGFloat btnW = W;            // 56, matches Like/Comment/Share
-        CGFloat btnH = 72;           // matches Like (72 high)
+        CGFloat btnW = W;            // 56, matches Like
+        CGFloat btnH = 40;           // smaller than Like (72), leaves room
         CGFloat btnX = 0;            // flush left
-        CGFloat btnY = -btnH;        // ABOVE the sidebar (above Like)
+        CGFloat btnY = 0;            // INSIDE sidebar (top), tappable
 
         UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
         btn.frame = CGRectMake(btnX, btnY, btnW, btnH);
-        btn.layer.cornerRadius = 0;  // square (matches native action buttons)
-        // v8.2.22: Transparent background (user feedback - look native)
-        btn.backgroundColor = [UIColor colorWithWhite:0 alpha:0.25];
+        btn.layer.cornerRadius = 0;
+        // v8.2.23: FULLY TRANSPARENT (user feedback)
+        btn.backgroundColor = [UIColor clearColor];
         [btn setTitle:@"⬇" forState:UIControlStateNormal];
         [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        btn.titleLabel.font = [UIFont systemFontOfSize:28 weight:UIFontWeightBold];
-        // No border (matches native style)
+        btn.titleLabel.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBold];
+        // No border
         btn.accessibilityIdentifier = @"GlowReelButton";
-        btn.layer.zPosition = 9999;
+        btn.layer.zPosition = 9999;  // on top of Like
         [btn addTarget:g_reelButtonHandler action:@selector(onReelButtonTap:) forControlEvents:UIControlEventTouchUpInside];
-        // v8.2.22: also add UILongPress as backup in case tap is eaten
+        // Backup: UILongPress in case tap is somehow eaten
         UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
             initWithTarget:g_reelButtonHandler action:@selector(onReelButtonLongPress:)];
         lp.minimumPressDuration = 0.15;
@@ -1849,7 +1854,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.22 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.23 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
