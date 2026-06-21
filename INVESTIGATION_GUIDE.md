@@ -587,5 +587,491 @@ Nếu thấy red flags, fall back to:
 **Time investment vs value:**
 - 15 phút update = tiết kiệm 1-2 ngày investigate
 - 30 phút setup automation = tiết kiệm nhiều giờ sau này
-- 1 giờ viết docs = tiết kiệm nhiều giờ cho người khác (và chính mình)
+- 1 giờ viết docs = tiết kiệm nhiều giờ cho chính mình
 - Filter bundles: `com.facebook.Facebook`, `com.facebook.Facebook6`
+
+---
+
+## 8. How to Develop Tweaks WITHOUT Reference Headers
+
+> Câu hỏi thường gặp: "Nếu không có open-source project để đọc thì sao?"
+> Trả lời ngắn: **Bạn vẫn có thể làm, nhưng tốn nhiều thời gian hơn 5-10x.**
+> Dưới đây là workflow từ scratch mà các tweak developers thật sự dùng.
+
+### 8.1. Realistic Expectations
+
+| Tình huống | Thời gian ước tính |
+|------------|--------------------|
+| Có open-source reference | 1-2 ngày |
+| Có class-dump headers | 3-5 ngày |
+| Chỉ có binary | 1-2 tuần |
+| App obfuscated nặng | 2-4 tuần |
+
+**Đây là lý do:** Tweak developers thường:
+- Dùng app mỗi ngày → hiểu behavior
+- Đã làm nhiều tweak trước → pattern recognition
+- Đọc code open-source của apps khác → hiểu pattern
+- Làm việc trong jailbreak community → hỏi được
+
+**Nếu bạn mới:** Hãy bắt đầu với app CÓ reference (như FB) trước, sau đó apply kiến thức sang app khác.
+
+### 8.2. The 10-Step Workflow (No Reference)
+
+Khi bắt đầu với một app mới, không có open-source tweak tương tự:
+
+**Step 1: Recon — Thu thập thông tin cơ bản (30 phút)**
+
+```bash
+# Decrypt binary (cần jailbreak device)
+# Tool: frida, dumpdecrypted, bagbak
+
+# Get Info.plist
+plutil -p Facebook.app/Info.plist | head -30
+# → Bundle ID, version, executable name
+
+# Get linked frameworks
+otool -L Facebook.app/Facebook
+# → Shows system + private frameworks
+# → iOS version target, architecture
+
+# Get binary size, sections
+otool -h Facebook.app/Facebook
+# → Magic, cputype, filetype
+```
+
+**Output cần thu:**
+- Bundle ID: `com.facebook.Facebook6`
+- Version: `560.1.0`
+- Architecture: `arm64`
+- Frameworks: `FBSharedFramework`, `FBSDKCore`, etc.
+
+**Step 2: Class-dump headers (1-2 giờ)**
+
+```bash
+# Install lechium/classdumpios (works for iOS 15+ chained fixups)
+git clone https://github.com/lechium/classdumpios
+cd classdumpios
+# Build for macOS
+open classdumpios.xcodeproj
+# Product → Archive → Export → run from terminal
+
+# Dump headers
+./classdumpios -o headers_dir/ Facebook.app/Facebook
+./classdumpios -o headers_dir/ Facebook.app/Frameworks/FBSharedFramework.framework/FBSharedFramework
+
+# Search for interesting classes
+grep -r "FBFeedUnit\|Sponsored\|AdUnit" headers_dir/ | head -20
+```
+
+**Step 3: Identify UI framework (15 phút)**
+
+```bash
+# Search for known framework prefixes
+grep -rE "^@(interface|protocol).*?(CKComponent|ASDisplayNode|RCTView|UIView)" headers_dir/ | head
+
+# ComponentKit: CK prefix
+#   → Has CKDataSource, CKComponentLayout
+#   → Custom data flow, model-based
+
+# AsyncDisplayKit: AS prefix
+#   → Has ASViewController, ASCollectionNode
+#   → Texture-based rendering
+
+# React Native: RCT prefix
+#   → Has RCTBridge, RCTViewManager
+#   → JavaScript bridge
+
+# UIKit (default)
+#   → UIView, UIViewController
+#   → Stock iOS components
+```
+
+**Step 4: Find feature-specific classes (1-2 giờ)**
+
+For "remove ads" feature:
+```bash
+grep -iE "(ad|sponsor|promot|monetiz).*?(cell|view|unit|item)" headers_dir/ | head -20
+```
+
+For "story seen disable":
+```bash
+grep -iE "(seen|view|receipt|state).*?(manage|tracker|controller)" headers_dir/ | head -20
+```
+
+For "download media":
+```bash
+grep -iE "(download|export|share|save).*?(controller|manager|helper)" headers_dir/ | head -20
+```
+
+**Step 5: Build a runtime tracer (2-3 giờ)**
+
+Tạo tweak chỉ để log method calls:
+
+```objc
+// tracer.x
+#import <UIKit/UIKit.h>
+#import <objc/runtime.h>
+
+static IMP orig_xxx;
+
+static void hooked_xxx(id self, SEL _cmd, ...) {
+    LOG("XXX called: self=%s\n", class_getName(object_getClass(self)));
+    if (orig_xxx) {
+        // call orig
+    }
+}
+
+%ctor {
+    Class cls = objc_getClass("TargetClass");
+    if (cls) {
+        Method m = class_getInstanceMethod(cls, @selector(targetMethod:));
+        if (m) {
+            orig_xxx = method_getImplementation(m);
+            method_setImplementation(m, (IMP)hooked_xxx);
+        }
+    }
+}
+```
+
+Install, chạy app, làm action → check log → biết method có fire không.
+
+**Step 6: Identify the "right" hook point (2-4 giờ)**
+
+Cho mỗi feature, có nhiều hook candidates:
+
+```
+For "remove ads":
+├── Model layer (PREFERRED — no UI artifacts)
+│   ├── Hook init methods → return nil
+│   ├── Hook validation methods → return false
+│   └── Hook category getters → return "ORGANIC"
+├── View layer (BACKUP — may have visual artifacts)
+│   ├── Hook cellForItem → don't return cell
+│   ├── Hook layout → return 0 size
+│   └── Hook willDisplay → hide cell
+└── Data layer (LAST RESORT)
+    └── Hook URLSession to block analytics calls
+```
+
+Thử từ trên xuống dưới. Model layer thường work tốt nhất.
+
+**Step 7: Iterate with FLEX or class inspection (1-2 giờ)**
+
+Build on-device inspector (như `glow_verify.ipa`):
+
+```objc
+// Verify class exists + has methods
+Class cls = objc_getClass("FBSomeClass");
+if (cls) {
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    for (unsigned int i = 0; i < count; i++) {
+        SEL sel = method_getName(methods[i]);
+        LOG("  method: %s\n", sel_getName(sel));
+    }
+    free(methods);
+}
+```
+
+Inject vào app, đọc log, biết được API surface.
+
+**Step 8: Build prototype, test, iterate (1-3 ngày)**
+
+```objc
+// Prototype: hook one method, verify it works
+%hook FBSomeClass
+- (id)someMethod {
+    LOG("[hook] someMethod called\n");
+    return %orig;
+}
+%end
+```
+
+Test, nếu OK → thêm method khác → test → repeat.
+
+**Step 9: Add safety, logging, error handling (1-2 giờ)**
+
+```objc
+@try {
+    // risky hook code
+} @catch (NSException *e) {
+    LOG("EXC: %s\n", e.reason.UTF8String);
+    // fallback
+}
+```
+
+**Step 10: Polish, document, publish (1 giờ)**
+
+### 8.3. Search Strategy — Tìm Class Quan Trọng
+
+**Bảng từ khóa tìm kiếm theo feature:**
+
+| Feature | Search keywords |
+|---------|----------------|
+| Ads / sponsored | `ad`, `sponsor`, `promot`, `monetiz`, `impression` |
+| Story / reel | `story`, `reel`, `snacks`, `viewer`, `bucket` |
+| Download | `download`, `export`, `save`, `share` |
+| Privacy / anonymous | `seen`, `receipt`, `state`, `track` |
+| Login / auth | `auth`, `login`, `token`, `session` |
+| Notification | `notif`, `push`, `alert`, `badge` |
+| Theme / dark mode | `theme`, `color`, `style`, `appearance` |
+| Hide UI | `hide`, `view`, `header`, `footer`, `composer` |
+
+**Pattern matching cho ObjC conventions:**
+
+```bash
+# Class names thường có pattern
+# - FB* (Facebook) → "FBFeedUnit", "FBNewsFeed", "FBStory"
+# - IG* (Instagram) → "IGFeedItem", "IGDirectMessage"
+# - WA* (WhatsApp) → "WAMessage", "WAChat"
+# - TT* (TikTok) → "TTVideo", "TTFeedItem"
+# - YT* (YouTube) → "YTVideo", "YTPlayer"
+
+# Methods thường theo NS convention
+# -init, -dealloc, -copy, -mutableCopy
+# -valueForKey:, -setValue:forKey:
+# -isEqual:, -hash, -description
+
+# Properties thường có prefix _
+# _items, _dataSource, _delegate, _model
+```
+
+### 8.4. Reverse Engineering Toolkit (Priority Order)
+
+| Priority | Tool | Use case | Time |
+|----------|------|----------|------|
+| 1 | `strings` | Quick keyword search | 5 min |
+| 2 | `leak-class-dump` (class-dump port for iOS 15+) | Get all headers | 1-2 hr |
+| 3 | `otool` | Get binary info, linked frameworks | 10 min |
+| 4 | `nm` | List symbols (functions, classes) | 5 min |
+| 5 | **Custom runtime tracer** | See what's called when | 2-3 hr |
+| 6 | `radare2` / Ghidra | Deep RE, see function logic | hours |
+| 7 | `IDA Pro` | Pro RE (paid) | hours |
+| 8 | `frida` (jailbreak only) | Most powerful runtime tool | 30 min setup |
+| 9 | `leak-cycript` | Interactive ObjC evaluation | 1 hr setup |
+
+**For most tweaks, 1-6 đủ. 7-9 chỉ cần cho obfuscated apps.**
+
+### 8.5. Common Patterns to Look For
+
+**Anti-versioning techniques trong code (cách app detect tweak):**
+
+```objc
+// Detection methods
+- (BOOL)isJailbroken { ... }
+- (BOOL)hasSubstrate { ... }
+- (BOOL)hasFrida { ... }
+- (NSArray *)suspiciousLibraries { ... }
+```
+
+**Nếu app check tweak:** Hook các method này để return NO/false.
+
+**Bypass patterns:**
+
+```objc
+// Force-allow injection
+%hook SomeValidator
+- (BOOL)validate {
+    return YES;  // bypass
+}
+%end
+```
+
+**UIView pattern:**
+
+```objc
+// Tìm UIView classes
+grep -rE "class FB.*View" headers_dir/ | head
+// Hoặc tìm controls
+grep -rE "class FB.*Button" headers_dir/ | head
+```
+
+**Data source pattern:**
+
+```objc
+// Tìm data source (datasource/delegate pattern)
+grep -rE "dataSource" headers_dir/ | head
+// Tìm các class implementing các protocol
+grep -r "@protocol" headers_dir/ | head
+```
+
+### 8.6. Khi Nào KHÔNG Nên Làm Tweak
+
+Đôi khi từ bỏ là lựa chọn tốt nhất:
+
+- ❌ **App update mỗi ngày** — quá tốn thời gian maintain
+- ❌ **Heavy obfuscation** (control flow, string encryption) — gần như không thể RE
+- ❌ **App nhỏ, ít user** — ROI thấp
+- ❌ **App cạnh tranh có open-source tương tự** — dùng open-source thay vì viết mới
+- ❌ **App phát hiện jailbreak/tweak** — bị crack ngay khi install
+
+**Better alternatives:**
+
+- Web app (Tampermonkey userscript) — không cần tweak
+- API call intercept (mitmproxy) — chặn network calls
+- Modified APK/IPA (for Android) — ít bị phát hiện
+- Fork of open-source app — sửa trực tiếp source
+
+### 8.7. Realistic Timeline Example
+
+Tweak "Remove ads trong app X" từ đầu, không có reference:
+
+```
+Day 1: Recon + class-dump (3-4 giờ)
+  - Decrypt binary
+  - Run class-dump
+  - Search for "ad", "sponsor" keywords
+  - Identify 5-10 candidate classes
+
+Day 2: Build prototype (3-4 giờ)
+  - Create Theos project
+  - Hook 1-2 candidate methods
+  - Test trên device
+  - Confirm hooks fire
+
+Day 3-4: Iterate (4-6 giờ/ngày)
+  - Try different hook points
+  - Test edge cases
+  - Handle exceptions
+  - Add logging
+
+Day 5: Polish (2-3 giờ)
+  - Finalize Tweak.x
+  - Add safety checks
+  - Test thoroughly
+  - Write docs
+
+Total: 15-25 giờ cho working tweak từ scratch
+```
+
+So với có reference: **3-5 giờ**. Difference is **5-8x**.
+
+### 8.8. Phương pháp Tiết Kiệm Thời Gian
+
+Khi KHÔNG có reference, làm thế này để nhanh hơn:
+
+**1. Tìm tất cả open-source tweaks tương tự**
+
+```bash
+# Search GitHub cho related projects
+# Site: github.com
+# Keywords:
+#   - "{app} tweak"
+#   - "{app} no ads"
+#   - "{app} downloader"
+#   - "iOS tweak {app}"
+#   - "cydia {app}"
+```
+
+**2. Đọc code apps khác cùng dev team**
+
+```bash
+# Facebook team làm FB, IG, WA, Messenger
+# → Patterns giống nhau giữa các apps
+# → Class names, method signatures tương tự
+
+# ByteDance làm TikTok, Douyin, Resso, CapCut
+# → Cùng infrastructure
+```
+
+**3. Tìm developer blog/jobs**
+
+```bash
+# Search LinkedIn cho "iOS engineer @ {app}"
+# Blog posts về architecture
+# Job descriptions reveal tech stack
+```
+
+**4. Tham gia community**
+
+```bash
+# r/jailbreakdevelopers (Reddit)
+# iOSJBN Discord
+# Twitter: @iOSDevRE, @iOS_research
+# GitHub: search for "{app} tweak"
+```
+
+**5. Dùng AI/LLM hỗ trợ**
+
+```bash
+# LLM có thể:
+# - Explain binary structures
+# - Suggest class names từ context
+# - Generate code từ high-level description
+# - Find patterns trong headers
+
+# Nhưng KHÔNG thể:
+# - Run code trên device
+# - Verify hook points runtime
+# - Replace deep RE
+```
+
+### 8.9. Khi Nào Open-Source Reference Sẽ Xuất Hiện?
+
+Dù app không có tweak open-source, thường có **related projects**:
+
+- **Forks của apps** (e.g., Messenger, Lite versions) — cùng code base
+- **Web wrappers** (Electron, Capacitor) — có thể RE web version thay vì native
+- **API docs** (public GraphQL/REST) — hiểu data flow
+- **TestFlight betas** — sớm hơn App Store, có thể trước khi obfuscate
+
+**Checklist tìm reference:**
+
+- [ ] GitHub: search "{app} tweak", "{app} no ads", "{app} downloader"
+- [ ] Reddit: r/jailbreak, r/jailbreakdevelopers
+- [ ] Discord: iOSJBN, tweak development servers
+- [ ] Packix, Havoc repos — có tweak nào tương tự?
+- [ ] BigBoss, Chariz — Cydia repos có tweak nào?
+- [ ] Twitter: search "{app} tweak" với developer accounts
+- [ ] App's own GitHub: some apps open-source their SDK
+- [ ] App's competitors: similar apps may have open-source tweaks
+
+### 8.10. Minimal Viable Tweak (Khi Mọi Thứ Đều Khó)
+
+Nếu thật sự không thể RE sâu, focus vào **UI-layer hacks đơn giản**:
+
+```objc
+// 1. Hide specific known views
+%hook FBAdBannerView
+- (void)didMoveToSuperview {
+    self.hidden = YES;
+    [self removeFromSuperview];
+}
+%end
+
+// 2. Block specific URLs
+%hook NSURLSession
++ (NSURLSession *)sessionWithConfiguration:(NSURLSessionConfiguration *)cfg {
+    // block tracking endpoints
+    return %orig;
+}
+%end
+
+// 3. Block specific notifications
+%hook UIPasteboard
++ (void)setGeneralPasteboard:(UIPasteboard *)pb {
+    // do nothing
+}
+%end
+```
+
+**Minimal tweak = working at basic level, even if not perfect.**
+
+### Summary
+
+**Không có reference ≠ không thể làm tweak.** Chỉ cần:
+1. class-dump binary (1-2 giờ)
+2. Search cho feature keywords (1-2 giờ)
+3. Build runtime tracer (2-3 giờ)
+4. Iterate hooks (1-3 ngày)
+5. Polish + test (1 ngày)
+
+Total: 15-25 giờ thay vì 3-5 giờ với reference.
+
+**Trade-off:** Thời gian vs độ chính xác. Reference cho phép bạn đi đúng hướng ngay, scratch buộc bạn khám phá.
+
+**Recommendation:** 
+- Bắt đầu với apps CÓ reference (FB, YT, TikTok — đều có tweak open-source)
+- Apply kiến thức sang apps KHÔNG có reference
+- Chia sẻ findings của bạn — trở thành reference cho người khác
+
