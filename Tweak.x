@@ -643,6 +643,13 @@ static id hooked_cellForItem(id self, SEL _cmd, UICollectionView *cv, NSIndexPat
 }
 
 static IMP orig_willDisplay = NULL;
+// v8.2.40: Forward declarations for g_videoHandler / GlowVideoDownloadHandler
+// (used in hooked_willDisplay, declared later in file)
+@class GlowVideoDownloadHandler;
+static GlowVideoDownloadHandler *g_videoHandler = nil;
+static NSURL *g_cachedHDURL = nil;
+static NSURL *g_cachedSDURL = nil;
+
 static void hooked_willDisplay(id self, SEL _cmd, UICollectionView *cv, UICollectionViewCell *cell, NSIndexPath *ip) {
     if (orig_willDisplay) {
         typedef void (*FnType)(id, SEL, id, id, id);
@@ -661,6 +668,39 @@ static void hooked_willDisplay(id self, SEL _cmd, UICollectionView *cv, UICollec
             v.bounds = CGRectZero;
         }
     } @catch (...) {}
+
+    // v8.2.40: INJECT long press gesture into the cell (per user's diagnostic)
+    // Alternative methods (setVideoPlayer:, etc) didn't fire on newsfeed.
+    // willDisplay is the funnel ALL newsfeed cells pass through.
+    // Use the global HD/SD URL cache (set by hooked_HDPlaybackURL/SDPlaybackURL)
+    // to get the URL when user long-presses the cell.
+    if (!s_downloadVideo) return;
+    @try {
+        // Check if already injected
+        NSNumber *already = objc_getAssociatedObject(cell, "GlowCellLP");
+        if (already) return;
+        objc_setAssociatedObject(cell, "GlowCellLP", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+        // g_videoHandler will be set later (after GlowVideoDownloadHandler
+        // is fully defined). Skip if nil - inject won't work until then.
+        // The first Reel button tap will set g_videoHandler, then on
+        // next newsfeed scroll, the gesture target will be valid.
+        if (!g_videoHandler) {
+            LOG("[dl/news] willDisplay: g_videoHandler nil, skip inject\n");
+            objc_setAssociatedObject(cell, "GlowCellLP", nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            return;
+        }
+        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
+            initWithTarget:g_videoHandler
+                    action:@selector(onNewsfeedCellLongPress:)];
+        lp.minimumPressDuration = 0.5;
+        lp.delegate = (id<UIGestureRecognizerDelegate>)g_videoHandler;
+        [cell addGestureRecognizer:lp];
+        const char *cellCls = class_getName(object_getClass(cell));
+        LOG("[dl/news] long press injected into cell %s\n", cellCls);
+    } @catch (NSException *e) {
+        LOG("[dl/news] willDisplay inject exc: %s\n", e.reason.UTF8String);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1355,16 +1395,47 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
     return NO;
 }
 
+// v8.2.40: Newsfeed cell long press handler.
+// Uses GLOBAL URL cache (g_cachedHDURL/SD) set by hooked_HDPlaybackURL/SDPlaybackURL
+// since FB uses ComponentKit to render newsfeed videos and we can't easily
+// find the right per-VC URL.
+- (void)onNewsfeedCellLongPress:(UILongPressGestureRecognizer *)gr {
+    if (gr.state != UIGestureRecognizerStateBegan) return;
+    if (!s_downloadVideo) return;
+    UIView *v = gr.view;
+    if (!v) return;
+    LOG("[dl/news] CELL long press on %s\n", class_getName(object_getClass(v)));
+    // Haptic on press
+    UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    [gen impactOccurred];
+    @try {
+        // Use GLOBAL URL cache (set by hooked_HDPlaybackURL/SDPlaybackURL)
+        // This is the URL of the LAST item whose URL was read.
+        // For newsfeed, this is usually the currently-playing video
+        // (because FB reads the URL right before playing).
+        NSURL *hd = g_cachedHDURL;
+        NSURL *sd = g_cachedSDURL;
+        if (!hd && !sd) {
+            LOG("[dl/news] CELL: global cache empty (no URL yet)\n");
+            [self showToast:@"❌ Chưa có video để tải"];
+            return;
+        }
+        // Show action sheet
+        [self presentQualityActionSheetHD:hd sd:sd sourceView:v];
+    } @catch (NSException *e) {
+        LOG("[dl/news] CELL long press exc: %s\n", e.reason.UTF8String);
+    }
+}
+
 @end
 
-static GlowVideoDownloadHandler *g_videoHandler = nil;
+// Note: g_videoHandler forward-declared at line ~649 (before hooked_willDisplay)
 
 // v8.2.28: Cache the last Reel video URLs (HD/SD). When FBVideoPlaybackItem's
 // HDPlaybackURL/SDPlaybackURL getter is called (which FB does to play the
 // video), we capture the URL into globals. On tap, use the cached URLs.
 // This is the most reliable way to get the URL.
-static NSURL *g_cachedHDURL = nil;
-static NSURL *g_cachedSDURL = nil;
+// Note: g_cachedHDURL/SD forward-declared at line ~650 for hooked_willDisplay
 static NSDate *g_cachedAt = nil;
 static IMP orig_HDPlaybackURL = NULL;
 static IMP orig_SDPlaybackURL = NULL;
@@ -2206,23 +2277,11 @@ static NSMutableDictionary *g_urlCacheBySidebar = nil;
             [self showToast:@"❌ Video chưa tải"];
             return;
         }
-        LOG("[dl/reel] downloading HD=%d SD=%d\n", hd != nil, sd != nil);
+        // v8.2.40: ALWAYS show action sheet (never auto-download both!)
+        // Old code auto-downloaded HD+SD bypassing user choice
+        LOG("[dl/reel] FORCED action sheet HD=%d SD=%d\n", hd != nil, sd != nil);
         if (!g_videoHandler) g_videoHandler = [[GlowVideoDownloadHandler alloc] init];
-        // Visual feedback
-        UIButton *btn = (UIButton *)startView;
-        if ([btn isKindOfClass:[UIButton class]]) {
-            btn.enabled = NO;
-            btn.backgroundColor = [UIColor colorWithRed:0 green:0.7 blue:0 alpha:0.7];
-            [btn setTitle:@"✓" forState:UIControlStateNormal];
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-                btn.enabled = YES;
-                btn.backgroundColor = [UIColor clearColor];
-                [btn setTitle:@"⬇" forState:UIControlStateNormal];
-            });
-        }
-        [self showToast:@"⬇ Đang tải..."];
-        if (hd) [g_videoHandler downloadVideoURL:hd quality:@"reel_hd"];
-        if (sd && sd != hd) [g_videoHandler downloadVideoURL:sd quality:@"reel_sd"];
+        [g_videoHandler presentQualityActionSheetHD:hd sd:sd sourceView:startView];
     } @catch (NSException *e) {
         LOG("[dl/reel] exc: %s\n", e.reason.UTF8String);
     }
@@ -2869,7 +2928,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.38 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.40 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
