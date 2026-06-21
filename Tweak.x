@@ -1501,6 +1501,79 @@ static GlowReelButtonHandler *g_reelButtonHandler = nil;
 static NSMutableSet *g_mainSideBarsWithButton = nil;
 static IMP orig_shortsSideBarLayoutSubviews = NULL;
 
+// v8.2.24: Reel download button - SEPARATE from Like (not overlap).
+// Hook FBShortsSideBarView.layoutSubviews. The MAIN sidebar has 4+
+// FDSTouchStateAnnouncingControl children. We add our button as a
+// child of the Reels overlay (FBShortsViewerOverlayComponentView) at
+// the position above the sidebar, NOT inside the sidebar (so we
+// don't overlap Like). The overlay has full-screen frame, so the
+// button is tappable.
+//
+// v8.2.24 fix (vs v8.2.23):
+//   - User feedback: 'đặt nó riêng, trên nút like, cách nút like ra'
+//     (place it separately, above Like, with spacing)
+//   - v8.2.23 placed button at (0,0) inside sidebar, overlapping Like
+//   - Now: place at overlay, above sidebar, in the area between
+//     Reels description and Like button (no overlap)
+//
+// v8.2.24 fix (vs v8.2.21) - bug in comments:
+//   - User screenshot showed button appearing in Reel posted as comment
+//   - Reel in comment has same sidebar structure -> 5 FDS children
+//   - Now: walk up from sidebar, REJECT if any ancestor is FBComment*/
+//     FBBottomSheet*/FBFeedAttachment*/FBCommentStream*/FBCommentAttachmentView
+//
+// Structure (v8.2.24):
+//   FBShortsViewerOverlayComponentView (full-screen Reels-only parent)
+//     FBPassthroughView (overlay container)
+//       FBShortsSideBarView (360,0,56,333) ← MAIN (5 FDS children)
+//         FDSTouchStateAnnouncingControl Like (0,0,56,72)
+//         FDSTouchStateAnnouncingControl Comment (0,72,56,72)
+//         ...
+//       [OUR BUTTON at sidebar position, ABOVE sidebar in overlay coords]
+static NSMutableSet *g_overlaysWithButton = NULL;
+
+// Walk up from sidebar. Reject if any ancestor is a comment-context class.
+// Returns YES if the sidebar is in a clean Reels full-screen context.
+static BOOL isInReelsFullScreen(UIView *sideBar) {
+    UIView *cur = sideBar.superview;
+    int depth = 0;
+    while (cur && depth < 30) {
+        Class cls = object_getClass(cur);
+        const char *name = class_getName(cls);
+        if (name) {
+            // REJECT: comment / sheet / attachment contexts
+            if (strstr(name, "FBComment") != NULL) return NO;
+            if (strstr(name, "FBBottomSheet") != NULL) return NO;
+            if (strstr(name, "FBFeedAttachment") != NULL) return NO;
+            if (strstr(name, "AttachmentView") != NULL) return NO;
+            if (strstr(name, "FBStory") != NULL) return NO;
+            if (strstr(name, "FBSnacks") != NULL) return NO;
+            // ACCEPT: found the Reels-only overlay (EXACT class match)
+            if (strcmp(name, "FBShortsViewerOverlayComponentView") == 0) return YES;
+        }
+        cur = cur.superview;
+        depth++;
+    }
+    return NO;  // default: not in Reels full-screen
+}
+
+// Find the FBShortsViewerOverlayComponentView (EXACT class match) - the
+// Reels-only parent that contains the sidebar. Returns nil if not found.
+static UIView *findReelsOverlay(UIView *sideBar) {
+    UIView *cur = sideBar.superview;
+    int depth = 0;
+    while (cur && depth < 30) {
+        Class cls = object_getClass(cur);
+        const char *name = class_getName(cls);
+        if (name && strcmp(name, "FBShortsViewerOverlayComponentView") == 0) {
+            return cur;
+        }
+        cur = cur.superview;
+        depth++;
+    }
+    return nil;
+}
+
 static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
     if (orig_shortsSideBarLayoutSubviews) {
         typedef void (*FnType)(id, SEL);
@@ -1511,7 +1584,7 @@ static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
     @try {
         if (![self isKindOfClass:[UIView class]]) return;
         UIView *sideBar = (UIView *)self;
-        if (!g_mainSideBarsWithButton) g_mainSideBarsWithButton = [[NSMutableSet alloc] init];
+        if (!g_overlaysWithButton) g_overlaysWithButton = [[NSMutableSet alloc] init];
         if (!g_reelButtonHandler) g_reelButtonHandler = [[GlowReelButtonHandler alloc] init];
 
         // Skip if hidden
@@ -1520,7 +1593,6 @@ static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
         if (sideBar.bounds.size.width < 40 || sideBar.bounds.size.height < 200) return;
 
         // v8.2.21: MAIN sidebar = has 4+ FDSTouchStateAnnouncingControl children
-        // (Like, Comment, Share, Save, More). Other sidebars have 0-2.
         Class fdsCls = NSClassFromString(@"FDSTouchStateAnnouncingControl");
         if (!fdsCls) {
             LOG("[reels/main] FDSTouchStateAnnouncingControl class NOT FOUND\n");
@@ -1532,32 +1604,44 @@ static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
         }
         if (fdsCount < 4) return;  // not the main action column
 
-        NSValue *skey = [NSValue valueWithNonretainedObject:sideBar];
-        if ([g_mainSideBarsWithButton containsObject:skey]) return;  // already added
+        // v8.2.24: REJECT if sidebar is in a comment / sheet context
+        // (Reels posted as comments also have 5 FDS children, so we
+        // need to check the parent chain to differentiate)
+        if (!isInReelsFullScreen(sideBar)) {
+            LOG("[reels/main] SKIP (not in Reels full-screen)\n");
+            return;
+        }
 
-        // v8.2.23: Position INSIDE the sidebar frame (so it's tappable).
-        // User feedback: 'button không ấn được' - because y=-72 is OUTSIDE
-        // the sidebar's frame, UIView.hitTest returns nil for taps there.
-        // Now: place at (0, 0, 56, 40) - top 40px of sidebar, overlapping
-        // with Like (Like is 72px, our button is 40px, so bottom 32px of
-        // Like is still visible and tappable).
-        CGFloat W = sideBar.bounds.size.width;  // 56
-        CGFloat btnW = W;            // 56, matches Like
-        CGFloat btnH = 40;           // smaller than Like (72), leaves room
-        CGFloat btnX = 0;            // flush left
-        CGFloat btnY = 0;            // INSIDE sidebar (top), tappable
+        // Find the Reels-only overlay (exact class match)
+        UIView *overlay = findReelsOverlay(sideBar);
+        if (!overlay) {
+            LOG("[reels/main] SKIP (no FBShortsViewerOverlayComponentView ancestor)\n");
+            return;
+        }
+        NSValue *okey = [NSValue valueWithNonretainedObject:overlay];
+        if ([g_overlaysWithButton containsObject:okey]) return;  // already added
+
+        // v8.2.24: Position button ABOVE the sidebar, as child of OVERLAY.
+        // This makes it tappable (overlay has full-screen frame) and
+        // separates it from Like with spacing.
+        // Convert sidebar's frame to overlay's coordinate system
+        CGRect sbFrameInOverlay = [sideBar convertRect:sideBar.bounds toView:overlay];
+        CGFloat btnW = 56;   // matches sidebar width
+        CGFloat btnH = 56;   // slightly smaller than Like (72), but visible
+        CGFloat btnX = sbFrameInOverlay.origin.x;  // align with sidebar
+        CGFloat btnY = sbFrameInOverlay.origin.y - btnH - 8;  // 8px gap above sidebar
 
         UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
         btn.frame = CGRectMake(btnX, btnY, btnW, btnH);
         btn.layer.cornerRadius = 0;
-        // v8.2.23: FULLY TRANSPARENT (user feedback)
+        // v8.2.24: FULLY TRANSPARENT (user feedback)
         btn.backgroundColor = [UIColor clearColor];
         [btn setTitle:@"⬇" forState:UIControlStateNormal];
         [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        btn.titleLabel.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBold];
+        btn.titleLabel.font = [UIFont systemFontOfSize:28 weight:UIFontWeightBold];
         // No border
         btn.accessibilityIdentifier = @"GlowReelButton";
-        btn.layer.zPosition = 9999;  // on top of Like
+        btn.layer.zPosition = 9999;  // on top
         [btn addTarget:g_reelButtonHandler action:@selector(onReelButtonTap:) forControlEvents:UIControlEventTouchUpInside];
         // Backup: UILongPress in case tap is somehow eaten
         UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
@@ -1566,12 +1650,13 @@ static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
         lp.cancelsTouchesInView = NO;
         lp.delaysTouchesBegan = NO;
         [btn addGestureRecognizer:lp];
-        [sideBar addSubview:btn];
-        [sideBar bringSubviewToFront:btn];
-        [g_mainSideBarsWithButton addObject:skey];
-        LOG("[reels/main] ADDED button to %s (FDS children=%d) W=%.0f H=%.0f at (%.0f,%.0f,%.0f,%.0f)\n",
-            class_getName(object_getClass(sideBar)), fdsCount, W, sideBar.bounds.size.height,
-            btnX, btnY, btnW, btnH);
+        [overlay addSubview:btn];
+        [overlay bringSubviewToFront:btn];
+        [g_overlaysWithButton addObject:okey];
+        LOG("[reels/main] ADDED button to overlay %s (FDS children=%d) at (%.0f,%.0f,%.0f,%.0f) [sidebar at (%.0f,%.0f)]\n",
+            class_getName(object_getClass(overlay)), fdsCount,
+            btnX, btnY, btnW, btnH,
+            sbFrameInOverlay.origin.x, sbFrameInOverlay.origin.y);
     } @catch (NSException *e) {
         LOG("[reels/main] exc: %s\n", e.reason.UTF8String);
     }
@@ -1854,7 +1939,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.23 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.24 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
