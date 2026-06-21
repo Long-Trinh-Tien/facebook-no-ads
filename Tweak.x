@@ -1389,6 +1389,82 @@ static GlowVideoDownloadHandler *g_videoHandler = nil;
             }
         }
 
+        // Method 4 (v8.2.27): BFS the ENTIRE rootVC view hierarchy, check
+        // each view's VC for currentVideoPlaybackItem. The Reel video item
+        // might be on a different VC than expected.
+        if (!item && !directURL) {
+            @try {
+                UIWindow *win = startView.window;
+                if (win && win.rootViewController) {
+                    UIView *rv = win.rootViewController.view;
+                    NSMutableArray *queue = [NSMutableArray arrayWithObject:rv];
+                    int d2 = 0;
+                    while (queue.count > 0 && d2 < 200) {
+                        UIView *c = [queue firstObject];
+                        [queue removeObjectAtIndex:0];
+                        @try {
+                            // Check view's VC for currentVideoPlaybackItem
+                            UIResponder *r = c.nextResponder;
+                            if (r && [r isKindOfClass:[UIViewController class]]) {
+                                UIViewController *vc = (UIViewController *)r;
+                                SEL curItemSel = sel_registerName("currentVideoPlaybackItem");
+                                if ([vc respondsToSelector:curItemSel]) {
+                                    id vItem = [vc performSelector:curItemSel];
+                                    if (vItem && [vItem respondsToSelector:@selector(HDPlaybackURL)]) {
+                                        item = vItem;
+                                        LOG("[dl/reel] M4: found via VC=%s\n", class_getName(object_getClass(vc)));
+                                        break;
+                                    }
+                                }
+                            }
+                        } @catch (...) {}
+                        for (UIView *s in c.subviews) [queue addObject:s];
+                        d2++;
+                    }
+                }
+            } @catch (...) {}
+        }
+
+        // Method 5 (v8.2.27): BFS for AVPlayerLayer from sender's window
+        // (not just VC.view). The Reel player layer might be in a different
+        // view hierarchy.
+        if (!item && !directURL) {
+            @try {
+                Class avPlayerLayerCls = NSClassFromString(@"AVPlayerLayer");
+                if (avPlayerLayerCls) {
+                    UIWindow *win = startView.window;
+                    if (win) {
+                        NSMutableArray *queue = [NSMutableArray arrayWithObject:win];
+                        int d2 = 0;
+                        while (queue.count > 0 && d2 < 100) {
+                            UIView *c = [queue firstObject];
+                            [queue removeObjectAtIndex:0];
+                            @try {
+                                if ([c.layer isKindOfClass:avPlayerLayerCls]) {
+                                    id player = [c.layer valueForKey:@"player"];
+                                    if ([player respondsToSelector:@selector(currentItem)]) {
+                                        id avItem = [player performSelector:@selector(currentItem)];
+                                        SEL assetSel = sel_registerName("asset");
+                                        if ([avItem respondsToSelector:assetSel]) {
+                                            id asset = [avItem performSelector:assetSel];
+                                            SEL urlSel = sel_registerName("URL");
+                                            if ([asset respondsToSelector:urlSel]) {
+                                                directURL = (NSURL *)[asset performSelector:urlSel];
+                                                LOG("[dl/reel] M5: AVPlayerLayer URL found from window\n");
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            } @catch (...) {}
+                            for (UIView *s in c.subviews) [queue addObject:s];
+                            d2++;
+                        }
+                    }
+                }
+            } @catch (...) {}
+        }
+
         if (!item && !directURL) {
             LOG("[dl/reel] no playback item AND no AVPlayerLayer URL found\n");
             // Show error toast
@@ -1533,31 +1609,31 @@ static IMP orig_shortsSideBarLayoutSubviews = NULL;
 //       [OUR BUTTON at sidebar position, ABOVE sidebar in overlay coords]
 static NSMutableSet *g_overlaysWithButton = NULL;
 
-// Walk up from sidebar. Reject if any ancestor is a comment-context class.
-// Returns YES if the sidebar is in a clean Reels full-screen context.
+// Walk up from sidebar. Reject if IMMEDIATE ancestor (depth 0-5) is a
+// comment-context class. Accept if ANY ancestor has 'FBShorts' (Reels-only).
+// v8.2.27: looser filter - some Reels don't have FBShortsViewerOverlayComponentView
+// but have other FBShorts* classes.
 static BOOL isInReelsFullScreen(UIView *sideBar) {
+    if (!sideBar) return NO;
+    // Pass 1: check immediate 5 ancestors for comment/sheet (REJECT)
     UIView *cur = sideBar.superview;
-    int depth = 0;
-    while (cur && depth < 30) {
-        Class cls = object_getClass(cur);
-        const char *name = class_getName(cls);
+    for (int depth = 0; cur && depth < 5; depth++) {
+        const char *name = class_getName(object_getClass(cur));
         if (name) {
-            // REJECT first: any comment / sheet context
-            if (strstr(name, "FBComment") != NULL) return NO;
-            if (strstr(name, "FBBottomSheet") != NULL) return NO;
-            if (strstr(name, "FBFeedAttachment") != NULL) return NO;
-            if (strstr(name, "AttachmentView") != NULL) return NO;
-            if (strstr(name, "FBStory") != NULL) return NO;
-            if (strstr(name, "FBSnacks") != NULL) return NO;
-            // ACCEPT: Reels-only markers (use strstr to be tolerant)
-            if (strstr(name, "FBShortsViewerOverlayComponentView") != NULL) return YES;
-            if (strstr(name, "FBShortsCustomHitTestView") != NULL) return YES;
-            if (strstr(name, "FBShortsSurfaceView") != NULL) return YES;
+            if (strstr(name, "FBCommentStream") != NULL) return NO;
+            if (strstr(name, "FBBottomSheetView") != NULL) return NO;
+            if (strstr(name, "FBFeedAttachmentView") != NULL) return NO;
         }
         cur = cur.superview;
-        depth++;
     }
-    return NO;  // default: not in Reels full-screen
+    // Pass 2: check full 30 ancestors for FBShorts (ACCEPT)
+    cur = sideBar.superview;
+    for (int depth = 0; cur && depth < 30; depth++) {
+        const char *name = class_getName(object_getClass(cur));
+        if (name && strstr(name, "FBShorts") != NULL) return YES;
+        cur = cur.superview;
+    }
+    return NO;
 }
 
 // Find the FBShortsViewerOverlayComponentView (strstr match) - the
@@ -1942,7 +2018,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.26 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.27 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
