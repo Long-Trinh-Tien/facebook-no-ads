@@ -1304,6 +1304,84 @@ static NSMutableSet *g_reelsViewsWithButton = nil;
 @end
 static GlowReelButtonHandler *g_reelButtonHandler = nil;
 
+// Helper: remove all GlowReelButton-tagged buttons from a view (and keyWindow)
+static void removeReelButtons(UIView *v) {
+    if (!v) return;
+    // Walk subviews, remove anything tagged as GlowReelButton
+    for (UIView *sub in [v.subviews copy]) {
+        if ([sub.accessibilityIdentifier isEqualToString:@"GlowReelButton"]) {
+            [sub removeFromSuperview];
+        }
+    }
+    // Also remove from keyWindow
+    @try {
+        UIWindow *keyWin = nil;
+        for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+            if ([s isKindOfClass:[UIWindowScene class]]) {
+                UIWindowScene *ws = (UIWindowScene *)s;
+                for (UIWindow *w in ws.windows) {
+                    if (w.isKeyWindow) { keyWin = w; break; }
+                }
+                if (keyWin) break;
+            }
+        }
+        if (keyWin) {
+            for (UIView *sub in [keyWin.subviews copy]) {
+                if ([sub.accessibilityIdentifier isEqualToString:@"GlowReelButtonKeyWin"]) {
+                    [sub removeFromSuperview];
+                }
+            }
+        }
+    } @catch (NSException *e) {}
+}
+
+// Reels viewWillDisappear: hook — clean up button when user leaves Reels
+static IMP orig_reelsViewWillDisappear = NULL;
+static void hooked_reelsViewWillDisappear(id self, SEL _cmd, BOOL animated) {
+    if (orig_reelsViewWillDisappear) {
+        typedef void (*FnType)(id, SEL, BOOL);
+        FnType fn = (FnType)(uintptr_t)orig_reelsViewWillDisappear;
+        fn(self, _cmd, animated);
+    }
+    @try {
+        UIView *v = nil;
+        if ([self isKindOfClass:[UIViewController class]]) {
+            v = [(UIViewController *)self view];
+        } else if ([self isKindOfClass:[UIView class]]) {
+            v = (UIView *)self;
+        }
+        if (!v) return;
+        removeReelButtons(v);
+        // Also remove from set so future viewWillAppear: will re-add
+        if (g_reelsViewsWithButton) {
+            [g_reelsViewsWithButton removeObject:[NSValue valueWithNonretainedObject:v]];
+        }
+        LOG("[reels/VWD] %s - removed button(s)\n", class_getName(object_getClass(self)));
+    } @catch (NSException *e) {
+        LOG("[reels/VWD] exc: %s\n", e.reason.UTF8String);
+    }
+}
+
+// v8.2.15: Find FBVideoHomePassthroughView (full-screen overlay) and add
+// button at right edge, same column as like/share. PassthroughView is the
+// overlay that sits on top of video and has the action buttons.
+// Walk the view tree to find it (might be nested).
+static UIView *findPassthroughView(UIView *root) {
+    if (!root) return nil;
+    @try {
+        Class cls = object_getClass(root);
+        const char *name = class_getName(cls);
+        if (name && strstr(name, "PassthroughView") != NULL) {
+            return root;
+        }
+        for (UIView *sub in root.subviews) {
+            UIView *found = findPassthroughView(sub);
+            if (found) return found;
+        }
+    } @catch (...) {}
+    return nil;
+}
+
 // Reels viewWillAppear: hook (fires every time VC appears, not just first)
 static void hooked_reelsViewWillAppear(id self, SEL _cmd, BOOL animated) {
     if (!s_downloadVideo) return;
@@ -1328,8 +1406,20 @@ static void hooked_reelsViewWillAppear(id self, SEL _cmd, BOOL animated) {
         CGFloat W = v.bounds.size.width > 100 ? v.bounds.size.width : screenBounds.size.width;
         CGFloat H = v.bounds.size.height > 100 ? v.bounds.size.height : screenBounds.size.height;
         CGFloat btnSize = 50;
+
+        // v8.2.15: Find the FBVideoHomePassthroughView (full screen overlay
+        // that contains like/share). Add button as its subview so it sits
+        // in the same view layer.
+        UIView *passthrough = findPassthroughView(v);
+        UIView *targetView = passthrough ? passthrough : v;
+        LOG("[reels/VWA] PassthroughView found: %s\n",
+            passthrough ? "YES" : "NO");
+        LOG("[reels/VWA] Target view: %s\n",
+            class_getName(object_getClass(targetView)));
+
+        // Position at right side, around y=300 (middle of where like/share column is)
         CGFloat btnX = W - btnSize - 16;
-        CGFloat btnY = H - 280;
+        CGFloat btnY = 250;  // below top bar (~100), above mid-screen
 
         UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
         btn.frame = CGRectMake(btnX, btnY, btnSize, btnSize);
@@ -1340,15 +1430,17 @@ static void hooked_reelsViewWillAppear(id self, SEL _cmd, BOOL animated) {
         btn.titleLabel.font = [UIFont systemFontOfSize:26 weight:UIFontWeightBold];
         btn.layer.borderWidth = 2;
         btn.layer.borderColor = [UIColor whiteColor].CGColor;
+        // Tag the button for cleanup on viewWillDisappear
+        btn.accessibilityIdentifier = @"GlowReelButton";
         // Force button to be on top of all other layers
         btn.layer.zPosition = 9999;
         [btn addTarget:g_reelButtonHandler action:@selector(onReelButtonTap:) forControlEvents:UIControlEventTouchUpInside];
-        [v addSubview:btn];
-        [v bringSubviewToFront:btn];
+        [targetView addSubview:btn];
+        [targetView bringSubviewToFront:btn];
         // Walk up and bring each ancestor to front too
-        UIView *ancestor = v.superview;
+        UIView *ancestor = targetView.superview;
         while (ancestor) {
-            [ancestor bringSubviewToFront:v];
+            [ancestor bringSubviewToFront:targetView];
             ancestor = ancestor.superview;
         }
         // ALSO add to keyWindow with zPosition for absolute on-top
@@ -1375,6 +1467,7 @@ static void hooked_reelsViewWillAppear(id self, SEL _cmd, BOOL animated) {
                 keyBtn.layer.borderWidth = 2;
                 keyBtn.layer.borderColor = [UIColor whiteColor].CGColor;
                 keyBtn.layer.zPosition = 99999;
+                keyBtn.accessibilityIdentifier = @"GlowReelButtonKeyWin";
                 [keyBtn addTarget:g_reelButtonHandler action:@selector(onReelButtonTap:) forControlEvents:UIControlEventTouchUpInside];
                 [keyWin addSubview:keyBtn];
                 [keyWin bringSubviewToFront:keyBtn];
@@ -1384,7 +1477,7 @@ static void hooked_reelsViewWillAppear(id self, SEL _cmd, BOOL animated) {
             LOG("[reels/VWA] keyWin exc: %s\n", e.reason.UTF8String);
         }
         LOG("[reels/VWA] ADDED BUTTON to %s W=%.0f H=%.0f at (%.0f,%.0f)\n",
-            class_getName(object_getClass(v)), W, H, btnX, btnY);
+            class_getName(object_getClass(targetView)), W, H, btnX, btnY);
 
         // Add tap recognizer to log what user taps (helps find like button class)
         UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
@@ -1707,6 +1800,25 @@ static void hooked_viewDidAppear(id self, SEL _cmd, BOOL animated) {
                             LOG("[reels] HOOKED viewWillAppear on %s (no super)\n", [clsName UTF8String]);
                         }
                     }
+                    // Also hook viewWillDisappear: to remove button when user leaves Reels
+                    SEL vwdSel = @selector(viewWillDisappear:);
+                    Method mwd = class_getInstanceMethod(reelsCls, vwdSel);
+                    if (mwd) {
+                        Method mwd_super = class_getInstanceMethod(class_getSuperclass(reelsCls), vwdSel);
+                        if (mwd_super) {
+                            orig_reelsViewWillDisappear = method_getImplementation(mwd_super);
+                            method_setImplementation(mwd_super, (IMP)hooked_reelsViewWillDisappear);
+                            Method mwd_sub = class_getInstanceMethod(reelsCls, vwdSel);
+                            if (mwd_sub != mwd_super) {
+                                method_setImplementation(mwd_sub, (IMP)hooked_reelsViewWillDisappear);
+                            }
+                            LOG("[reels] HOOKED viewWillDisappear on %s\n", [clsName UTF8String]);
+                        } else {
+                            orig_reelsViewWillDisappear = method_getImplementation(mwd);
+                            method_setImplementation(mwd, (IMP)hooked_reelsViewWillDisappear);
+                            LOG("[reels] HOOKED viewWillDisappear on %s (no super)\n", [clsName UTF8String]);
+                        }
+                    }
                 }
             }
         }
@@ -1745,7 +1857,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.13 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.15 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
