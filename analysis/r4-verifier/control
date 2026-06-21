@@ -1,8 +1,8 @@
 Package: com.tommy.glowr4
 Name: GlowR4
-Version: 1.5.0
+Version: 1.6.0
 Architecture: iphoneos-arm
-Description: R4 Verifier v1.5 — 5-level walk + UIView.layoutSubviews hook
+Description: R4 Verifier v1.6 — timed walks + didAddSubview hook + 7-level
 Maintainer: tommy
 Author: tommy
 Section: Tweaks

@@ -535,7 +535,7 @@ static void walkSubviews(UIView *view, int depth, int maxDepth) {
     }
 }
 
-// v1.5: hook viewDidLayoutSubviews of UIView to catch later subview adds
+// v1.6: hook viewDidLayoutSubviews of UIView to catch later subview adds
 // Reels buttons are added AFTER viewDidAppear (lazy render)
 static IMP orig_viewDidLayoutSubviews = NULL;
 static int g_layoutHookCount = 0;
@@ -556,21 +556,90 @@ static void hooked_viewDidLayoutSubviews(id self, SEL _cmd) {
                             strstr(name, "Passthrough") != NULL ||
                             strstr(name, "Surface") != NULL);
         if (!isReelsView) return;
-        // Only first 3 layout passes to avoid spam
+        // v1.6: increased limit from 20 to 100
         g_layoutHookCount++;
-        if (g_layoutHookCount > 20) return;
+        if (g_layoutHookCount > 100) return;
         LOG("\n[Layout #%d] %s subs=%lu\n", g_layoutHookCount, name, (unsigned long)[(UIView *)self subviews].count);
         g_walkCount = 0;
         g_buttonCount = 0;
-        walkSubviews(self, 0, 5);
+        walkSubviews(self, 0, 7);  // v1.6: 7 levels deep
         LOG("  --- found %d UIButton/UIControl views ---\n", g_buttonCount);
     } @catch (NSException *e) {
         LOG("[Layout] exc: %s\n", e.reason.UTF8String);
     }
 }
 
+// v1.6: hook didAddSubview: to catch ANY subview added to Reels views.
+// This is the key for catching late-rendered buttons.
+static IMP orig_didAddSubview = NULL;
+static void hooked_didAddSubview(id self, SEL _cmd, id subview) {
+    if (orig_didAddSubview) {
+        typedef void (*FnType)(id, SEL, id);
+        FnType fn = (FnType)(uintptr_t)orig_didAddSubview;
+        fn(self, _cmd, subview);
+    }
+    @try {
+        if (![self isKindOfClass:[UIView class]] || !subview) return;
+        Class selfCls = object_getClass(self);
+        const char *selfName = class_getName(selfCls);
+        if (!selfName) return;
+        // Only for Reels-related parent views
+        BOOL isReelsParent = (strstr(selfName, "VideoHome") != NULL ||
+                              strstr(selfName, "ComponentHosting") != NULL ||
+                              strstr(selfName, "Passthrough") != NULL ||
+                              strstr(selfName, "Surface") != NULL);
+        if (!isReelsParent) return;
+        Class subCls = object_getClass(subview);
+        const char *subName = class_getName(subCls);
+        BOOL isButton = [subview isKindOfClass:[UIControl class]];
+        const char *marker = isButton ? ">>> " : "    ";
+        // Get label if any
+        NSString *label = nil;
+        @try { label = [subview accessibilityLabel]; } @catch (...) {}
+        // Get frame
+        CGRect f = [subview frame];
+        if (isButton || (subName && strstr(subName, "Action") != NULL)) {
+            LOG("  %s[ADD] %s <- %s frame=(%.0f,%.0f,%.0f,%.0f) label=\"%s\"\n",
+                marker, selfName, subName,
+                f.origin.x, f.origin.y, f.size.width, f.size.height,
+                label ? [label UTF8String] : "");
+        } else {
+            LOG("  %s[ADD] %s <- %s frame=(%.0f,%.0f,%.0f,%.0f)\n",
+                marker, selfName, subName,
+                f.origin.x, f.origin.y, f.size.width, f.size.height);
+        }
+    } @catch (NSException *e) {
+        // silent
+    }
+}
+
 static IMP orig_vc_viewDidAppear = NULL;
 static int g_vcLog_count = 0;
+
+// v1.6: schedule timed walks at 0/1/3/5/10s after VC appears
+// Catches late-rendered Reels action buttons (ComponentKit async layout)
+static void scheduleTimedWalks(id vc) {
+    if (![vc isKindOfClass:[UIViewController class]]) return;
+    int delays[] = {0, 1, 3, 5, 10};
+    for (int i = 0; i < (int)(sizeof(delays)/sizeof(delays[0])); i++) {
+        int d = delays[i];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, d * NSEC_PER_SEC),
+                       dispatch_get_main_queue(), ^{
+            @try {
+                UIView *root = [(UIViewController *)vc view];
+                if (!root) return;
+                g_walkCount = 0;
+                g_buttonCount = 0;
+                LOG("\n[T+%ds] Timed walk on %s\n", d, class_getName(object_getClass(vc)));
+                walkSubviews(root, 0, 7);
+                LOG("  --- found %d UIButton/UIControl views ---\n", g_buttonCount);
+            } @catch (NSException *e) {
+                // silent
+            }
+        });
+    }
+}
+
 static void hooked_vc_viewDidAppear(id self, SEL _cmd, BOOL animated) {
     if (orig_vc_viewDidAppear) {
         typedef void (*FnType)(id, SEL, BOOL);
@@ -615,6 +684,8 @@ static void hooked_vc_viewDidAppear(id self, SEL _cmd, BOOL animated) {
             } else {
                 LOG("  no root view\n");
             }
+            // v1.6: schedule timed walks to catch late-rendered buttons
+            scheduleTimedWalks(self);
         }
     } @catch (NSException *e) {
         LOG("[VC] exc: %s\n", e.reason.UTF8String);
@@ -643,6 +714,17 @@ static void installViewLayoutHook(void) {
     LOG("[R4] HOOKED UIView.layoutSubviews\n");
 }
 
+static void installDidAddSubviewHook(void) {
+    Class viewCls = objc_getClass("UIView");
+    if (!viewCls) return;
+    SEL sel = @selector(didAddSubview:);
+    Method m = class_getInstanceMethod(viewCls, sel);
+    if (!m) return;
+    orig_didAddSubview = method_getImplementation(m);
+    method_setImplementation(m, (IMP)hooked_didAddSubview);
+    LOG("[R4] HOOKED UIView.didAddSubview:\n");
+}
+
 __attribute__((constructor))
 static void r4_install_hooks(void) {
     // Delay slightly to ensure UIViewController/UIView are loaded
@@ -651,6 +733,7 @@ static void r4_install_hooks(void) {
         @try {
             installViewControllerHook();
             installViewLayoutHook();
+            installDidAddSubviewHook();
         } @catch (NSException *e) {
             LOG("[R4] installHook exc: %s\n", e.reason.UTF8String);
         }
