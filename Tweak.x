@@ -1302,123 +1302,103 @@ static GlowVideoDownloadHandler *g_videoHandler = nil;
 @end
 static GlowReelButtonHandler *g_reelButtonHandler = nil;
 
-// v8.2.19: REELS DOWNLOAD - SINGLE SOURCE OF TRUTH
-// Hook FBShortsSideBarView.layoutSubviews only. Add button as direct child
-// of sidebar (sibling of Like/Comment/Share). Filter STRICTLY to Reels context.
+// v8.2.20: REELS DOWNLOAD - SINGLE BUTTON PER REELS OVERLAY
+// Hook FBShortsSideBarView.layoutSubviews. From the sidebar, walk up
+// to find FBShortsViewerOverlayComponentView (Reels-only parent).
+// Add button as direct child of THAT overlay (not the sidebar).
+// Track per overlay - so multiple sidebars in same Reel = only 1 button.
 //
-// v8.2.19 fixes (vs v8.2.18):
-//   - ADDED lazy install of FBShortsSideBarView.layoutSubviews hook.
-//     The class is NOT loaded at app startup (only when Reels is opened).
-//     In v8.2.18, the installHooks() call at startup failed to find the
-//     class and silently skipped. Now we install the hook when a Reels
-//     VC's viewDidAppear fires (which loads the class).
+// v8.2.20 fix (vs v8.2.19):
+//   - In v8.2.19, button was added as child of each FBShortsSideBarView
+//     in the Reel. But a Reel has 7+ sidebars (like/share/save/more,
+//     description, profile, sound, ...) - result: 7+ buttons scattered
+//     across the Reel. User reported 'không ấn được cái nào, hiển thị
+//     loạn xạ ngầu'.
+//   - Now: find FBShortsViewerOverlayComponentView ancestor, add
+//     ONE button as its child. Position: top-right of overlay.
+//   - This guarantees 1 button per Reels view.
 //
-// v8.2.18 fixes (vs v8.2.17):
-//   - REMOVED viewWillAppear: hook (caused button to be added to keyWindow
-//     at fixed position - this button STAYED in keyWindow when comment
-//     sheet was presented as modal, appearing in wrong place = CRASH)
-//   - REMOVED viewDidLoad hook (redundant, caused button on FBVideoHome
-//     VC which is also shared with comment sheet)
-//   - TIGHTTENED isInReelsContext: now also checks window rootVC + looks
-//     for FBShortsCustomHitTestView (Reels-only). Excludes FBComment*,
-//     FBBottomSheet, FBFeedAttachment*, "Attachment" anywhere in chain.
-//   - If a button was previously added to a sideBar in non-Reels context
-//     (e.g. v8.2.17 left it), remove it on next layoutSubviews.
+// v8.2.19 fix (vs v8.2.18):
+//   - Lazy install of FBShortsSideBarView hook when Reels VC's
+//     viewDidAppear fires (class only loaded on Reels open).
 //
 // v8.2.18 structure:
-//   FBShortsViewerOverlayComponentView (Reels-only)
+//   FBShortsViewerOverlayComponentView (Reels-only) ⭐ add button HERE
 //     FBPassthroughView (overlay container)
-//       FBShortsSideBarView (360,0,56,333) ← RIGHT ACTION COLUMN ⭐
-//         FDSTouchStateAnnouncingControl Like (0,0,56,72)
-//         FDSTouchStateAnnouncingControl Comment (0,72,56,72)
-//         FDSTouchStateAnnouncingControl Share (0,145,56,72)
-//         FDSTouchStateAnnouncingControl Save (0,217,56,72)
-//         FDSTouchStateAnnouncingControl More (0,289,56,44)
-static NSMutableSet *g_sideBarsWithButton = nil;
-static NSMutableSet *g_sideBarsRejected = nil;
+//       FBShortsSideBarView (360,0,56,333) ← RIGHT ACTION COLUMN
+//         FDSTouchStateAnnouncingControl Like
+//         FDSTouchStateAnnouncingControl Comment
+//         FDSTouchStateAnnouncingControl Share
+//         FDSTouchStateAnnouncingControl Save
+//         FDSTouchStateAnnouncingControl More
+static NSMutableSet *g_overlaysWithButton = nil;
+static NSMutableSet *g_overlaysRejected = nil;
 static IMP orig_shortsSideBarLayoutSubviews = NULL;
 
-// STRICT filter: only YES if the sidebar is in actual Reels full-screen context.
-// Walks up the view chain looking for Reels-only classes. Also checks the
-// window's rootViewController to exclude comment sheets presented as modals.
-static BOOL isInReelsContext(UIView *sideBar) {
-    if (!sideBar) return NO;
-
-    // Check 1: walk up superview chain
-    UIView *cur = sideBar.superview;
+// Find the FBShortsViewerOverlayComponentView ancestor.
+// Returns nil if not in a Reels context.
+static UIView *findReelsOverlay(UIView *view) {
+    if (!view) return nil;
+    UIView *cur = view.superview;
     int depth = 0;
     while (cur && depth < 30) {
         Class cls = object_getClass(cur);
         const char *name = class_getName(cls);
         if (name) {
-            // EXCLUDE: any comment-related ancestor -> definitely not Reels full-screen
-            if (strstr(name, "FBComment") != NULL) return NO;
-            if (strstr(name, "FBBottomSheet") != NULL) return NO;
-            if (strstr(name, "FBFeedAttachment") != NULL) return NO;
-            // Attachment viewer (used for image/video in comments)
-            if (strstr(name, "AttachmentView") != NULL) return NO;
-            // Story viewer (different from Reels)
-            if (strstr(name, "FBSnacks") != NULL) return NO;
-            if (strstr(name, "FBStory") != NULL) return NO;
-
-            // INCLUDE: Reels-only markers (must find at least one)
-            if (strstr(name, "FBShortsViewerOverlayComponentView") != NULL) return YES;
-            if (strstr(name, "FBShortsCustomHitTestView") != NULL) return YES;
-            if (strstr(name, "FBShortsSurfaceView") != NULL) return YES;
+            // EXCLUDE: comment sheet / attachment contexts
+            if (strstr(name, "FBComment") != NULL) return nil;
+            if (strstr(name, "FBBottomSheet") != NULL) return nil;
+            if (strstr(name, "FBFeedAttachment") != NULL) return nil;
+            if (strstr(name, "AttachmentView") != NULL) return nil;
+            if (strstr(name, "FBSnacks") != NULL) return nil;
+            if (strstr(name, "FBStory") != NULL) return nil;
+            // INCLUDE: Reels-only overlay
+            if (strstr(name, "FBShortsViewerOverlayComponentView") != NULL) return cur;
         }
         cur = cur.superview;
         depth++;
     }
+    return nil;
+}
 
-    // Check 2: window rootVC (handles modal sheets)
+// Find Reels overlay via window rootVC (handles modal sheets, BFS from root)
+static UIView *findReelsOverlayInWindow(UIView *sideBar) {
     @try {
         UIWindow *win = sideBar.window;
-        if (win) {
-            UIViewController *rootVC = win.rootViewController;
-            // Walk through presented VCs
-            while (rootVC && rootVC.presentedViewController) {
-                rootVC = rootVC.presentedViewController;
+        if (!win) return nil;
+        UIViewController *rootVC = win.rootViewController;
+        while (rootVC && rootVC.presentedViewController) {
+            rootVC = rootVC.presentedViewController;
+        }
+        if (!rootVC) return nil;
+        // If presented VC is comment/bottom sheet, NOT Reels
+        const char *rn = class_getName(object_getClass(rootVC));
+        if (rn) {
+            if (strstr(rn, "FBComment") != NULL) return nil;
+            if (strstr(rn, "FBBottomSheet") != NULL) return nil;
+            if (strstr(rn, "FBSheet") != NULL) return nil;
+        }
+        // BFS from rootVC.view for FBShortsViewerOverlayComponentView
+        UIView *rv = rootVC.view;
+        if (!rv) return nil;
+        NSMutableArray *queue = [NSMutableArray arrayWithObject:rv];
+        int d = 0;
+        while (queue.count > 0 && d < 50) {
+            UIView *c = [queue firstObject];
+            [queue removeObjectAtIndex:0];
+            const char *cn = class_getName(object_getClass(c));
+            if (cn) {
+                if (strstr(cn, "FBShortsViewerOverlayComponentView") != NULL) return c;
+                // Stop at comment/sheet boundaries
+                if (strstr(cn, "FBComment") != NULL) return nil;
+                if (strstr(cn, "FBBottomSheet") != NULL) return nil;
+                if (strstr(cn, "FBFeedAttachment") != NULL) return nil;
             }
-            if (rootVC) {
-                const char *rn = class_getName(object_getClass(rootVC));
-                if (rn) {
-                    // If rootVC is a comment sheet, NOT Reels
-                    if (strstr(rn, "FBComment") != NULL) return NO;
-                    if (strstr(rn, "FBBottomSheet") != NULL) return NO;
-                    if (strstr(rn, "FBSheet") != NULL) return NO;
-                    // If rootVC is Reels, it IS Reels
-                    if (strstr(rn, "FBVideoHome") != NULL) return YES;
-                    if (strstr(rn, "FBReel") != NULL) return YES;
-                    if (strstr(rn, "FBShorts") != NULL) return YES;
-                }
-            }
+            for (UIView *s in c.subviews) [queue addObject:s];
+            d++;
         }
     } @catch (...) {}
-
-    // Check 3: walk down from rootVC.view looking for Reels viewer overlay
-    @try {
-        UIWindow *win = sideBar.window;
-        if (win && win.rootViewController) {
-            UIView *rv = win.rootViewController.view;
-            // BFS for FBShortsViewerOverlayComponentView
-            NSMutableArray *queue = [NSMutableArray arrayWithObject:rv];
-            int d2 = 0;
-            while (queue.count > 0 && d2 < 50) {
-                UIView *c = [queue firstObject];
-                [queue removeObjectAtIndex:0];
-                const char *cn = class_getName(object_getClass(c));
-                if (cn) {
-                    if (strstr(cn, "FBShortsViewerOverlayComponentView") != NULL) return YES;
-                    if (strstr(cn, "FBComment") != NULL) return NO;
-                    if (strstr(cn, "FBBottomSheet") != NULL) return NO;
-                }
-                for (UIView *s in c.subviews) [queue addObject:s];
-                d2++;
-            }
-        }
-    } @catch (...) {}
-
-    return NO;  // default: not in Reels (safer)
+    return nil;
 }
 
 static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
@@ -1431,53 +1411,35 @@ static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
     @try {
         if (![self isKindOfClass:[UIView class]]) return;
         UIView *sideBar = (UIView *)self;
-        if (!g_sideBarsWithButton) g_sideBarsWithButton = [[NSMutableSet alloc] init];
-        if (!g_sideBarsRejected) g_sideBarsRejected = [[NSMutableSet alloc] init];
+        if (!g_overlaysWithButton) g_overlaysWithButton = [[NSMutableSet alloc] init];
+        if (!g_overlaysRejected) g_overlaysRejected = [[NSMutableSet alloc] init];
         if (!g_reelButtonHandler) g_reelButtonHandler = [[GlowReelButtonHandler alloc] init];
-        NSValue *vkey = [NSValue valueWithNonretainedObject:sideBar];
-        // Skip if hidden (suggests off-screen)
-        if (sideBar.hidden || sideBar.alpha < 0.01) return;
-        // Skip if size is too small (0x0 or 56x0)
-        if (sideBar.bounds.size.width < 20 || sideBar.bounds.size.height < 100) return;
 
-        // v8.2.18: STRICT Reels context check
-        // - If NOT in Reels, REMOVE any existing button (cleanup) and reject
-        // - If in Reels, add button if not already present
-        BOOL inReels = isInReelsContext(sideBar);
-
-        if (!inReels) {
-            // Cleanup: if a button was previously added in Reels and now
-            // context changed (e.g. comment sheet pulled up), remove it
-            if ([g_sideBarsWithButton containsObject:vkey]) {
-                for (UIView *sub in [sideBar.subviews copy]) {
-                    if ([sub.accessibilityIdentifier isEqualToString:@"GlowReelButton"]) {
-                        [sub removeFromSuperview];
-                        LOG("[reels/sidebar] REMOVED button (context lost): %s\n",
-                            class_getName(object_getClass(sideBar)));
-                    }
-                }
-                [g_sideBarsWithButton removeObject:vkey];
-            }
-            [g_sideBarsRejected addObject:vkey];
-            return;
+        // v8.2.20: Find Reels overlay (Reels-only ancestor).
+        // All sidebars in same Reel share the same overlay - so only
+        // 1 button per Reels.
+        UIView *overlay = findReelsOverlay(sideBar);
+        if (!overlay) overlay = findReelsOverlayInWindow(sideBar);
+        if (!overlay) {
+            return;  // not in Reels context, ignore
         }
+        NSValue *okey = [NSValue valueWithNonretainedObject:overlay];
 
-        // In Reels - if already has button, do nothing
-        if ([g_sideBarsWithButton containsObject:vkey]) return;
+        // Already added? skip
+        if ([g_overlaysWithButton containsObject:okey]) return;
+        // Previously rejected? skip
+        if ([g_overlaysRejected containsObject:okey]) return;
 
-        // v8.2.18: If this sideBar was previously rejected, but now we see
-        // it in Reels context, it might be a NEW sidebar instance.
-        // Remove from rejected set so we can try again.
-        [g_sideBarsRejected removeObject:vkey];
+        // Overlay must have valid size
+        CGFloat oW = overlay.bounds.size.width;
+        CGFloat oH = overlay.bounds.size.height;
+        if (oW < 100 || oH < 100) return;  // not laid out yet
 
-        // Sidebar width 56, height varies
-        CGFloat W = sideBar.bounds.size.width;
-        CGFloat H = sideBar.bounds.size.height;
-        CGFloat btnW = 40;   // smaller than like (56) to fit
-        CGFloat btnH = 40;
-        // Place ABOVE the sidebar (negative y) - very visible at top of action column
-        CGFloat btnX = (W - btnW) / 2.0;  // center horizontally
-        CGFloat btnY = -btnH - 8;  // ABOVE the sidebar
+        // Position button at top-right of overlay (above native sidebar)
+        CGFloat btnW = 44;
+        CGFloat btnH = 44;
+        CGFloat btnX = oW - btnW - 8;   // 8px from right edge
+        CGFloat btnY = 120;              // below top bar (~100)
 
         UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
         btn.frame = CGRectMake(btnX, btnY, btnW, btnH);
@@ -1485,19 +1447,19 @@ static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
         btn.backgroundColor = [UIColor colorWithRed:1.0 green:0.2 blue:0.2 alpha:1.0];
         [btn setTitle:@"⬇" forState:UIControlStateNormal];
         [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        btn.titleLabel.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBold];
+        btn.titleLabel.font = [UIFont systemFontOfSize:24 weight:UIFontWeightBold];
         btn.layer.borderWidth = 2;
         btn.layer.borderColor = [UIColor whiteColor].CGColor;
         btn.accessibilityIdentifier = @"GlowReelButton";
         btn.layer.zPosition = 9999;
         [btn addTarget:g_reelButtonHandler action:@selector(onReelButtonTap:) forControlEvents:UIControlEventTouchUpInside];
-        [sideBar addSubview:btn];
-        [sideBar bringSubviewToFront:btn];
-        [g_sideBarsWithButton addObject:vkey];
-        LOG("[reels/sidebar] ADDED button to %s W=%.0f H=%.0f at (%.0f,%.0f,%.0f,%.0f)\n",
-            class_getName(object_getClass(sideBar)), W, H, btnX, btnY, btnW, btnH);
+        [overlay addSubview:btn];
+        [overlay bringSubviewToFront:btn];
+        [g_overlaysWithButton addObject:okey];
+        LOG("[reels/overlay] ADDED button to %s W=%.0f H=%.0f at (%.0f,%.0f,%.0f,%.0f)\n",
+            class_getName(object_getClass(overlay)), oW, oH, btnX, btnY, btnW, btnH);
     } @catch (NSException *e) {
-        LOG("[reels/sidebar] exc: %s\n", e.reason.UTF8String);
+        LOG("[reels/overlay] exc: %s\n", e.reason.UTF8String);
     }
 }
 
@@ -1778,7 +1740,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.19 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.20 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
