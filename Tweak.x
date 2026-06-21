@@ -1306,20 +1306,6 @@ static GlowReelButtonHandler *g_reelButtonHandler = nil;
 
 // Reels viewWillAppear: hook (fires every time VC appears, not just first)
 static void hooked_reelsViewWillAppear(id self, SEL _cmd, BOOL animated) {
-    // Call orig (use class_getMethodImplementation to find right IMP if needed)
-    @try {
-        Class cls = object_getClass(self);
-        Method m = class_getInstanceMethod(cls, @selector(viewWillAppear:));
-        if (m) {
-            IMP orig = method_getImplementation(m);
-            if (orig != (IMP)hooked_reelsViewWillAppear) {
-                typedef void (*FnType)(id, SEL, BOOL);
-                FnType fn = (FnType)(uintptr_t)orig;
-                fn(self, _cmd, animated);
-            }
-        }
-    } @catch (...) {}
-
     if (!s_downloadVideo) return;
     @try {
         UIView *v = nil;
@@ -1328,18 +1314,22 @@ static void hooked_reelsViewWillAppear(id self, SEL _cmd, BOOL animated) {
         } else if ([self isKindOfClass:[UIView class]]) {
             v = (UIView *)self;
         }
-        if (!v) return;
-        if (v.bounds.size.width < 100) return;
+        if (!v) {
+            LOG("[reels/VWA] %s - no view\n", class_getName(object_getClass(self)));
+            return;
+        }
         if (!g_reelsViewsWithButton) g_reelsViewsWithButton = [[NSMutableSet alloc] init];
         if (!g_reelButtonHandler) g_reelButtonHandler = [[GlowReelButtonHandler alloc] init];
-        if ([g_reelsViewsWithButton containsObject:[NSValue valueWithNonretainedObject:v]]) return;
-        [g_reelsViewsWithButton addObject:[NSValue valueWithNonretainedObject:v]];
+        NSValue *vkey = [NSValue valueWithNonretainedObject:v];
+        if ([g_reelsViewsWithButton containsObject:vkey]) return;  // already added
+        [g_reelsViewsWithButton addObject:vkey];
 
-        CGFloat W = v.bounds.size.width;
-        CGFloat H = v.bounds.size.height;
+        CGRect screenBounds = [UIScreen mainScreen].bounds;
+        CGFloat W = v.bounds.size.width > 100 ? v.bounds.size.width : screenBounds.size.width;
+        CGFloat H = v.bounds.size.height > 100 ? v.bounds.size.height : screenBounds.size.height;
         CGFloat btnSize = 50;
         CGFloat btnX = W - btnSize - 16;
-        CGFloat btnY = H - 280;  // above tab bar
+        CGFloat btnY = H - 280;
 
         UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
         btn.frame = CGRectMake(btnX, btnY, btnSize, btnSize);
@@ -1348,11 +1338,13 @@ static void hooked_reelsViewWillAppear(id self, SEL _cmd, BOOL animated) {
         [btn setTitle:@"⬇" forState:UIControlStateNormal];
         [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
         btn.titleLabel.font = [UIFont systemFontOfSize:26 weight:UIFontWeightBold];
+        btn.layer.borderWidth = 2;
+        btn.layer.borderColor = [UIColor whiteColor].CGColor;
         [btn addTarget:g_reelButtonHandler action:@selector(onReelButtonTap:) forControlEvents:UIControlEventTouchUpInside];
         [v addSubview:btn];
         [v bringSubviewToFront:btn];
-        LOG("[reels] VWA added download button to %s frame=(%.0f,%.0f,%.0f,%.0f) at (%.0f,%.0f)\n",
-            class_getName(object_getClass(v)), v.frame.origin.x, v.frame.origin.y, W, H, btnX, btnY);
+        LOG("[reels/VWA] ADDED BUTTON to %s W=%.0f H=%.0f at (%.0f,%.0f)\n",
+            class_getName(object_getClass(v)), W, H, btnX, btnY);
 
         // Add tap recognizer to log what user taps (helps find like button class)
         UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
@@ -1360,9 +1352,8 @@ static void hooked_reelsViewWillAppear(id self, SEL _cmd, BOOL animated) {
         tap.cancelsTouchesInView = NO;
         tap.numberOfTapsRequired = 1;
         [v addGestureRecognizer:tap];
-        LOG("[reels] VWA added tap log to %s\n", class_getName(object_getClass(v)));
     } @catch (NSException *e) {
-        LOG("[reels] VWA exc: %s\n", e.reason.UTF8String);
+        LOG("[reels/VWA] exc: %s\n", e.reason.UTF8String);
     }
 }
 
@@ -1654,15 +1645,27 @@ static void hooked_viewDidAppear(id self, SEL _cmd, BOOL animated) {
                 NSString *clsName = [NSString stringWithUTF8String:real];
                 Class reelsCls = NSClassFromString(clsName);
                 if (reelsCls) {
-                    // Hook viewWillAppear: instead of viewDidLoad
-                    // (viewDidLoad may fire before lazy install, but viewWillAppear: fires every time)
-                    static IMP orig_reelsViewWillAppear = NULL;
+                    // Hook viewWillAppear: - fires every time VC appears
+                    // Try to hook on the actual class (not the KVO wrapper)
                     SEL vwaSel = @selector(viewWillAppear:);
                     Method mwa = class_getInstanceMethod(reelsCls, vwaSel);
-                    if (mwa && !orig_reelsViewWillAppear) {
-                        orig_reelsViewWillAppear = method_getImplementation(mwa);
-                        method_setImplementation(mwa, (IMP)hooked_reelsViewWillAppear);
-                        LOG("[reels] LAZY hook (viewWillAppear) installed on %s\n", [clsName UTF8String]);
+                    if (mwa) {
+                        // Use class_replaceMethod to override globally
+                        // This works for both the class and its KVO subclass
+                        Method mwa_super = class_getInstanceMethod(class_getSuperclass(reelsCls), vwaSel);
+                        if (mwa_super) {
+                            // Override on the actual class
+                            method_setImplementation(mwa_super, (IMP)hooked_reelsViewWillAppear);
+                            // For KVO subclass, also override
+                            Method mwa_sub = class_getInstanceMethod(reelsCls, vwaSel);
+                            if (mwa_sub != mwa_super) {
+                                method_setImplementation(mwa_sub, (IMP)hooked_reelsViewWillAppear);
+                            }
+                            LOG("[reels] HOOKED viewWillAppear on %s\n", [clsName UTF8String]);
+                        } else {
+                            method_setImplementation(mwa, (IMP)hooked_reelsViewWillAppear);
+                            LOG("[reels] HOOKED viewWillAppear on %s (no super)\n", [clsName UTF8String]);
+                        }
                     }
                 }
             }
@@ -1702,7 +1705,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.11 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.12 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
