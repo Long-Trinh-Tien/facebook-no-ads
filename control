@@ -1,8 +1,8 @@
 Package: com.tommy.glowv3
 Name: GlowV3
-Version: 1.0.0
+Version: 1.1.0
 Architecture: iphoneos-arm
-Description: Facebook ad blocker + story seen disable (R3.5/v7)
+Description: Facebook ad blocker + story seen disable + settings UI (R3.5/v8)
 Maintainer: tommy
 Author: tommy
 Section: Tweaks
