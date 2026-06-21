@@ -1234,8 +1234,60 @@ static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *w
 
 static GlowVideoDownloadHandler *g_videoHandler = nil;
 
+// Reels button overlay: hook viewDidAppear (after view is on screen)
+// Add a floating download button on the right side of the Reel
 static IMP orig_reelsViewDidLoad = NULL;
-static void hooked_reelsViewDidLoad(id self, SEL _cmd);
+static NSMutableSet *g_reelsViewsWithButton = nil;
+
+@interface GlowReelButtonHandler : NSObject
+@end
+@implementation GlowReelButtonHandler
+- (void)onReelButtonTap:(UIButton *)sender {
+    LOG("[dl/reel] button tapped on %s\n", class_getName(object_getClass(sender.superview)));
+    // Walk up to find currentVideoPlaybackItem
+    UIView *v = sender.superview;
+    SEL curSel = sel_registerName("currentVideoPlaybackItem");
+    id item = nil;
+    int depth = 0;
+    while (v && depth < 10) {
+        @try {
+            if ([v respondsToSelector:curSel]) {
+                item = [v performSelector:curSel];
+                if (item) break;
+            }
+            // Try KVC for controller
+            id controller = [v valueForKey:@"controller"];
+            if (controller && [controller respondsToSelector:curSel]) {
+                item = [controller performSelector:curSel];
+                if (item) break;
+            }
+        } @catch (...) {}
+        v = v.superview;
+        depth++;
+    }
+    if (!item) { LOG("[dl/reel] no playback item found\n"); return; }
+    SEL hdSel = sel_registerName("HDPlaybackURL");
+    SEL sdSel = sel_registerName("SDPlaybackURL");
+    NSURL *hd = [item respondsToSelector:hdSel] ? [item performSelector:hdSel] : nil;
+    NSURL *sd = [item respondsToSelector:sdSel] ? [item performSelector:sdSel] : nil;
+    if (!hd && !sd) { LOG("[dl/reel] item has no URLs\n"); return; }
+    LOG("[dl/reel] downloading HD=%d SD=%d\n", hd != nil, sd != nil);
+    if (!g_videoHandler) g_videoHandler = [[GlowVideoDownloadHandler alloc] init];
+    if (hd) [g_videoHandler downloadVideoURL:hd quality:@"reel_hd"];
+    if (sd) [g_videoHandler downloadVideoURL:sd quality:@"reel_sd"];
+    // Visual feedback
+    sender.enabled = NO;
+    sender.backgroundColor = [UIColor colorWithRed:0 green:0.7 blue:0 alpha:0.7];
+    [sender setTitle:@"✓" forState:UIControlStateNormal];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        sender.enabled = YES;
+        sender.backgroundColor = [UIColor colorWithWhite:0 alpha:0.5];
+        [sender setTitle:@"⬇" forState:UIControlStateNormal];
+    });
+}
+@end
+static GlowReelButtonHandler *g_reelButtonHandler = nil;
+
 static void hooked_reelsViewDidLoad(id self, SEL _cmd) {
     if (orig_reelsViewDidLoad) {
         typedef void (*FnType)(id, SEL);
@@ -1243,21 +1295,39 @@ static void hooked_reelsViewDidLoad(id self, SEL _cmd) {
         fn(self, _cmd);
     }
     if (!s_downloadVideo) return;
-    if (!g_videoHandler) g_videoHandler = [[GlowVideoDownloadHandler alloc] init];
     @try {
+        if (!g_reelsViewsWithButton) g_reelsViewsWithButton = [[NSMutableSet alloc] init];
+        if (!g_reelButtonHandler) g_reelButtonHandler = [[GlowReelButtonHandler alloc] init];
         UIView *v = (UIView *)self;
         if (![v isKindOfClass:[UIView class]]) return;
-        if (!v.subviews.count) return;
-        for (UIView *sub in v.subviews) {
-            if (sub.frame.size.width < 100 || sub.frame.size.height < 100) continue;
-            UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
-                initWithTarget:g_videoHandler
-                action:@selector(onReelLongPress:)];
-            lp.minimumPressDuration = 0.5;
-            lp.cancelsTouchesInView = NO;
-            [sub addGestureRecognizer:lp];
-        }
-        LOG("[reels] added long press to %lu subviews\n", (unsigned long)v.subviews.count);
+        if ([g_reelsViewsWithButton containsObject:[NSValue valueWithNonretainedObject:v]]) return;
+        [g_reelsViewsWithButton addObject:[NSValue valueWithNonretainedObject:v]];
+        // Wait for view to layout
+        dispatch_async(dispatch_get_main_queue(), ^{
+            @try {
+                CGFloat W = v.bounds.size.width;
+                CGFloat H = v.bounds.size.height;
+                if (W < 100 || H < 100) return;
+                // Reels UI has action buttons on right side around y=300-500 area
+                // Add a download button at bottom-right (above tab bar)
+                CGFloat btnSize = 44;
+                CGFloat btnX = W - btnSize - 16;
+                CGFloat btnY = H - 120;  // above tab bar
+                UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+                btn.frame = CGRectMake(btnX, btnY, btnSize, btnSize);
+                btn.layer.cornerRadius = btnSize/2;
+                btn.backgroundColor = [UIColor colorWithWhite:0 alpha:0.5];
+                [btn setTitle:@"⬇" forState:UIControlStateNormal];
+                [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+                btn.titleLabel.font = [UIFont systemFontOfSize:22 weight:UIFontWeightSemibold];
+                [btn addTarget:g_reelButtonHandler action:@selector(onReelButtonTap:) forControlEvents:UIControlEventTouchUpInside];
+                [v addSubview:btn];
+                LOG("[reels] added download button to %s frame=(%.0f,%.0f,%.0f,%.0f)\n",
+                    class_getName(object_getClass(v)), v.frame.origin.x, v.frame.origin.y, W, H);
+            } @catch (NSException *e) {
+                LOG("[reels] button exc: %s\n", e.reason.UTF8String);
+            }
+        });
     } @catch (NSException *e) {
         LOG("[reels] exc: %s\n", e.reason.UTF8String);
     }
@@ -1520,7 +1590,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.6 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.7 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
