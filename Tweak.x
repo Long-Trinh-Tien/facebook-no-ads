@@ -1134,6 +1134,64 @@ static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *w
 @interface GlowVideoDownloadHandler : NSObject <UIGestureRecognizerDelegate>
 - (void)showToast:(NSString *)msg;
 @end
+
+// v8.2.44: STANDALONE safe toast function (doesn't depend on self method)
+// Used by PHPhotoLibrary completion block to avoid 'unrecognized selector'
+// crash when [self showToast:] is called on NSObject subclass without the method
+static void showSafeToast(NSString *message) {
+    if (!message) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            UIWindow *keyWindow = nil;
+            if (@available(iOS 13.0, *)) {
+                for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                    if (scene.activationState == UISceneActivationStateForegroundActive) {
+                        for (UIWindow *window in scene.windows) {
+                            if (window.isKeyWindow) {
+                                keyWindow = window;
+                                break;
+                            }
+                        }
+                    }
+                    if (keyWindow) break;
+                }
+            }
+            if (!keyWindow) {
+                keyWindow = [UIApplication sharedApplication].keyWindow;
+            }
+            if (!keyWindow) return;
+
+            UILabel *toastLabel = [[UILabel alloc] init];
+            toastLabel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.75];
+            toastLabel.textColor = [UIColor whiteColor];
+            toastLabel.font = [UIFont systemFontOfSize:14.0 weight:UIFontWeightMedium];
+            toastLabel.textAlignment = NSTextAlignmentCenter;
+            toastLabel.text = message;
+            toastLabel.alpha = 1.0;
+            toastLabel.layer.cornerRadius = 20;
+            toastLabel.clipsToBounds = YES;
+            toastLabel.numberOfLines = 0;
+            [keyWindow addSubview:toastLabel];
+
+            // Size the label
+            CGSize sz = [message boundingRectWithSize:CGSizeMake(keyWindow.frame.size.width - 80, 200)
+                                              options:NSStringDrawingUsesLineFragmentOrigin
+                                           attributes:@{NSFontAttributeName: toastLabel.font}
+                                              context:nil].size;
+            toastLabel.frame = CGRectMake((keyWindow.frame.size.width - sz.width - 30) / 2,
+                                          keyWindow.frame.size.height - 200,
+                                          sz.width + 30, sz.height + 18);
+
+            [UIView animateWithDuration:0.4 delay:2.0
+                                options:UIViewAnimationOptionCurveEaseOut
+                             animations:^{ toastLabel.alpha = 0.0; }
+                             completion:^(BOOL finished) { [toastLabel removeFromSuperview]; }];
+        } @catch (NSException *e) {
+            LOG("[dl/safe_toast] exc: %s\n", e.reason.UTF8String);
+        }
+    });
+}
+
 @implementation GlowVideoDownloadHandler
 
 // v8.2.34: Helper - present MODAL alert (not action sheet) for quality choice.
@@ -1270,38 +1328,49 @@ static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *w
     NSURLSessionDownloadTask *task = [session downloadTaskWithRequest:req completionHandler:^(NSURL *loc, NSURLResponse *resp, NSError *err) {
         if (err || !loc) {
             LOG("[dl/video] err: %s\n", err ? [[err localizedDescription] UTF8String] : "nil");
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self showToast:[NSString stringWithFormat:@"❌ Lỗi tải %@", q]];
-                UINotificationFeedbackGenerator *gen = [[UINotificationFeedbackGenerator alloc] init];
-                [gen notificationOccurred:UINotificationFeedbackTypeError];
-            });
+            // v8.2.44: Use showSafeToast (C function, no self method required)
+            showSafeToast([NSString stringWithFormat:@"❌ Lỗi tải %@", q]);
             return;
         }
         NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:name];
         [[NSFileManager defaultManager] moveItemAtURL:loc toURL:[NSURL fileURLWithPath:path] error:nil];
         LOG("[dl/video] saved to %s\n", [path UTF8String]);
-        // v8.2.42: Use PHPhotoLibrary (block-based) instead of UISaveVideoAtPathToSavedPhotosAlbum
-        // Old API requires selector callback - crashes if method name/sig doesn't match
-        // New API is block-based, no callback needed
+        // v8.2.42/44: Use PHPhotoLibrary (block-based, no callback selector)
+        // v8.2.44: Use fileURLWithPath (NOT URLWithString) - critical for local files
         NSURL *fileURL = [NSURL fileURLWithPath:path];
         NSString *qualityLabel = [q copy];  // capture for block
         [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
-            [PHAssetChangeRequest creationRequestForAssetFromVideoAtFileURL:fileURL];
+            // v8.2.44: @try-@catch inside PHPhotoLibrary block
+            @try {
+                [PHAssetChangeRequest creationRequestForAssetFromVideoAtFileURL:fileURL];
+            } @catch (NSException *exception) {
+                LOG("[dl/error] PHAssetChangeRequest exc: %s\n", exception.reason.UTF8String);
+            }
         } completionHandler:^(BOOL success, NSError * _Nullable error) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (success) {
-                    [self showToast:[NSString stringWithFormat:@"✅ Đã lưu %@ vào Photos", qualityLabel]];
-                    LOG("[dl/video] saved to Photos via PHPhotoLibrary\n");
+            // v8.2.44: Use showSafeToast instead of [self showToast:]
+            // (GlowVideoDownloadHandler inherits from NSObject which doesn't
+            //  have showToast: - calling it crashes with unrecognized selector)
+            if (success) {
+                LOG("[dl/video] saved to Photos via PHPhotoLibrary\n");
+                showSafeToast([NSString stringWithFormat:@"✅ Đã lưu %@ vào Photos", qualityLabel]);
+                // Haptic (wrapped in @try for safety)
+                @try {
                     UINotificationFeedbackGenerator *gen = [[UINotificationFeedbackGenerator alloc] init];
                     [gen notificationOccurred:UINotificationFeedbackTypeSuccess];
-                } else {
-                    LOG("[dl/video] PHPhotoLibrary err: %s\n",
-                        error ? [[error localizedDescription] UTF8String] : "nil");
-                    [self showToast:[NSString stringWithFormat:@"❌ Lỗi lưu Photos"]];
+                } @catch (NSException *e) {
+                    LOG("[dl/video] haptic exc: %s\n", e.reason.UTF8String);
+                }
+            } else {
+                LOG("[dl/video] PHPhotoLibrary err: %s\n",
+                    error ? [[error localizedDescription] UTF8String] : "nil");
+                showSafeToast(@"❌ Lỗi lưu Photos");
+                @try {
                     UINotificationFeedbackGenerator *gen = [[UINotificationFeedbackGenerator alloc] init];
                     [gen notificationOccurred:UINotificationFeedbackTypeError];
+                } @catch (NSException *e) {
+                    LOG("[dl/video] haptic exc: %s\n", e.reason.UTF8String);
                 }
-            });
+            }
         }];
     }];
     [task resume];
@@ -1452,7 +1521,7 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
         NSURL *sd = g_cachedSDURL;
         if (!hd && !sd) {
             LOG("[dl/news] CELL: global cache empty (no URL yet)\n");
-            [self showToast:@"❌ Chưa có video để tải"];
+            showSafeToast(@"❌ Chưa có video để tải");
             return;
         }
         // Show action sheet
@@ -2293,7 +2362,7 @@ static NSMutableDictionary *g_urlCacheBySidebar = nil;
                 // Don't return - let it fall through to action sheet
             } else {
                 LOG("[dl/reel] no playback item AND no AVPlayerLayer URL found\n");
-                [self showToast:@"❌ Không tìm thấy video"];
+                showSafeToast(@"❌ Không tìm thấy video");
                 return;
             }
         }
@@ -2309,7 +2378,7 @@ static NSMutableDictionary *g_urlCacheBySidebar = nil;
         }
         if (!hd && !sd) {
             LOG("[dl/reel] no URLs found\n");
-            [self showToast:@"❌ Video chưa tải"];
+            showSafeToast(@"❌ Video chưa tải");
             return;
         }
         // v8.2.40: ALWAYS show action sheet (never auto-download both!)
@@ -2963,7 +3032,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.42 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.44 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
