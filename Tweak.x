@@ -1242,6 +1242,22 @@ static NSMutableSet *g_reelsViewsWithButton = nil;
 @interface GlowReelButtonHandler : NSObject
 @end
 @implementation GlowReelButtonHandler
+// Track taps in Reels - logs class of any tapped view
+- (void)onReelTap:(UITapGestureRecognizer *)gr {
+    if (gr.state != UIGestureRecognizerStateRecognized) return;
+    UIView *v = gr.view;
+    if (!v) return;
+    LOG("[reels/tap] class=%s frame=(%.0f,%.0f,%.0f,%.0f)\n",
+        class_getName(object_getClass(v)), v.frame.origin.x, v.frame.origin.y,
+        v.frame.size.width, v.frame.size.height);
+    // Walk up 3 levels to find button or action class
+    UIView *cur = v;
+    for (int i = 0; i < 5 && cur; i++) {
+        LOG("[reels/tap]   +%d %s\n", i, class_getName(object_getClass(cur)));
+        cur = cur.superview;
+    }
+}
+
 - (void)onReelButtonTap:(UIButton *)sender {
     LOG("[dl/reel] button tapped on %s\n", class_getName(object_getClass(sender.superview)));
     // Walk up to find currentVideoPlaybackItem
@@ -1288,7 +1304,69 @@ static NSMutableSet *g_reelsViewsWithButton = nil;
 @end
 static GlowReelButtonHandler *g_reelButtonHandler = nil;
 
-// Rename to viewDidAppear hook (fires after view is laid out)
+// Reels viewWillAppear: hook (fires every time VC appears, not just first)
+static void hooked_reelsViewWillAppear(id self, SEL _cmd, BOOL animated) {
+    // Call orig (use class_getMethodImplementation to find right IMP if needed)
+    @try {
+        Class cls = object_getClass(self);
+        Method m = class_getInstanceMethod(cls, @selector(viewWillAppear:));
+        if (m) {
+            IMP orig = method_getImplementation(m);
+            if (orig != (IMP)hooked_reelsViewWillAppear) {
+                typedef void (*FnType)(id, SEL, BOOL);
+                FnType fn = (FnType)(uintptr_t)orig;
+                fn(self, _cmd, animated);
+            }
+        }
+    } @catch (...) {}
+
+    if (!s_downloadVideo) return;
+    @try {
+        UIView *v = nil;
+        if ([self isKindOfClass:[UIViewController class]]) {
+            v = [(UIViewController *)self view];
+        } else if ([self isKindOfClass:[UIView class]]) {
+            v = (UIView *)self;
+        }
+        if (!v) return;
+        if (v.bounds.size.width < 100) return;
+        if (!g_reelsViewsWithButton) g_reelsViewsWithButton = [[NSMutableSet alloc] init];
+        if (!g_reelButtonHandler) g_reelButtonHandler = [[GlowReelButtonHandler alloc] init];
+        if ([g_reelsViewsWithButton containsObject:[NSValue valueWithNonretainedObject:v]]) return;
+        [g_reelsViewsWithButton addObject:[NSValue valueWithNonretainedObject:v]];
+
+        CGFloat W = v.bounds.size.width;
+        CGFloat H = v.bounds.size.height;
+        CGFloat btnSize = 50;
+        CGFloat btnX = W - btnSize - 16;
+        CGFloat btnY = H - 280;  // above tab bar
+
+        UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+        btn.frame = CGRectMake(btnX, btnY, btnSize, btnSize);
+        btn.layer.cornerRadius = btnSize/2;
+        btn.backgroundColor = [UIColor colorWithRed:1.0 green:0.2 blue:0.2 alpha:1.0];
+        [btn setTitle:@"⬇" forState:UIControlStateNormal];
+        [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        btn.titleLabel.font = [UIFont systemFontOfSize:26 weight:UIFontWeightBold];
+        [btn addTarget:g_reelButtonHandler action:@selector(onReelButtonTap:) forControlEvents:UIControlEventTouchUpInside];
+        [v addSubview:btn];
+        [v bringSubviewToFront:btn];
+        LOG("[reels] VWA added download button to %s frame=(%.0f,%.0f,%.0f,%.0f) at (%.0f,%.0f)\n",
+            class_getName(object_getClass(v)), v.frame.origin.x, v.frame.origin.y, W, H, btnX, btnY);
+
+        // Add tap recognizer to log what user taps (helps find like button class)
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
+            initWithTarget:g_reelButtonHandler action:@selector(onReelTap:)];
+        tap.cancelsTouchesInView = NO;
+        tap.numberOfTapsRequired = 1;
+        [v addGestureRecognizer:tap];
+        LOG("[reels] VWA added tap log to %s\n", class_getName(object_getClass(v)));
+    } @catch (NSException *e) {
+        LOG("[reels] VWA exc: %s\n", e.reason.UTF8String);
+    }
+}
+
+// (legacy hook - kept for compatibility)
 static void hooked_reelsViewDidLoad(id self, SEL _cmd) {
     if (orig_reelsViewDidLoad) {
         typedef void (*FnType)(id, SEL);
@@ -1568,7 +1646,7 @@ static void hooked_viewDidAppear(id self, SEL _cmd, BOOL animated) {
                 LOG("[disc] VC: %s\n", cn);
             }
             // Lazy install: hook Reels classes when they appear
-            if (s_downloadVideo && !orig_reelsViewDidLoad &&
+            if (s_downloadVideo &&
                 (strstr(cn, "FBVideoHome") != NULL || strstr(cn, "FBReel") != NULL)) {
                 // Strip NSKVONotifying_ prefix
                 const char *real = cn;
@@ -1576,12 +1654,15 @@ static void hooked_viewDidAppear(id self, SEL _cmd, BOOL animated) {
                 NSString *clsName = [NSString stringWithUTF8String:real];
                 Class reelsCls = NSClassFromString(clsName);
                 if (reelsCls) {
-                    SEL vdlSel = @selector(viewDidLoad);
-                    Method m = class_getInstanceMethod(reelsCls, vdlSel);
-                    if (m) {
-                        orig_reelsViewDidLoad = method_getImplementation(m);
-                        method_setImplementation(m, (IMP)hooked_reelsViewDidLoad);
-                        LOG("[reels] LAZY hook installed on %s\n", [clsName UTF8String]);
+                    // Hook viewWillAppear: instead of viewDidLoad
+                    // (viewDidLoad may fire before lazy install, but viewWillAppear: fires every time)
+                    static IMP orig_reelsViewWillAppear = NULL;
+                    SEL vwaSel = @selector(viewWillAppear:);
+                    Method mwa = class_getInstanceMethod(reelsCls, vwaSel);
+                    if (mwa && !orig_reelsViewWillAppear) {
+                        orig_reelsViewWillAppear = method_getImplementation(mwa);
+                        method_setImplementation(mwa, (IMP)hooked_reelsViewWillAppear);
+                        LOG("[reels] LAZY hook (viewWillAppear) installed on %s\n", [clsName UTF8String]);
                     }
                 }
             }
@@ -1621,7 +1702,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.10 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.11 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
