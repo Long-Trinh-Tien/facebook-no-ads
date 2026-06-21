@@ -1,8 +1,8 @@
 Package: com.tommy.glowr4
 Name: GlowR4
-Version: 1.0.0
+Version: 1.1.0
 Architecture: iphoneos-arm
-Description: R4 Verifier for Facebook class discovery
+Description: R4 Verifier v3.1 — +Phase 7 (Reels action buttons)
 Maintainer: tommy
 Author: tommy
 Section: Tweaks

@@ -307,6 +307,57 @@ static void r4_init(void) {
             };
             checkCandidates("Download/share", dl, sizeof(dl)/sizeof(dl[0]));
 
+            // ─── Phase 7: Reels action button candidates ───
+            // Goal: find where like/share/comment buttons are init'd in Reels
+            // So we can add our download button alongside them.
+            LOG("\n########## PHASE 7: Reels action button candidates ##########\n");
+            const char *reelsActions[] = {
+                // Action button column container
+                "FBReelActionBarView",
+                "FBReelActionBar",
+                "FBReelActionsView",
+                "FBReelActionButton",
+                "FBReelSideBarView",
+                "FBReelSideBar",
+                "FBReelRightSideBar",
+                "FBReelLeftSideBar",
+                "FBReelActionStackView",
+                "FBReelToolbarView",
+                "FBReelsActionBarView",
+                "FBReelsActionBar",
+                "FBReelsSideBarView",
+                "FBReelsSideBar",
+                "FBReelsActionStackView",
+                // Specific buttons
+                "FBReelLikeButton",
+                "FBReelCommentButton",
+                "FBReelShareButton",
+                "FBReelSaveButton",
+                "FBReelMoreButton",
+                "FBReelMusicButton",
+                "FBReelAuthorButton",
+                "FBReelFollowButton",
+                // Compositional
+                "FBReelActionsComponent",
+                "FBReelActionBarComponent",
+                "FBReelSideBarComponent",
+                "FBReelToolbarComponent",
+                // Possible CK-based
+                "FBReelCKDataSource",
+                "FBReelCKComponent",
+                // Snacks (older framework used for Reels)
+                "FBSnacksReelView",
+                "FBSnacksReelActionView",
+                "FBSnacksReelActionBar",
+                // Generic
+                "FBReelOverlayActionView",
+                "FBReelActionMenuView",
+                "FBReelActionItemView",
+                "FBReelButtonStack",
+                "FBReelButtonColumn",
+            };
+            checkCandidates("Reels action buttons", reelsActions, sizeof(reelsActions)/sizeof(reelsActions[0]));
+
             LOG("\n=== R4 Verification Complete ===\n");
             LOG("Output: %s\n", g_log_path);
             if (g_log_file) {
