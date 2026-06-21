@@ -43,17 +43,23 @@ static void log_msg(const char *fmt, ...) {
 // Settings keys - same naming convention as Glow/haoict
 static BOOL s_removeAds = YES;
 static BOOL s_disableStorySeen = YES;
-static BOOL s_downloadVideo = NO;     // not implemented yet
-static BOOL s_downloadStory = NO;     // not implemented yet
-static BOOL s_removePYMK = NO;         // not implemented yet
-static BOOL s_removeReelsCarousel = NO;// not implemented yet
-static BOOL s_removeSuggested = NO;    // not implemented yet
-static BOOL s_hideComposer = NO;       // not implemented yet
-static BOOL s_disableAutoNext = NO;    // not implemented yet
-static BOOL s_confirmLike = NO;        // not implemented yet
-static BOOL s_markAsSeen = NO;         // not implemented yet
-static BOOL s_clearCacheOnLaunch = NO; // not implemented yet
-static BOOL s_notifyUpdates = NO;      // not implemented yet
+static BOOL s_downloadVideo = NO;
+static BOOL s_downloadStory = NO;
+static BOOL s_removePYMK = NO;
+static BOOL s_removeReelsCarousel = NO;
+static BOOL s_removeSuggested = NO;
+static BOOL s_hideComposer = NO;
+static BOOL s_disableAutoNext = NO;
+static BOOL s_confirmLike = NO;
+static BOOL s_downloadReels = NO;
+static BOOL s_hideOverlay = NO;
+static BOOL s_confirmReelsLike = NO;
+static BOOL s_downloadLongPress = NO;
+static BOOL s_markAsSeen = NO;
+static BOOL s_removeStoryPYMK = NO;
+static BOOL s_allFormats = NO;
+static BOOL s_clearCacheOnLaunch = NO;
+static BOOL s_notifyUpdates = NO;
 
 static void reloadPrefs(void) {
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
@@ -71,7 +77,13 @@ static void reloadPrefs(void) {
     s_hideComposer = [d boolForKey:@"com.tommy.glow.hideComposer"];
     s_disableAutoNext = [d boolForKey:@"com.tommy.glow.disableAutoNext"];
     s_confirmLike = [d boolForKey:@"com.tommy.glow.confirmLike"];
+    s_downloadReels = [d boolForKey:@"com.tommy.glow.downloadReels"];
+    s_hideOverlay = [d boolForKey:@"com.tommy.glow.hideOverlay"];
+    s_confirmReelsLike = [d boolForKey:@"com.tommy.glow.confirmReelsLike"];
+    s_downloadLongPress = [d boolForKey:@"com.tommy.glow.downloadLongPress"];
     s_markAsSeen = [d boolForKey:@"com.tommy.glow.markAsSeen"];
+    s_removeStoryPYMK = [d boolForKey:@"com.tommy.glow.removeStoryPYMK"];
+    s_allFormats = [d boolForKey:@"com.tommy.glow.allFormats"];
     s_clearCacheOnLaunch = [d boolForKey:@"com.tommy.glow.clearCacheOnLaunch"];
     s_notifyUpdates = [d boolForKey:@"com.tommy.glow.notifyUpdates"];
 
@@ -239,19 +251,19 @@ static NSString *GlowLoc(NSString *key) {
                 @{@"key": @"removeSuggested", @"title": @"removeSuggested", @"subtitle": @"removeSuggested.desc", @"value": @(s_removeSuggested)},
             ],
             @[  // REELS
-                @{@"key": @"downloadReels", @"title": @"downloadReels", @"subtitle": @"", @"value": @NO},
-                @{@"key": @"hideOverlay", @"title": @"hideOverlay", @"subtitle": @"", @"value": @NO},
-                @{@"key": @"confirmReelsLike", @"title": @"confirmReelsLike", @"subtitle": @"", @"value": @NO},
-                @{@"key": @"downloadLongPress", @"title": @"downloadLongPress", @"subtitle": @"downloadLongPress.desc", @"value": @NO},
+                @{@"key": @"downloadReels", @"title": @"downloadReels", @"subtitle": @"", @"value": @(s_downloadReels)},
+                @{@"key": @"hideOverlay", @"title": @"hideOverlay", @"subtitle": @"", @"value": @(s_hideOverlay)},
+                @{@"key": @"confirmReelsLike", @"title": @"confirmReelsLike", @"subtitle": @"", @"value": @(s_confirmReelsLike)},
+                @{@"key": @"downloadLongPress", @"title": @"downloadLongPress", @"subtitle": @"downloadLongPress.desc", @"value": @(s_downloadLongPress)},
             ],
             @[  // STORIES
                 @{@"key": @"downloadStory", @"title": @"downloadStory", @"subtitle": @"", @"value": @(s_downloadStory)},
                 @{@"key": @"disableStorySeen", @"title": @"disableStorySeen", @"subtitle": @"", @"value": @(s_disableStorySeen)},
                 @{@"key": @"disableAutoNext", @"title": @"disableAutoNext", @"subtitle": @"", @"value": @(s_disableAutoNext)},
-                @{@"key": @"removeStoryPYMK", @"title": @"removeStoryPYMK", @"subtitle": @"", @"value": @NO},
+                @{@"key": @"removeStoryPYMK", @"title": @"removeStoryPYMK", @"subtitle": @"", @"value": @(s_removeStoryPYMK)},
             ],
             @[  // TRÌNH TẢI VIDEO
-                @{@"key": @"allFormats", @"title": @"allFormats", @"subtitle": @"", @"value": @NO},
+                @{@"key": @"allFormats", @"title": @"allFormats", @"subtitle": @"", @"value": @(s_allFormats)},
             ],
             @[  // KHÁC
                 @{@"key": @"notifyUpdates", @"title": @"notifyUpdates", @"subtitle": @"", @"value": @(s_notifyUpdates)},
@@ -702,6 +714,7 @@ static void hooked_newsFeed_viewDidLoad(id self, SEL _cmd) {
 // Add a long-press recognizer to the view (not a button - that crashed).
 
 @interface GlowStoryDownloadHandler : NSObject
+@property (nonatomic, strong) UIAlertController *progressAlert;
 @end
 @implementation GlowStoryDownloadHandler
 
@@ -838,30 +851,118 @@ static void hooked_newsFeed_viewDidLoad(id self, SEL _cmd) {
     }
 }
 
+- (void)showProgressAlert {
+    UIWindow *win = nil;
+    for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+        if ([s isKindOfClass:[UIWindowScene class]]) {
+            UIWindowScene *ws = (UIWindowScene *)s;
+            for (UIWindow *w in ws.windows) { if (w.isKeyWindow) { win = w; break; } }
+            if (win) break;
+        }
+    }
+    if (!win) win = [UIApplication sharedApplication].keyWindow;
+    UIViewController *top = win.rootViewController;
+    while (top.presentedViewController) top = top.presentedViewController;
+    if (!top) return;
+    self.progressAlert = [UIAlertController alertControllerWithTitle:@"Đang tải..."
+                                                                message:@"0%"
+                                                         preferredStyle:UIAlertControllerStyleAlert];
+    [top presentViewController:self.progressAlert animated:YES completion:nil];
+}
+
+- (void)updateProgress:(double)fraction {
+    if (!self.progressAlert) return;
+    int pct = (int)(fraction * 100);
+    self.progressAlert.message = [NSString stringWithFormat:@"%d%%", pct];
+}
+
+- (void)dismissProgressWithTitle:(NSString *)title message:(NSString *)msg success:(BOOL)ok {
+    if (self.progressAlert) {
+        [self.progressAlert dismissViewControllerAnimated:YES completion:nil];
+        self.progressAlert = nil;
+    }
+    // Haptic feedback
+    if (ok) {
+        UINotificationFeedbackGenerator *gen = [[UINotificationFeedbackGenerator alloc] init];
+        [gen prepare];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.1 * NSEC_PER_SEC),
+                       dispatch_get_main_queue(), ^{ [gen notificationOccurred:UINotificationFeedbackTypeSuccess]; });
+    } else {
+        UINotificationFeedbackGenerator *gen = [[UINotificationFeedbackGenerator alloc] init];
+        [gen prepare];
+        [gen notificationOccurred:UINotificationFeedbackTypeError];
+    }
+    // Show result alert
+    UIWindow *win = nil;
+    for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+        if ([s isKindOfClass:[UIWindowScene class]]) {
+            UIWindowScene *ws = (UIWindowScene *)s;
+            for (UIWindow *w in ws.windows) { if (w.isKeyWindow) { win = w; break; } }
+            if (win) break;
+        }
+    }
+    if (!win) win = [UIApplication sharedApplication].keyWindow;
+    UIViewController *top = win.rootViewController;
+    while (top.presentedViewController) top = top.presentedViewController;
+    if (!top) return;
+    UIAlertController *done = [UIAlertController alertControllerWithTitle:title
+                                                                  message:msg
+                                                           preferredStyle:UIAlertControllerStyleAlert];
+    [done addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.3 * NSEC_PER_SEC),
+                   dispatch_get_main_queue(), ^{
+        [top presentViewController:done animated:YES completion:nil];
+    });
+}
+
 - (void)downloadURL:(NSURL *)url toFileName:(NSString *)name {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self showProgressAlert];
+    });
     NSURLRequest *req = [NSURLRequest requestWithURL:url];
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
     NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
     NSURLSessionDownloadTask *task = [session downloadTaskWithRequest:req completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
         if (error || !location) {
             LOG("[dl/story] download err: %s\n", error ? [[error localizedDescription] UTF8String] : "nil");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self updateProgress:1.0];
+                [self dismissProgressWithTitle:@"Lỗi" message:@"Không thể tải về" success:NO];
+            });
             return;
         }
         NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:name];
         [[NSFileManager defaultManager] moveItemAtURL:location toURL:[NSURL fileURLWithPath:path] error:nil];
         LOG("[dl/story] saved to %s\n", [path UTF8String]);
         dispatch_async(dispatch_get_main_queue(), ^{
+            [self updateProgress:1.0];
             UIImage *img = [UIImage imageWithContentsOfFile:path];
             if (img) {
                 UIImageWriteToSavedPhotosAlbum(img, nil, nil, nil);
                 LOG("[dl/story] saved image to Photos\n");
+                [self dismissProgressWithTitle:@"Đã lưu ảnh" message:@"Đã lưu vào Album Ảnh" success:YES];
             } else {
                 UISaveVideoAtPathToSavedPhotosAlbum(path, nil, nil, NULL);
                 LOG("[dl/story] saved video to Photos\n");
+                [self dismissProgressWithTitle:@"Đã lưu video" message:@"Đã lưu vào Album Ảnh" success:YES];
             }
         });
     }];
+    // Observe progress
     [task resume];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        while (task.state == NSURLSessionTaskStateRunning) {
+            int64_t total = task.countOfBytesExpectedToReceive;
+            int64_t done = task.countOfBytesReceived;
+            if (total > 0) {
+                double frac = (double)done / (double)total;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [self updateProgress:frac];
+                });
+            }
+            [NSThread sleepForTimeInterval:0.2];
+        }
+    });
 }
 
 @end
@@ -1237,6 +1338,31 @@ static void hooked_viewDidAppear(id self, SEL _cmd, BOOL animated) {
                 @try { installLongPressOnCurrentUI(); } @catch (...) {}
             });
         }
+        // Reels discovery: log class name when user opens Reels-related VC
+        if (cn && strstr(cn, "Reel")) {
+            LOG("[reels] discovered VC: %s\n", cn);
+            // Walk the VC's view hierarchy looking for a video view
+            @try {
+                UIViewController *vcSelf = (UIViewController *)self;
+                UIView *v = vcSelf.view;
+                Class videoContainerCls = NSClassFromString(@"VideoContainerView");
+                // Walk children looking for a view that has a video item
+                NSMutableArray *queue = [NSMutableArray arrayWithObject:v];
+                int depth = 0;
+                while (queue.count > 0 && depth < 20) {
+                    UIView *cur = [queue firstObject];
+                    [queue removeObjectAtIndex:0];
+                    // Check if this view can give us a playback item
+                    @try {
+                        if ([cur isKindOfClass:videoContainerCls]) {
+                            LOG("[reels] found VideoContainerView\n");
+                        }
+                    } @catch (...) {}
+                    for (UIView *sub in cur.subviews) [queue addObject:sub];
+                    depth++;
+                }
+            } @catch (...) {}
+        }
     }
 }
 
@@ -1248,7 +1374,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.1 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.3 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
