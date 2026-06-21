@@ -51,7 +51,7 @@ static BOOL s_removeSuggested = NO;
 static BOOL s_hideComposer = NO;
 static BOOL s_disableAutoNext = NO;
 static BOOL s_confirmLike = NO;
-static BOOL s_downloadReels = NO;
+static BOOL s_downloadReels = YES;  // v8.2.25: default ON (Reels button)
 static BOOL s_hideOverlay = NO;
 static BOOL s_confirmReelsLike = NO;
 static BOOL s_downloadLongPress = NO;
@@ -78,6 +78,7 @@ static void reloadPrefs(void) {
     s_disableAutoNext = [d boolForKey:@"com.tommy.glow.disableAutoNext"];
     s_confirmLike = [d boolForKey:@"com.tommy.glow.confirmLike"];
     s_downloadReels = [d boolForKey:@"com.tommy.glow.downloadReels"];
+    if (![d objectForKey:@"com.tommy.glow.downloadReels"]) s_downloadReels = YES;  // v8.2.25: default ON
     s_hideOverlay = [d boolForKey:@"com.tommy.glow.hideOverlay"];
     s_confirmReelsLike = [d boolForKey:@"com.tommy.glow.confirmReelsLike"];
     s_downloadLongPress = [d boolForKey:@"com.tommy.glow.downloadLongPress"];
@@ -1580,7 +1581,7 @@ static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
         FnType fn = (FnType)(uintptr_t)orig_shortsSideBarLayoutSubviews;
         fn(self, _cmd);
     }
-    if (!s_downloadVideo) return;
+    if (!s_downloadReels) return;  // v8.2.25: separate from s_downloadVideo
     @try {
         if (![self isKindOfClass:[UIView class]]) return;
         UIView *sideBar = (UIView *)self;
@@ -1939,7 +1940,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.24 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.25 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
