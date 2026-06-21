@@ -1340,9 +1340,49 @@ static void hooked_reelsViewWillAppear(id self, SEL _cmd, BOOL animated) {
         btn.titleLabel.font = [UIFont systemFontOfSize:26 weight:UIFontWeightBold];
         btn.layer.borderWidth = 2;
         btn.layer.borderColor = [UIColor whiteColor].CGColor;
+        // Force button to be on top of all other layers
+        btn.layer.zPosition = 9999;
         [btn addTarget:g_reelButtonHandler action:@selector(onReelButtonTap:) forControlEvents:UIControlEventTouchUpInside];
         [v addSubview:btn];
         [v bringSubviewToFront:btn];
+        // Walk up and bring each ancestor to front too
+        UIView *ancestor = v.superview;
+        while (ancestor) {
+            [ancestor bringSubviewToFront:v];
+            ancestor = ancestor.superview;
+        }
+        // ALSO add to keyWindow with zPosition for absolute on-top
+        @try {
+            UIWindow *keyWin = nil;
+            for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+                if ([s isKindOfClass:[UIWindowScene class]]) {
+                    UIWindowScene *ws = (UIWindowScene *)s;
+                    for (UIWindow *w in ws.windows) {
+                        if (w.isKeyWindow) { keyWin = w; break; }
+                    }
+                    if (keyWin) break;
+                }
+            }
+            if (keyWin && btn.superview != keyWin) {
+                // Make a separate button on keyWindow to ensure it's on top
+                UIButton *keyBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+                keyBtn.frame = CGRectMake(btnX, btnY, btnSize, btnSize);
+                keyBtn.layer.cornerRadius = btnSize/2;
+                keyBtn.backgroundColor = [UIColor colorWithRed:1.0 green:0.2 blue:0.2 alpha:1.0];
+                [keyBtn setTitle:@"⬇" forState:UIControlStateNormal];
+                [keyBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+                keyBtn.titleLabel.font = [UIFont systemFontOfSize:26 weight:UIFontWeightBold];
+                keyBtn.layer.borderWidth = 2;
+                keyBtn.layer.borderColor = [UIColor whiteColor].CGColor;
+                keyBtn.layer.zPosition = 99999;
+                [keyBtn addTarget:g_reelButtonHandler action:@selector(onReelButtonTap:) forControlEvents:UIControlEventTouchUpInside];
+                [keyWin addSubview:keyBtn];
+                [keyWin bringSubviewToFront:keyBtn];
+                LOG("[reels/VWA] ALSO added keyWindow button at (%.0f,%.0f)\n", btnX, btnY);
+            }
+        } @catch (NSException *e) {
+            LOG("[reels/VWA] keyWin exc: %s\n", e.reason.UTF8String);
+        }
         LOG("[reels/VWA] ADDED BUTTON to %s W=%.0f H=%.0f at (%.0f,%.0f)\n",
             class_getName(object_getClass(v)), W, H, btnX, btnY);
 
@@ -1705,7 +1745,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.12 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.13 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
