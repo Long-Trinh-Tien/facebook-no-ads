@@ -1302,9 +1302,16 @@ static GlowVideoDownloadHandler *g_videoHandler = nil;
 @end
 static GlowReelButtonHandler *g_reelButtonHandler = nil;
 
-// v8.2.18: REELS DOWNLOAD - SINGLE SOURCE OF TRUTH
+// v8.2.19: REELS DOWNLOAD - SINGLE SOURCE OF TRUTH
 // Hook FBShortsSideBarView.layoutSubviews only. Add button as direct child
 // of sidebar (sibling of Like/Comment/Share). Filter STRICTLY to Reels context.
+//
+// v8.2.19 fixes (vs v8.2.18):
+//   - ADDED lazy install of FBShortsSideBarView.layoutSubviews hook.
+//     The class is NOT loaded at app startup (only when Reels is opened).
+//     In v8.2.18, the installHooks() call at startup failed to find the
+//     class and silently skipped. Now we install the hook when a Reels
+//     VC's viewDidAppear fires (which loads the class).
 //
 // v8.2.18 fixes (vs v8.2.17):
 //   - REMOVED viewWillAppear: hook (caused button to be added to keyWindow
@@ -1312,7 +1319,7 @@ static GlowReelButtonHandler *g_reelButtonHandler = nil;
 //     sheet was presented as modal, appearing in wrong place = CRASH)
 //   - REMOVED viewDidLoad hook (redundant, caused button on FBVideoHome
 //     VC which is also shared with comment sheet)
-//   - TIGHTENED isInReelsContext: now also checks window rootVC + looks
+//   - TIGHTTENED isInReelsContext: now also checks window rootVC + looks
 //     for FBShortsCustomHitTestView (Reels-only). Excludes FBComment*,
 //     FBBottomSheet, FBFeedAttachment*, "Attachment" anywhere in chain.
 //   - If a button was previously added to a sideBar in non-Reels context
@@ -1687,6 +1694,38 @@ static void installHooks(void) {
 
 // (Reels hooks declared above installHooks)
 
+// v8.2.19: Lazy install hook for FBShortsSideBarView.layoutSubviews
+// The class is NOT loaded at app startup (only when Reels opens).
+// installHooks() at startup can't find it, so we hook it here when
+// a Reels VC appears (which forces the class to load).
+static int g_shortsSideBarHooked = 0;
+
+static void tryLazyInstallShortsSideBarHook(void) {
+    if (g_shortsSideBarHooked) return;
+    if (orig_shortsSideBarLayoutSubviews) return;  // already hooked in installHooks
+    @try {
+        Class sideBarCls = objc_getClass("FBShortsSideBarView");
+        if (!sideBarCls) {
+            LOG("[reels/lazy] FBShortsSideBarView still NOT FOUND\n");
+            return;
+        }
+        SEL lsSel = @selector(layoutSubviews);
+        Method m2 = class_getInstanceMethod(sideBarCls, lsSel);
+        if (m2) {
+            orig_shortsSideBarLayoutSubviews = method_getImplementation(m2);
+            method_setImplementation(m2, (IMP)hooked_shortsSideBarLayoutSubviews);
+            g_shortsSideBarHooked = 1;
+            LOG("  hook #11 (LAZY): FBShortsSideBarView.layoutSubviews -> add download button as child\n");
+        } else {
+            LOG("[reels/lazy] FBShortsSideBarView.layoutSubviews NOT FOUND\n");
+        }
+    } @catch (NSException *e) {
+        LOG("[reels/lazy] exc: %s\n", e.reason.UTF8String);
+    } @catch (...) {
+        LOG("[reels/lazy] exc(c++)\n");
+    }
+}
+
 static void hooked_viewDidAppear(id self, SEL _cmd, BOOL animated) {
     if (orig_viewDidAppear) {
         typedef void (*FnType)(id, SEL, BOOL);
@@ -1706,12 +1745,14 @@ static void hooked_viewDidAppear(id self, SEL _cmd, BOOL animated) {
                 @try { installLongPressOnCurrentUI(); } @catch (...) {}
             });
         }
-        // v8.2.18: REMOVED all Reels lazy install code (viewWillAppear:,
-        // viewWillDisappear:, VideoContainerView discovery). The
-        // FBShortsSideBarView.layoutSubviews hook in installHooks
-        // (#11) is the ONLY Reels hook. isInReelsContext filter
-        // handles the rest.
-
+        // v8.2.19: Lazy install Reels hook when Reels VC appears.
+        // FBShortsSideBarView is loaded as part of Reels view hierarchy,
+        // so by viewDidAppear of a Reels VC, the class is available.
+        if (cn && (strstr(cn, "FBVideoHome") != NULL ||
+                   strstr(cn, "FBReel") != NULL ||
+                   strstr(cn, "FBShorts") != NULL)) {
+            tryLazyInstallShortsSideBarHook();
+        }
         // Always log VC class (for class discovery) - filter out common ones
         if (cn && (strstr(cn, "FB") || strstr(cn, "Feed") || strstr(cn, "Reel"))) {
             BOOL common = (strstr(cn, "NewsFeed") != NULL) ||
@@ -1737,7 +1778,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.18 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.19 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
