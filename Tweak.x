@@ -1257,46 +1257,219 @@ static GlowVideoDownloadHandler *g_videoHandler = nil;
 }
 
 - (void)onReelButtonTap:(UIButton *)sender {
-    LOG("[dl/reel] button tapped on %s\n", class_getName(object_getClass(sender.superview)));
-    // Walk up to find currentVideoPlaybackItem
-    UIView *v = sender.superview;
-    SEL curSel = sel_registerName("currentVideoPlaybackItem");
-    id item = nil;
-    int depth = 0;
-    while (v && depth < 10) {
-        @try {
-            if ([v respondsToSelector:curSel]) {
-                item = [v performSelector:curSel];
-                if (item) break;
+    LOG("[dl/reel] TAP on %s (parent=%s)\n",
+        class_getName(object_getClass(sender)),
+        class_getName(object_getClass(sender.superview)));
+    [self downloadReelVideoFromView:sender];
+}
+
+// v8.2.22: Backup long-press handler
+- (void)onReelButtonLongPress:(UILongPressGestureRecognizer *)gr {
+    if (gr.state != UIGestureRecognizerStateBegan) return;
+    LOG("[dl/reel] LONGPRESS backup\n");
+    [self downloadReelVideoFromView:gr.view];
+}
+
+// v8.2.22: Reel video download - find URL via multiple methods:
+//   1. Walk up view hierarchy looking for currentVideoPlaybackItem
+//   2. Walk up nextResponder chain to find UIViewController
+//      then try common property names (currentVideoPlaybackItem,
+//      currentItem, videoController, playbackController, etc.)
+//   3. Walk down from VC's view to find AVPlayerLayer and get URL
+//   4. Use cached URL (from layoutSubviews hook)
+- (void)downloadReelVideoFromView:(UIView *)startView {
+    @try {
+        SEL curSel = sel_registerName("currentVideoPlaybackItem");
+        id item = nil;
+
+        // Method 1: walk up view hierarchy (existing)
+        UIView *v = startView;
+        int depth = 0;
+        while (v && depth < 12) {
+            @try {
+                if ([v respondsToSelector:curSel]) {
+                    item = [v performSelector:curSel];
+                    if (item) { LOG("[dl/reel] M1: found on view depth %d (%s)\n", depth, class_getName(object_getClass(v))); break; }
+                }
+                id controller = [v valueForKey:@"controller"];
+                if (controller && [controller respondsToSelector:curSel]) {
+                    item = [controller performSelector:curSel];
+                    if (item) { LOG("[dl/reel] M1b: found via controller (%s)\n", class_getName(object_getClass(v))); break; }
+                }
+            } @catch (...) {}
+            v = v.superview;
+            depth++;
+        }
+
+        // Method 2: walk up nextResponder chain to find VC
+        if (!item) {
+            UIResponder *r = startView.nextResponder;
+            int rd = 0;
+            while (r && rd < 8) {
+                if ([r isKindOfClass:[UIViewController class]]) {
+                    UIViewController *vc = (UIViewController *)r;
+                    const char *vcn = class_getName(object_getClass(vc));
+                    LOG("[dl/reel] M2: VC=%s\n", vcn);
+                    // Try common property names on VC
+                    NSArray *props = @[@"currentVideoPlaybackItem", @"currentVideoItem",
+                                       @"playbackController", @"videoController",
+                                       @"mediaController", @"playerController",
+                                       @"videoItem", @"currentItem"];
+                    for (NSString *p in props) {
+                        @try {
+                            if ([vc respondsToSelector:NSSelectorFromString(p)]) {
+                                id val = [vc valueForKey:p];
+                                if (val) {
+                                    // If val has currentVideoPlaybackItem, dig deeper
+                                    if ([val respondsToSelector:curSel]) {
+                                        item = [val performSelector:curSel];
+                                        if (item) { LOG("[dl/reel] M2: found via VC.%@.%s\n", p, "currentVideoPlaybackItem"); break; }
+                                    }
+                                    // If val is FBVideoPlaybackItem directly
+                                    if ([val respondsToSelector:@selector(HDPlaybackURL)]) {
+                                        item = val;
+                                        LOG("[dl/reel] M2: VC.%@ is FBVideoPlaybackItem\n", p);
+                                        break;
+                                    }
+                                }
+                            }
+                        } @catch (...) {}
+                    }
+                    break;
+                }
+                r = r.nextResponder;
+                rd++;
             }
-            // Try KVC for controller
-            id controller = [v valueForKey:@"controller"];
-            if (controller && [controller respondsToSelector:curSel]) {
-                item = [controller performSelector:curSel];
-                if (item) break;
+        }
+
+        // Method 3: find AVPlayerLayer in VC's view
+        NSURL *directURL = nil;
+        if (!item) {
+            UIResponder *r = startView.nextResponder;
+            while (r && ![r isKindOfClass:[UIViewController class]]) r = r.nextResponder;
+            if (r && [r isKindOfClass:[UIViewController class]]) {
+                UIViewController *vc = (UIViewController *)r;
+                UIView *rv = vc.view;
+                // BFS for AVPlayerLayer
+                Class avPlayerLayerCls = NSClassFromString(@"AVPlayerLayer");
+                if (avPlayerLayerCls) {
+                    NSMutableArray *queue = [NSMutableArray arrayWithObject:rv];
+                    int d2 = 0;
+                    while (queue.count > 0 && d2 < 50) {
+                        UIView *c = [queue firstObject];
+                        [queue removeObjectAtIndex:0];
+                        @try {
+                            CALayer *playerLayer = nil;
+                            if ([c.layer isKindOfClass:avPlayerLayerCls]) {
+                                playerLayer = c.layer;
+                            }
+                            if (playerLayer) {
+                                // Use KVC to get player from layer
+                                id player = [playerLayer valueForKey:@"player"];
+                                if ([player respondsToSelector:@selector(currentItem)]) {
+                                    id avItem = [player performSelector:@selector(currentItem)];
+                                    SEL assetSel = sel_registerName("asset");
+                                    if ([avItem respondsToSelector:assetSel]) {
+                                        id asset = [avItem performSelector:assetSel];
+                                        SEL urlSel = sel_registerName("URL");
+                                        if ([asset respondsToSelector:urlSel]) {
+                                            directURL = (NSURL *)[asset performSelector:urlSel];
+                                            LOG("[dl/reel] M3: AVPlayerLayer URL found\n");
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        } @catch (...) {}
+                        for (UIView *s in c.subviews) [queue addObject:s];
+                        d2++;
+                    }
+                }
             }
-        } @catch (...) {}
-        v = v.superview;
-        depth++;
+        }
+
+        if (!item && !directURL) {
+            LOG("[dl/reel] no playback item AND no AVPlayerLayer URL found\n");
+            // Show error toast
+            [self showToast:@"❌ Không tìm thấy video"];
+            return;
+        }
+
+        NSURL *hd = nil, *sd = nil;
+        if (item) {
+            SEL hdSel = sel_registerName("HDPlaybackURL");
+            SEL sdSel = sel_registerName("SDPlaybackURL");
+            hd = [item respondsToSelector:hdSel] ? [item performSelector:hdSel] : nil;
+            sd = [item respondsToSelector:sdSel] ? [item performSelector:sdSel] : nil;
+        }
+        if (!hd && !sd && directURL) {
+            hd = directURL;  // fallback to direct URL
+        }
+        if (!hd && !sd) {
+            LOG("[dl/reel] no URLs found\n");
+            [self showToast:@"❌ Video chưa tải"];
+            return;
+        }
+        LOG("[dl/reel] downloading HD=%d SD=%d\n", hd != nil, sd != nil);
+        if (!g_videoHandler) g_videoHandler = [[GlowVideoDownloadHandler alloc] init];
+        // Visual feedback
+        UIButton *btn = (UIButton *)startView;
+        if ([btn isKindOfClass:[UIButton class]]) {
+            btn.enabled = NO;
+            btn.backgroundColor = [UIColor colorWithRed:0 green:0.7 blue:0 alpha:0.7];
+            [btn setTitle:@"✓" forState:UIControlStateNormal];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                btn.enabled = YES;
+                btn.backgroundColor = [UIColor colorWithWhite:0 alpha:0.25];
+                [btn setTitle:@"⬇" forState:UIControlStateNormal];
+            });
+        }
+        [self showToast:@"⬇ Đang tải..."];
+        if (hd) [g_videoHandler downloadVideoURL:hd quality:@"reel_hd"];
+        if (sd && sd != hd) [g_videoHandler downloadVideoURL:sd quality:@"reel_sd"];
+    } @catch (NSException *e) {
+        LOG("[dl/reel] exc: %s\n", e.reason.UTF8String);
     }
-    if (!item) { LOG("[dl/reel] no playback item found\n"); return; }
-    SEL hdSel = sel_registerName("HDPlaybackURL");
-    SEL sdSel = sel_registerName("SDPlaybackURL");
-    NSURL *hd = [item respondsToSelector:hdSel] ? [item performSelector:hdSel] : nil;
-    NSURL *sd = [item respondsToSelector:sdSel] ? [item performSelector:sdSel] : nil;
-    if (!hd && !sd) { LOG("[dl/reel] item has no URLs\n"); return; }
-    LOG("[dl/reel] downloading HD=%d SD=%d\n", hd != nil, sd != nil);
-    if (!g_videoHandler) g_videoHandler = [[GlowVideoDownloadHandler alloc] init];
-    if (hd) [g_videoHandler downloadVideoURL:hd quality:@"reel_hd"];
-    if (sd) [g_videoHandler downloadVideoURL:sd quality:@"reel_sd"];
-    // Visual feedback
-    sender.enabled = NO;
-    sender.backgroundColor = [UIColor colorWithRed:0 green:0.7 blue:0 alpha:0.7];
-    [sender setTitle:@"✓" forState:UIControlStateNormal];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        sender.enabled = YES;
-        sender.backgroundColor = [UIColor colorWithWhite:0 alpha:0.5];
-        [sender setTitle:@"⬇" forState:UIControlStateNormal];
+}
+
+// Simple toast
+- (void)showToast:(NSString *)msg {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            UIWindow *win = nil;
+            for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+                if ([s isKindOfClass:[UIWindowScene class]]) {
+                    for (UIWindow *w in ((UIWindowScene *)s).windows) {
+                        if (w.isKeyWindow) { win = w; break; }
+                    }
+                }
+                if (win) break;
+            }
+            if (!win) return;
+            UILabel *lbl = [[UILabel alloc] init];
+            lbl.text = msg;
+            lbl.textColor = [UIColor whiteColor];
+            lbl.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+            lbl.textAlignment = NSTextAlignmentCenter;
+            lbl.backgroundColor = [UIColor colorWithWhite:0 alpha:0.75];
+            lbl.layer.cornerRadius = 10;
+            lbl.layer.masksToBounds = YES;
+            lbl.numberOfLines = 0;
+            lbl.alpha = 0;
+            [win addSubview:lbl];
+            CGSize sz = [msg boundingRectWithSize:CGSizeMake(win.bounds.size.width - 80, 200)
+                                          options:NSStringDrawingUsesLineFragmentOrigin
+                                       attributes:@{NSFontAttributeName: lbl.font}
+                                          context:nil].size;
+            lbl.frame = CGRectMake((win.bounds.size.width - sz.width - 30) / 2,
+                                   win.bounds.size.height - 200,
+                                   sz.width + 30, sz.height + 18);
+            [UIView animateWithDuration:0.25 animations:^{ lbl.alpha = 1.0; }];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                [UIView animateWithDuration:0.25 animations:^{ lbl.alpha = 0; }
+                                 completion:^(BOOL ok) { [lbl removeFromSuperview]; }];
+            });
+        } @catch (...) {}
     });
 }
 @end
@@ -1372,7 +1545,8 @@ static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
         UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
         btn.frame = CGRectMake(btnX, btnY, btnW, btnH);
         btn.layer.cornerRadius = 0;  // square (matches native action buttons)
-        btn.backgroundColor = [UIColor colorWithRed:1.0 green:0.2 blue:0.2 alpha:0.85];
+        // v8.2.22: Transparent background (user feedback - look native)
+        btn.backgroundColor = [UIColor colorWithWhite:0 alpha:0.25];
         [btn setTitle:@"⬇" forState:UIControlStateNormal];
         [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
         btn.titleLabel.font = [UIFont systemFontOfSize:28 weight:UIFontWeightBold];
@@ -1380,6 +1554,13 @@ static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
         btn.accessibilityIdentifier = @"GlowReelButton";
         btn.layer.zPosition = 9999;
         [btn addTarget:g_reelButtonHandler action:@selector(onReelButtonTap:) forControlEvents:UIControlEventTouchUpInside];
+        // v8.2.22: also add UILongPress as backup in case tap is eaten
+        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
+            initWithTarget:g_reelButtonHandler action:@selector(onReelButtonLongPress:)];
+        lp.minimumPressDuration = 0.15;
+        lp.cancelsTouchesInView = NO;
+        lp.delaysTouchesBegan = NO;
+        [btn addGestureRecognizer:lp];
         [sideBar addSubview:btn];
         [sideBar bringSubviewToFront:btn];
         [g_mainSideBarsWithButton addObject:skey];
@@ -1668,7 +1849,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.21 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.22 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
