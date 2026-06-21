@@ -1317,6 +1317,53 @@ static NSMutableDictionary *g_urlCacheBySidebar = nil;
             LOG("[dl/reel] M0: per-sidebar cache HD=%d SD=%d for sidebar=%s\n",
                 hd != nil, sd != nil, class_getName(object_getClass(thisSideBar)));
         }
+        // v8.2.30: On tap, if per-sidebar cache is empty, FORCE-READ URL.
+        // Pre-warm in layoutSubviews may run BEFORE FB loads the URL.
+        // By the time user taps, video should be loaded - force-read now.
+        if (!hd && !sd) {
+            @try {
+                UIResponder *r = btnView.nextResponder;
+                int rd = 0;
+                while (r && rd < 8) {
+                    if ([r isKindOfClass:[UIViewController class]]) {
+                        UIViewController *vc = (UIViewController *)r;
+                        SEL curItemSel = sel_registerName("currentVideoPlaybackItem");
+                        if ([vc respondsToSelector:curItemSel]) {
+                            id item = [vc performSelector:curItemSel];
+                            if (item) {
+                                SEL hdSel = sel_registerName("HDPlaybackURL");
+                                SEL sdSel = sel_registerName("SDPlaybackURL");
+                                NSURL *hdURL = nil, *sdURL = nil;
+                                if ([item respondsToSelector:hdSel]) {
+                                    hdURL = [item performSelector:hdSel];
+                                }
+                                if ([item respondsToSelector:sdSel]) {
+                                    sdURL = [item performSelector:sdSel];
+                                }
+                                if (hdURL || sdURL) {
+                                    if (!g_urlCacheBySidebar) g_urlCacheBySidebar = [[NSMutableDictionary alloc] init];
+                                    NSMutableDictionary *entry = [NSMutableDictionary dictionary];
+                                    entry[@"HD"] = hdURL ?: [NSNull null];
+                                    entry[@"SD"] = sdURL ?: [NSNull null];
+                                    g_urlCacheBySidebar[sbKey] = entry;
+                                    hd = hdURL;
+                                    sd = sdURL;
+                                    LOG("[dl/reel] M0: FORCE-READ on tap: HD=%d SD=%d\n",
+                                        hd != nil, sd != nil);
+                                } else {
+                                    LOG("[dl/reel] M0: FORCE-READ returned nil URLs\n");
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    r = r.nextResponder;
+                    rd++;
+                }
+            } @catch (NSException *e) {
+                LOG("[dl/reel] M0: FORCE-READ exc: %s\n", e.reason.UTF8String);
+            }
+        }
         if (hd || sd) {
             // v8.2.29: Show action sheet for quality choice (1 tap = 1 download)
             // Match existing in-feed video long press behavior
@@ -2216,7 +2263,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.29 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.30 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
