@@ -353,18 +353,47 @@ frida -U -f com.facebook.Facebook6 --no-pause
 | Task | Linux | macOS |
 |------|-------|-------|
 | Build Theos tweak | ✅ Works | ✅ Works |
-| class-dump | ⚠️ Limited | ✅ Full |
+| class-dump | ⚠️ Limited (use `tools/dump_objc.py`) | ✅ Full |
 | Frida | ✅ Works | ✅ Works |
 | Static RE (Ghidra/IDA) | ✅ Ghidra | ✅ Both |
 | Build FLEX | ❌ Hard | ✅ Easy |
-| Build class-dump port | ❌ Hard | ✅ Easy |
+| Build class-dump port | ❌ Hard (use `tools/dump_objc.py`) | ✅ Easy |
 | iOS app build/test | ❌ Simulator only | ✅ Real device |
 
 **Recommendation:** Nếu nghiêm túc về iOS tweak dev, đầu tư 1 Mac (refurbished M1 Mac mini ~$300-400). Sẽ tiết kiệm hàng trăm giờ RE.
 
 ---
 
-## 10. References
+## 10. Custom Tools (Included in This Repo)
+
+`tools/` directory contains Python scripts do tụi mình viết để work-around limitations của standard tools:
+
+| Script | Purpose | Replaces |
+|--------|---------|----------|
+| `tools/dump_objc.py` | Dump ObjC class/method/ivar | `class-dump` (handles iOS 15+ chained fixups) |
+| `tools/binary_diff.py` | Compare 2 binary dumps | Manual diff |
+| `tools/strings_grep.py` | Smart string search | `strings \| grep` (with type filtering) |
+| `tools/extract_ipa.py` | Extract + analyze IPA | Manual unzip + plist read |
+
+**Read `tools/README.md` for full usage.**
+
+Quick example:
+```bash
+# Dump all classes with 'FBMemNewsFeedEdge' in name
+python3 tools/dump_objc.py /path/to/FBSharedFramework FBMemNewsFeedEdge
+
+# Search for sponsored-related symbols
+python3 tools/strings_grep.py /path/to/FBSharedFramework Sponsor --type=class
+
+# Compare 2 versions
+python3 tools/dump_objc.py old/fb > old.txt
+python3 tools/dump_objc.py new/fb > new.txt
+python3 tools/binary_diff.py old.txt new.txt
+```
+
+---
+
+## 11. References
 
 - [Theos setup](https://theos.dev/docs/installation)
 - [class-dump-iOS guide](https://github.com/limneos/classdump-dyld)
@@ -372,3 +401,4 @@ frida -U -f com.facebook.Facebook6 --no-pause
 - [Ghidra iOS RE](https://ghidra-sre.org/)
 - [leak-class-dump-iOS](https://github.com/lechium/classdumpios)
 - [iOS RE community](https://www.reddit.com/r/jailbreakdevelopers/)
+- [Custom tools in this repo](tools/README.md)
