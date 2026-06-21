@@ -393,7 +393,27 @@ static void openGlowSettings(void) {
 @implementation GlowLongPressHandler
 - (void)handleLongPress:(UILongPressGestureRecognizer *)gr {
     if (gr.state == UIGestureRecognizerStateBegan) {
-        LOG("[ui] long press detected on %s\n", class_getName(object_getClass(gr.view)));
+        // Log topmost VC for class discovery
+        UIViewController *topVC = nil;
+        for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+            if ([s isKindOfClass:[UIWindowScene class]]) {
+                UIWindowScene *ws = (UIWindowScene *)s;
+                for (UIWindow *w in ws.windows) {
+                    if (w.isKeyWindow && w.rootViewController) {
+                        UIViewController *cur = w.rootViewController;
+                        while (cur.presentedViewController) cur = cur.presentedViewController;
+                        topVC = cur;
+                        break;
+                    }
+                }
+            }
+        }
+        if (topVC) {
+            const char *cn = class_getName(object_getClass(topVC));
+            LOG("[ui] long press on %s (topVC=%s)\n", class_getName(object_getClass(gr.view)), cn);
+        } else {
+            LOG("[ui] long press on %s (no topVC)\n", class_getName(object_getClass(gr.view)));
+        }
         openGlowSettings();
     }
 }
@@ -1365,17 +1385,30 @@ static void hooked_viewDidAppear(id self, SEL _cmd, BOOL animated) {
             dispatch_async(dispatch_get_main_queue(), ^{ installHooks(); });
         }
     } else {
-        // Re-install long press for new VCs (catches push/pop, tab switches)
+        // Reinstall long press for new VCs (catches push/pop, tab switches)
         const char *cn = class_getName(object_getClass(self));
         if (cn && (strstr(cn, "ViewController") || strstr(cn, "View"))) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 @try { installLongPressOnCurrentUI(); } @catch (...) {}
             });
         }
-        // Reels discovery: log class name when user opens Reels-related VC
-        if (cn && strstr(cn, "Reel")) {
-            LOG("[reels] discovered VC: %s\n", cn);
-            // Walk the VC's view hierarchy looking for a video view
+        // Always log VC class (for class discovery) - filter out common ones
+        if (cn && (strstr(cn, "FB") || strstr(cn, "Feed") || strstr(cn, "Reel"))) {
+            // Skip common ones we already know
+            BOOL common = (strstr(cn, "NewsFeed") != NULL) ||
+                         (strstr(cn, "TopBar") != NULL) ||
+                         (strstr(cn, "Navigation") != NULL) ||
+                         (strstr(cn, "StackView") != NULL) ||
+                         (strstr(cn, "BottomSheet") != NULL) ||
+                         (strstr(cn, "Comment") != NULL) ||
+                         (strstr(cn, "Window") != NULL) ||
+                         (strstr(cn, "View") == NULL);
+            if (!common) {
+                LOG("[disc] VC: %s\n", cn);
+            }
+        }
+        // Reels discovery: try to find video view in this VC
+        if (cn) {
             @try {
                 UIViewController *vcSelf = (UIViewController *)self;
                 UIView *v = vcSelf.view;
@@ -1383,13 +1416,14 @@ static void hooked_viewDidAppear(id self, SEL _cmd, BOOL animated) {
                 // Walk children looking for a view that has a video item
                 NSMutableArray *queue = [NSMutableArray arrayWithObject:v];
                 int depth = 0;
-                while (queue.count > 0 && depth < 20) {
+                int foundCount = 0;
+                while (queue.count > 0 && depth < 25 && foundCount < 3) {
                     UIView *cur = [queue firstObject];
                     [queue removeObjectAtIndex:0];
-                    // Check if this view can give us a playback item
                     @try {
-                        if ([cur isKindOfClass:videoContainerCls]) {
-                            LOG("[reels] found VideoContainerView\n");
+                        if (videoContainerCls && [cur isKindOfClass:videoContainerCls]) {
+                            LOG("[reels] found VideoContainerView at depth %d\n", depth);
+                            foundCount++;
                         }
                     } @catch (...) {}
                     for (UIView *sub in cur.subviews) [queue addObject:sub];
@@ -1408,7 +1442,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.4 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.5 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
