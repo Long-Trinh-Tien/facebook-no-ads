@@ -474,7 +474,8 @@ static id hooked_node(id self, SEL _cmd) {
                 NSString *cs = (NSString *)cat;
                 if ([cs isEqualToString:@"SPONSORED"] ||
                     [cs isEqualToString:@"AD"] ||
-                    [cs isEqualToString:@"IN_STREAM_AD"]) {
+                    [cs isEqualToString:@"IN_STREAM_AD"] ||
+                    [cs isEqualToString:@"PROMOTION"]) {
                     node_blocked++;
                     if (node_blocked <= 3 || (node_blocked % 20) == 0) {
                         LOG("[ad/node] blocked SPONSORED edge (count=%d)\n", node_blocked);
@@ -553,7 +554,8 @@ static BOOL isAdEdge(id memEdge) {
                 NSString *cs = (NSString *)cat;
                 if ([cs isEqualToString:@"SPONSORED"] ||
                     [cs isEqualToString:@"AD"] ||
-                    [cs isEqualToString:@"IN_STREAM_AD"]) {
+                    [cs isEqualToString:@"IN_STREAM_AD"] ||
+                    [cs isEqualToString:@"PROMOTION"]) {
                     return YES;
                 }
             }
@@ -713,8 +715,65 @@ static void hooked_newsFeed_viewDidLoad(id self, SEL _cmd) {
 // Hook the NEW init signature: initWithThread:bucket:mediaViewDelegate:mediaViewGenerator:toolbox:shouldBlurMedia:
 // Add a long-press recognizer to the view (not a button - that crashed).
 
+@interface GlowToastView : UIView
+@property (nonatomic, strong) UILabel *label;
+@property (nonatomic, strong) UIActivityIndicatorView *spinner;
+@end
+@implementation GlowToastView
+- (instancetype)init {
+    if ((self = [super initWithFrame:CGRectZero])) {
+        self.backgroundColor = [UIColor colorWithWhite:0 alpha:0.85];
+        self.layer.cornerRadius = 20;
+        self.alpha = 0;
+        _label = [[UILabel alloc] init];
+        _label.textColor = [UIColor whiteColor];
+        _label.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+        _label.translatesAutoresizingMaskIntoConstraints = NO;
+        [self addSubview:_label];
+        _spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+        _spinner.color = [UIColor whiteColor];
+        _spinner.translatesAutoresizingMaskIntoConstraints = NO;
+        [_spinner startAnimating];
+        [self addSubview:_spinner];
+        [NSLayoutConstraint activateConstraints:@[
+            [_spinner.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:14],
+            [_spinner.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+            [_spinner.widthAnchor constraintEqualToConstant:18],
+            [_spinner.heightAnchor constraintEqualToConstant:18],
+            [_label.leadingAnchor constraintEqualToAnchor:_spinner.trailingAnchor constant:10],
+            [_label.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-14],
+            [_label.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+            [self.heightAnchor constraintEqualToConstant:40],
+        ]];
+    }
+    return self;
+}
+- (void)showInWindow:(UIWindow *)window text:(NSString *)text {
+    if (!window) return;
+    self.label.text = text;
+    [window addSubview:self];
+    self.translatesAutoresizingMaskIntoConstraints = NO;
+    [NSLayoutConstraint activateConstraints:@[
+        [self.centerXAnchor constraintEqualToAnchor:window.centerXAnchor],
+        [self.topAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.topAnchor constant:8],
+    ]];
+    [UIView animateWithDuration:0.25 animations:^{ self.alpha = 1.0; }];
+}
+- (void)updateText:(NSString *)text {
+    self.label.text = text;
+}
+- (void)dismissAfter:(NSTimeInterval)delay success:(BOOL)success {
+    [UIView animateWithDuration:0.25 delay:delay options:0 animations:^{
+        self.alpha = 0;
+    } completion:^(BOOL finished) {
+        [self.spinner stopAnimating];
+        [self removeFromSuperview];
+    }];
+}
+@end
+
 @interface GlowStoryDownloadHandler : NSObject
-@property (nonatomic, strong) UIAlertController *progressAlert;
+@property (nonatomic, strong) GlowToastView *toast;
 @end
 @implementation GlowStoryDownloadHandler
 
@@ -861,58 +920,33 @@ static void hooked_newsFeed_viewDidLoad(id self, SEL _cmd) {
         }
     }
     if (!win) win = [UIApplication sharedApplication].keyWindow;
-    UIViewController *top = win.rootViewController;
-    while (top.presentedViewController) top = top.presentedViewController;
-    if (!top) return;
-    self.progressAlert = [UIAlertController alertControllerWithTitle:@"Đang tải..."
-                                                                message:@"0%"
-                                                         preferredStyle:UIAlertControllerStyleAlert];
-    [top presentViewController:self.progressAlert animated:YES completion:nil];
+    if (!win) return;
+    // Non-modal toast at top of screen - doesn't block user
+    self.toast = [[GlowToastView alloc] init];
+    [self.toast showInWindow:win text:@"Đang tải... 0%"];
 }
 
 - (void)updateProgress:(double)fraction {
-    if (!self.progressAlert) return;
+    if (!self.toast) return;
     int pct = (int)(fraction * 100);
-    self.progressAlert.message = [NSString stringWithFormat:@"%d%%", pct];
+    [self.toast updateText:[NSString stringWithFormat:@"Đang tải... %d%%", pct]];
 }
 
 - (void)dismissProgressWithTitle:(NSString *)title message:(NSString *)msg success:(BOOL)ok {
-    if (self.progressAlert) {
-        [self.progressAlert dismissViewControllerAnimated:YES completion:nil];
-        self.progressAlert = nil;
-    }
     // Haptic feedback
-    if (ok) {
-        UINotificationFeedbackGenerator *gen = [[UINotificationFeedbackGenerator alloc] init];
-        [gen prepare];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.1 * NSEC_PER_SEC),
-                       dispatch_get_main_queue(), ^{ [gen notificationOccurred:UINotificationFeedbackTypeSuccess]; });
-    } else {
-        UINotificationFeedbackGenerator *gen = [[UINotificationFeedbackGenerator alloc] init];
-        [gen prepare];
-        [gen notificationOccurred:UINotificationFeedbackTypeError];
-    }
-    // Show result alert
-    UIWindow *win = nil;
-    for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
-        if ([s isKindOfClass:[UIWindowScene class]]) {
-            UIWindowScene *ws = (UIWindowScene *)s;
-            for (UIWindow *w in ws.windows) { if (w.isKeyWindow) { win = w; break; } }
-            if (win) break;
-        }
-    }
-    if (!win) win = [UIApplication sharedApplication].keyWindow;
-    UIViewController *top = win.rootViewController;
-    while (top.presentedViewController) top = top.presentedViewController;
-    if (!top) return;
-    UIAlertController *done = [UIAlertController alertControllerWithTitle:title
-                                                                  message:msg
-                                                           preferredStyle:UIAlertControllerStyleAlert];
-    [done addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.3 * NSEC_PER_SEC),
+    UINotificationFeedbackGenerator *gen = [[UINotificationFeedbackGenerator alloc] init];
+    [gen prepare];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.1 * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{
-        [top presentViewController:done animated:YES completion:nil];
+        [gen notificationOccurred:ok ? UINotificationFeedbackTypeSuccess : UINotificationFeedbackTypeError];
     });
+    if (self.toast) {
+        // Show final state in same toast, then auto-dismiss
+        [self.toast updateText:ok ? [NSString stringWithFormat:@"✓ %@", title] : [NSString stringWithFormat:@"✗ %@", title]];
+        [self.toast.spinner stopAnimating];
+        [self.toast dismissAfter:2.0 success:ok];
+        self.toast = nil;
+    }
 }
 
 - (void)downloadURL:(NSURL *)url toFileName:(NSString *)name {
@@ -1374,7 +1408,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.3 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.4 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
