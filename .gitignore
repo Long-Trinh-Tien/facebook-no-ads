@@ -6,3 +6,5 @@ packages/
 *.deb
 *.ipa
 .theos/
+r4/.theos/
+r4/packages/
