@@ -1542,15 +1542,17 @@ static BOOL isInReelsFullScreen(UIView *sideBar) {
         Class cls = object_getClass(cur);
         const char *name = class_getName(cls);
         if (name) {
-            // REJECT: comment / sheet / attachment contexts
+            // REJECT first: any comment / sheet context
             if (strstr(name, "FBComment") != NULL) return NO;
             if (strstr(name, "FBBottomSheet") != NULL) return NO;
             if (strstr(name, "FBFeedAttachment") != NULL) return NO;
             if (strstr(name, "AttachmentView") != NULL) return NO;
             if (strstr(name, "FBStory") != NULL) return NO;
             if (strstr(name, "FBSnacks") != NULL) return NO;
-            // ACCEPT: found the Reels-only overlay (EXACT class match)
-            if (strcmp(name, "FBShortsViewerOverlayComponentView") == 0) return YES;
+            // ACCEPT: Reels-only markers (use strstr to be tolerant)
+            if (strstr(name, "FBShortsViewerOverlayComponentView") != NULL) return YES;
+            if (strstr(name, "FBShortsCustomHitTestView") != NULL) return YES;
+            if (strstr(name, "FBShortsSurfaceView") != NULL) return YES;
         }
         cur = cur.superview;
         depth++;
@@ -1558,7 +1560,7 @@ static BOOL isInReelsFullScreen(UIView *sideBar) {
     return NO;  // default: not in Reels full-screen
 }
 
-// Find the FBShortsViewerOverlayComponentView (EXACT class match) - the
+// Find the FBShortsViewerOverlayComponentView (strstr match) - the
 // Reels-only parent that contains the sidebar. Returns nil if not found.
 static UIView *findReelsOverlay(UIView *sideBar) {
     UIView *cur = sideBar.superview;
@@ -1566,7 +1568,7 @@ static UIView *findReelsOverlay(UIView *sideBar) {
     while (cur && depth < 30) {
         Class cls = object_getClass(cur);
         const char *name = class_getName(cls);
-        if (name && strcmp(name, "FBShortsViewerOverlayComponentView") == 0) {
+        if (name && strstr(name, "FBShortsViewerOverlayComponentView") != NULL) {
             return cur;
         }
         cur = cur.superview;
@@ -1940,7 +1942,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.25 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.26 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
