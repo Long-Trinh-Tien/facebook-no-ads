@@ -1,15 +1,20 @@
 # RE Tools — Custom Python Scripts
 
-> Python scripts do tụi mình viết để work-around các limitations của tools có sẵn.
-> Đặc biệt hữu ích cho iOS 15+ binaries với `LC_DYLD_CHAINED_FIXUPS` mà class-dump cũ không xử lý được.
+> ⚠️ **IMPORTANT:** For iOS 15+ binaries with `LC_DYLD_CHAINED_FIXUPS`, these tools have
+> **LIMITED RELIABILITY**. Different pointers use different slide prefixes (0x10000, 0x40000, 0x5118001, etc.),
+> making full static parsing difficult without a proper Mach-O library.
+>
+> **RECOMMENDED:** Use the **runtime verifier** (`glow_verify.ipa` from R3.0-verify) for
+> reliable class/method discovery. The Python tools are useful for quick checks and
+> string searches.
 
 ## Tools
 
-### 1. `dump_objc.py` — Dump ObjC class/method/ivar info
+### 1. `dump_objc.py` — Dump ObjC class/method/ivar info (partial)
 
-**Vấn đề giải quyết:** `class-dump` (nygard) không work với iOS 15+ binaries do `LC_DYLD_CHAINED_FIXUPS`. `lechium/classdumpios` cần macOS để build.
+**Vấn đề giải quyết:** `class-dump` (nygard) không work với iOS 15+ binaries do `LC_DYLD_CHAINED_FIXUPS`. `lechium/classdumpios` cần macOS.
 
-**Solution:** Custom parser handle pre-rebased pointers (high bits 0x10000, 0x40000) mà không cần macOS.
+**Solution:** Custom parser với multiple slide prefix handling.
 
 **Usage:**
 ```bash
@@ -21,37 +26,30 @@ python3 dump_objc.py /path/to/binary FBFeedUnit
 
 # Find classes with specific method (use * prefix)
 python3 dump_objc.py /path/to/binary "*asFBFeedUnitIsSponsoredGraphQL"
-
-# Save to file
-python3 dump_objc.py /path/to/binary FBFeedUnit > feedunit_headers.txt
 ```
 
-**Output example:**
-```
-=== ObjC Dump: FBSharedFramework ===
-Total classes: 22297
+**Limitations:**
+- iOS 15+ binaries may have classes with names that don't show in dump
+- Methods/ivars may be incomplete
+- For best results, use runtime verifier
 
-=== Classes with 'FBMemNewsFeedEdge' in name ===
-
-@interface FBMemNewsFeedEdge
-
-Total: 1 matches
-```
+**Best Use Case:** Quick check if a class/method exists, search for keywords.
 
 ---
 
-### 2. `binary_diff.py` — Compare 2 binary dumps
+### 2. `binary_diff.py` — Compare 2 binary dumps (works if dumps are valid)
 
-**Vấn đề giải quyết:** Khi FB update, cần biết classes/methods nào thay đổi để update tweak.
+**Vấn đề giải quyết:** Khi FB update, cần biết classes/methods nào thay đổi.
 
 **Usage:**
 ```bash
-# 1. Dump 2 versions
-python3 dump_objc.py old/FBSharedFramework > old_dump.txt
-python3 dump_objc.py new/FBSharedFramework > new_dump.txt
+# 1. Get dumps (use runtime verifier for best results)
+#    Or if you have valid dump_objc output:
+python3 dump_objc.py old/FBSharedFramework > old.txt
+python3 dump_objc.py new/FBSharedFramework > new.txt
 
 # 2. Compare
-python3 binary_diff.py old_dump.txt new_dump.txt
+python3 binary_diff.py old.txt new.txt
 ```
 
 **Output example:**
@@ -64,30 +62,17 @@ New: 22300 classes
   - FBMemFeedStory
   - FBVideoChannelPlaylistItem
 
-=== ADDED CLASSES (5) ===
-  + FBMemNewFeedUnit
-  + FBNewAdType
-  ...
-
-=== METHOD CHANGES (3 classes) ===
-
-  FBMemNewsFeedEdge:
-    - initWithFBTree:
-    + node
-    + deduplicationKey
-    + category
-
 === SUMMARY ===
 Removed: 2 classes
 Added: 5 classes
-Modified: 3 classes (method/ivar)
+Modified: 3 classes
 ```
 
 ---
 
-### 3. `strings_grep.py` — Smart string search
+### 3. `strings_grep.py` — Smart string search (RECOMMENDED — works well)
 
-**Vấn đề giải quyết:** Raw `strings | grep` returns too much noise. Cần filter theo type (class name, method name).
+**Vấn đề giải quyết:** Raw `strings | grep` returns too much noise. Cần filter theo type.
 
 **Usage:**
 ```bash
@@ -99,9 +84,6 @@ python3 strings_grep.py /path/to/binary Sponsor --type=class
 
 # Only method names
 python3 strings_grep.py /path/to/binary asFB --type=method
-
-# Custom min length and limit
-python3 strings_grep.py /path/to/binary Snacks --min-len 5 --limit 50
 ```
 
 **Output:**
@@ -114,15 +96,16 @@ Found 23 matches (showing first 23):
   [C] FBSnacksMediaContainerView
   [C] FBSnacksPhotoView
   [C] FBSnacksWebPhotoView
-  [C] FBSnacksNewVideoView
   [M] initWithThread:bucket:mediaViewDelegate:mediaViewGenerator:toolbox:shouldBlurMedia:
   [M] _sendSeenThreadIDsWithBucket:session:
   ...
 ```
 
+**Why this works:** Just searches ASCII strings, doesn't need pointer resolution.
+
 ---
 
-### 4. `extract_ipa.py` — Extract and analyze IPA
+### 4. `extract_ipa.py` — Extract and analyze IPA (RECOMMENDED — works well)
 
 **Vấn đề giải quyết:** Manual `unzip + find binary + read plist` is repetitive.
 
@@ -139,89 +122,91 @@ Extracting facebook.ipa → my_work_dir/...
 App: my_work_dir/Payload/Facebook.app
 
 === App Info ===
-  Bundle ID: com.facebook.Facebook6
+  Bundle ID: com.facebook.Facebook
   Name: Facebook
-  Display Name: Facebook
   Version: 560.1.0
-  Build: 555107060
+  Build: 963085760
   Min iOS: 15.1
-  Executable: Facebook
 
-=== Main Binary ===
-  Path: my_work_dir/Payload/Facebook.app/Facebook
-  Size: 10.7 MB
-  Arch: arm64 (Mach-O 64-bit)
-
-=== Frameworks (54) ===
-  FBSharedFramework.framework (83.6 MB)
-  FBAuthenticationFramework.framework (5.1 MB)
-  ...
-
-=== Next steps ===
-  1. Class dump main binary:
-     python3 tools/dump_objc.py my_work_dir/Payload/Facebook.app/Facebook
+=== Frameworks (10) ===
+  FBCameraFramework.framework (63.3 MB)
   ...
 ```
 
 ---
 
-## Workflow Example
+## Recommended Workflow
 
-Phân tích FB 561.0.0 sau khi update (chưa có tweak):
+For FB 560.x binaries (iOS 15+), the recommended approach is:
 
-```bash
-# Step 1: Get IPA from App Store (or test version)
-ls ~/Downloads/facebook_561.ipa
-
-# Step 2: Extract and get info
-python3 tools/extract_ipa.py ~/Downloads/facebook_561.ipa fb561
-# → Get Bundle ID, version, frameworks list
-
-# Step 3: Compare with last known version
-mkdir -p ~/glow-snapshots
-python3 tools/extract_ipa.py ~/glow-snapshots/560.0/facebook.ipa fb560
-python3 tools/dump_objc.py fb560/Payload/Facebook.app/Frameworks/FBSharedFramework.framework/FBSharedFramework FBFeedUnit > fb560_feedunit.txt
-python3 tools/dump_objc.py fb561/Payload/Facebook.app/Frameworks/FBSharedFramework.framework/FBSharedFramework FBFeedUnit > fb561_feedunit.txt
-python3 tools/binary_diff.py fb560_feedunit.txt fb561_feedunit.txt
-# → See what changed
-
-# Step 4: Search for new symbols
-python3 tools/strings_grep.py fb561/Payload/Facebook.app/Frameworks/FBSharedFramework.framework/FBSharedFramework Sponsor
-
-# Step 5: Update Tweak.x based on findings
-# (See UPDATE_GUIDE.md for full workflow)
-
-# Step 6: Build and test
-THEOS=/home/tommy/theos make package FINALPACKAGE=1
-cyan -i ~/Downloads/facebook_561.ipa -o glow_v7.ipa -f ./packages/...deb --overwrite -s -d
 ```
+1. EXTRACT (extract_ipa.py)         → Get binary, version, frameworks
+       ↓
+2. STATIC SEARCH (strings_grep.py)  → Find class/method names
+       ↓
+3. STATIC DUMP (dump_objc.py)        → Best-effort class/method list
+       ↓
+4. RUNTIME VERIFY (Tweak.x)          → DEFINITIVE answer
+       ↓
+5. BUILD TWEAK based on verified APIs
+```
+
+For other binaries (older iOS, different apps), the tools may work fully.
 
 ---
 
-## Why Custom Tools?
+## Why Custom Tools Don't Fully Work for iOS 15+
 
-**Standard tools have issues with iOS 15+:**
+The iOS 15+ `LC_DYLD_CHAINED_FIXUPS` feature uses different slide prefixes for different data:
 
-| Tool | Issue | Workaround |
-|------|-------|-----------|
-| `class-dump` (nygard) | No iOS 15+ chained fixups support | Use `dump_objc.py` |
-| `class-dump-z` | Same as above | Same |
-| `leak-classdumpios` | macOS only | Use `dump_objc.py` on Linux |
-| `otool` (Apple) | macOS only | Use `objdump` or `r2` |
-| `leak-jtool` | macOS only | Build from source or use `r2` |
-| `frida` | Needs jailbreak | Use custom runtime tracer |
-| `FLEX` | View actions crash | Use `dump_objc.py` for static |
+| Data type | Common slide prefix |
+|-----------|---------------------|
+| `__objc_classlist` entries | `0x10000` |
+| `class_ro_t` data | `0x40000` |
+| `class_ro_t` name | `0x5118001000000` (varies!) |
+| Method list | `0x20000` |
+| String pointers (in `__objc_methname`) | `0x10000` |
 
-**These custom tools work on Linux + handle iOS 15+ binaries.**
+A proper Mach-O library (lief, macholib) should handle these, but they fail on iOS 15+ chained fixups.
+
+**Solution:** Use the **runtime verifier** (Tweak.x that lists classes at runtime) for definitive results. The runtime already resolves all pointers correctly because ObjC runtime knows the load address.
+
+---
+
+## Tools Status Summary
+
+| Tool | Status | Use case |
+|------|--------|----------|
+| `dump_objc.py` | ⚠️ Partial | Quick check (incomplete for iOS 15+) |
+| `binary_diff.py` | ✅ Works if dumps valid | Compare 2 dumps |
+| `strings_grep.py` | ✅ Works well | Search symbols |
+| `extract_ipa.py` | ✅ Works well | Extract + info |
+
+---
+
+## Best Alternative: Runtime Verifier
+
+For definitive class/method discovery on iOS 15+ binaries, use the runtime verifier built earlier:
+
+**Source:** `glow-verify/Tweak.x` (in `~/test/glow/glow-verify/`)
+**IPA:** `~/test/glow/glow_verify.ipa`
+**Output:** `/var/mobile/Documents/glow_verify.txt`
+
+This Tweak runs in the actual app context, so all pointers resolve correctly. Used to discover:
+- FBMemNewsFeedEdge (3 methods: node, deduplicationKey, category)
+- FBSnacksBucketsSeenStateManager (6 methods, including _sendSeenThreadIDsWithBucket:session:)
+- FBSnacksMediaContainerView (17 methods)
+- FBVideoOverlayPluginComponentBackgroundView (8 methods)
+- 13+ other target classes verified
+
+See `BUILD_GUIDE.md` and `INVESTIGATION_GUIDE.md` for full details.
 
 ---
 
 ## Python Requirements
 
 ```bash
-pip3 install --break-system-packages \
-    lief \  # Optional - for additional Mach-O parsing
-    capstone \  # Optional - for disassembly
+pip3 install --break-system-packages lief
 ```
 
 Built-in `struct` and `plistlib` are enough for basic usage.
@@ -232,14 +217,5 @@ Built-in `struct` and `plistlib` are enough for basic usage.
 
 - **Python:** 3.6+
 - **OS:** Linux, macOS, WSL
-- **iOS binary versions:** 12+ (including 15+ with chained fixups)
-- **Architectures:** arm64, arm64e (some pointers may be stripped incorrectly)
-
----
-
-## See Also
-
-- [TOOLS_INSTALL.md](../TOOLS_INSTALL.md) — Install standard RE tools
-- [INVESTIGATION_GUIDE.md](../INVESTIGATION_GUIDE.md) — Full RE methodology
-- [UPDATE_GUIDE.md](../UPDATE_GUIDE.md) — How to update tweak for new FB versions
-- [BUILD_GUIDE.md](../BUILD_GUIDE.md) — How to build the tweak
+- **iOS binary versions:** 12-14 (fully), 15+ (partial — strings_grep + extract_ipa work)
+- **Architectures:** arm64, arm64e
