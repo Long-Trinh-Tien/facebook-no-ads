@@ -1245,6 +1245,154 @@ static NSDate *g_cachedAt = nil;
 static IMP orig_HDPlaybackURL = NULL;
 static IMP orig_SDPlaybackURL = NULL;
 
+// v8.2.32: Glow-style class enumeration + setVideoItem: hook.
+// Cache mapping VC_instance -> {HD, SD, item, time}.
+// Key: NSValue (non-retained pointer to VC).
+// Value: NSDictionary with @"HD"/@"SD" (NSURL* or NSNull), @"item" (FBVideoPlaybackItem),
+//        @"at" (NSDate).
+// This solves the "wrong Reel" problem: each VC has its OWN URL.
+static NSMutableDictionary *g_vcToURLDict = nil;
+static int g_glowStyleInstalled = 0;
+
+// v8.2.32: setVideoItem: hook implementation. Called when FB sets a new
+// video item on the Reels player VC. We capture the URL here because this
+// is the EXACT moment when player switches to a new Reel.
+static IMP orig_setVideoItem = NULL;
+static void hooked_setVideoItem(id self, SEL _cmd, id newItem) {
+    if (orig_setVideoItem) {
+        typedef void (*FnType)(id, SEL, id);
+        FnType fn = (FnType)(uintptr_t)orig_setVideoItem;
+        fn(self, _cmd, newItem);
+    }
+    @try {
+        if (!self || !newItem) return;
+        if (!g_vcToURLDict) g_vcToURLDict = [[NSMutableDictionary alloc] init];
+        NSValue *key = [NSValue valueWithNonretainedObject:self];
+        // Read HD/SD from newItem
+        NSURL *hd = nil, *sd = nil;
+        SEL hdSel = sel_registerName("HDPlaybackURL");
+        SEL sdSel = sel_registerName("SDPlaybackURL");
+        if ([newItem respondsToSelector:hdSel]) {
+            hd = [newItem performSelector:hdSel];
+        }
+        if ([newItem respondsToSelector:sdSel]) {
+            sd = [newItem performSelector:sdSel];
+        }
+        NSMutableDictionary *entry = [NSMutableDictionary dictionary];
+        entry[@"HD"] = hd ?: [NSNull null];
+        entry[@"SD"] = sd ?: [NSNull null];
+        entry[@"item"] = newItem;
+        entry[@"at"] = [NSDate date];
+        g_vcToURLDict[key] = entry;
+        LOG("[dl/reel] setVideoItem: VC=%s item=%s HD=%s SD=%s\n",
+            class_getName(object_getClass(self)),
+            class_getName(object_getClass(newItem)),
+            hd ? "YES" : "NO",
+            sd ? "YES" : "NO");
+    } @catch (NSException *e) {
+        LOG("[dl/reel] setVideoItem exc: %s\n", e.reason.UTF8String);
+    }
+}
+
+// v8.2.32: currentVideoPlaybackItem GETTER hook. Some FB versions use
+// KVO on this property to detect Reel changes. Capturing the URL when
+// this getter is called is also reliable (FB reads it to update UI).
+static IMP orig_currentVideoPlaybackItem = NULL;
+static id hooked_currentVideoPlaybackItem(id self, SEL _cmd) {
+    id item = nil;
+    if (orig_currentVideoPlaybackItem) {
+        typedef id (*FnType)(id, SEL);
+        item = ((FnType)orig_currentVideoPlaybackItem)(self, _cmd);
+    }
+    @try {
+        if (!self || !item) return item;
+        if (!g_vcToURLDict) g_vcToURLDict = [[NSMutableDictionary alloc] init];
+        // Don't overwrite setVideoItem's cache (which is more reliable)
+        NSValue *key = [NSValue valueWithNonretainedObject:self];
+        if (g_vcToURLDict[key]) return item;  // already cached
+        NSURL *hd = nil, *sd = nil;
+        SEL hdSel = sel_registerName("HDPlaybackURL");
+        SEL sdSel = sel_registerName("SDPlaybackURL");
+        if ([item respondsToSelector:hdSel]) hd = [item performSelector:hdSel];
+        if ([item respondsToSelector:sdSel]) sd = [item performSelector:sdSel];
+        NSMutableDictionary *entry = [NSMutableDictionary dictionary];
+        entry[@"HD"] = hd ?: [NSNull null];
+        entry[@"SD"] = sd ?: [NSNull null];
+        entry[@"item"] = item;
+        entry[@"at"] = [NSDate date];
+        g_vcToURLDict[key] = entry;
+        LOG("[dl/reel] currentVideoPlaybackItem: VC=%s item=%s\n",
+            class_getName(object_getClass(self)),
+            class_getName(object_getClass(item)));
+    } @catch (NSException *e) {
+        LOG("[dl/reel] currentVideoPlaybackItem exc: %s\n", e.reason.UTF8String);
+    }
+    return item;
+}
+
+// v8.2.32: installGlowStyleReelsHook - enumerate FB classes, find those
+// that have setVideoItem: and currentVideoPlaybackItem, swizzle them.
+// Called from installHooks() (deferred init, after FB is loaded).
+void installGlowStyleReelsHook(void) {
+    if (g_glowStyleInstalled) return;
+    @try {
+        int count = objc_getClassList(NULL, 0);
+        if (count <= 0) {
+            LOG("[dl/reel] objc_getClassList returned %d\n", count);
+            return;
+        }
+        Class *classes = (__unsafe_unretained Class *)malloc(sizeof(Class) * count);
+        objc_getClassList(classes, count);
+
+        int setVideoItemHooked = 0;
+        int cvpiHooked = 0;
+        SEL setSel = sel_registerName("setVideoItem:");
+        SEL getSel = sel_registerName("currentVideoPlaybackItem");
+        for (int i = 0; i < count; i++) {
+            Class cls = classes[i];
+            if (!cls) continue;
+            const char *name = class_getName(cls);
+            if (!name) continue;
+            // Only FB classes
+            if (strncmp(name, "FB", 2) != 0) continue;
+
+            // Hook setVideoItem: setter
+            if (class_respondsToSelector(cls, setSel)) {
+                Method m = class_getInstanceMethod(cls, setSel);
+                if (m) {
+                    // If we haven't hooked any setVideoItem: yet, save the original
+                    if (!orig_setVideoItem) {
+                        orig_setVideoItem = method_getImplementation(m);
+                    }
+                    // Always replace (the original is the same across all classes)
+                    method_setImplementation(m, (IMP)hooked_setVideoItem);
+                    setVideoItemHooked++;
+                }
+            }
+
+            // Hook currentVideoPlaybackItem getter
+            if (class_respondsToSelector(cls, getSel)) {
+                Method m = class_getInstanceMethod(cls, getSel);
+                if (m) {
+                    if (!orig_currentVideoPlaybackItem) {
+                        orig_currentVideoPlaybackItem = method_getImplementation(m);
+                    }
+                    method_setImplementation(m, (IMP)hooked_currentVideoPlaybackItem);
+                    cvpiHooked++;
+                }
+            }
+        }
+        free(classes);
+        g_glowStyleInstalled = 1;
+        LOG("[dl/reel] Glow-style hooks installed: setVideoItem:=%d currentVideoPlaybackItem=%d\n",
+            setVideoItemHooked, cvpiHooked);
+    } @catch (NSException *e) {
+        LOG("[dl/reel] installGlowStyleReelsHook exc: %s\n", e.reason.UTF8String);
+    } @catch (...) {
+        LOG("[dl/reel] installGlowStyleReelsHook exc(c++)\n");
+    }
+}
+
 // v8.2.29: Per-sidebar URL cache. Key = sidebar instance, Value = NSDictionary
 // with HD/SD URLs. Solves:
 // - "download next Reel": URL was global, didn't change when user scrolled
@@ -1300,16 +1448,56 @@ static NSMutableDictionary *g_urlCacheBySidebar = nil;
     @try {
         SEL curSel = sel_registerName("currentVideoPlaybackItem");
         id item = nil;
+        UIView *btnView = (UIView *)startView;
+        UIView *thisSideBar = btnView.superview;
+        NSValue *sbKey = [NSValue valueWithNonretainedObject:thisSideBar];
+        NSURL *hd = nil, *sd = nil;
+
+        // v8.2.32: Method -1 (HIGHEST PRIORITY) - check GLOW-style per-VC cache
+        // The cache is keyed by VC instance. Walk up nextResponder to find VC,
+        // then look up the URL captured by setVideoItem: hook.
+        // This is the MOST RELIABLE method because setVideoItem: fires ONLY
+        // when FB switches to a new Reel (not for preloads).
+        @try {
+            UIResponder *r = btnView.nextResponder;
+            int rd = 0;
+            UIViewController *vcForCache = nil;
+            while (r && rd < 8) {
+                if ([r isKindOfClass:[UIViewController class]]) {
+                    vcForCache = (UIViewController *)r;
+                    break;
+                }
+                r = r.nextResponder;
+                rd++;
+            }
+            if (vcForCache && g_vcToURLDict) {
+                NSValue *vcKey = [NSValue valueWithNonretainedObject:vcForCache];
+                NSDictionary *entry = g_vcToURLDict[vcKey];
+                if (entry) {
+                    id hdObj = entry[@"HD"];
+                    id sdObj = entry[@"SD"];
+                    if (hdObj && hdObj != [NSNull null] && [hdObj isKindOfClass:[NSURL class]]) hd = (NSURL *)hdObj;
+                    if (sdObj && sdObj != [NSNull null] && [sdObj isKindOfClass:[NSURL class]]) sd = (NSURL *)sdObj;
+                    id entryItem = entry[@"item"];
+                    LOG("[dl/reel] M-1: VC cache hit VC=%s HD=%d SD=%d item=%s\n",
+                        class_getName(object_getClass(vcForCache)),
+                        hd != nil, sd != nil,
+                        entryItem ? class_getName(object_getClass(entryItem)) : "nil");
+                } else {
+                    LOG("[dl/reel] M-1: VC cache miss for VC=%s (dict has %lu entries)\n",
+                        class_getName(object_getClass(vcForCache)),
+                        (unsigned long)g_vcToURLDict.count);
+                }
+            }
+        } @catch (NSException *e) {
+            LOG("[dl/reel] M-1: VC cache lookup exc: %s\n", e.reason.UTF8String);
+        }
 
         // v8.2.29: Method 0 - check PER-SIDEBAR cached URL
         // Key = sidebar instance the URL was captured for. This prevents
         // downloading wrong Reel when FB preloads next Reel in background.
-        UIView *btnView = (UIView *)startView;
-        UIView *thisSideBar = btnView.superview;
-        NSValue *sbKey = [NSValue valueWithNonretainedObject:thisSideBar];
         NSDictionary *cached = g_urlCacheBySidebar[sbKey];
-        NSURL *hd = nil, *sd = nil;
-        if (cached) {
+        if (!hd && !sd && cached) {
             id hdObj = cached[@"HD"];
             id sdObj = cached[@"SD"];
             if (hdObj && hdObj != [NSNull null] && [hdObj isKindOfClass:[NSURL class]]) hd = (NSURL *)hdObj;
@@ -2183,6 +2371,24 @@ static void installHooks(void) {
             } else {
                 LOG("  FBVideoPlaybackItem NOT FOUND\n");
             }
+
+            // Hook #13 (v8.2.32): GLOW-STYLE CLASS ENUMERATION + setVideoItem: SETTER
+            // From analysis of original Glow.dylib (v1.3.1 from dayanch96):
+            //   - Glow has ZERO hardcoded FB class names in its binary
+            //   - Glow uses MSHookMessageEx to swizzle class methods
+            //   - Glow swizzles 'setVideoItem:' setter on Reels VCs
+            //   - When FB calls setVideoItem with new item, the URL is captured
+            //   - This fires EXACTLY when player switches to new Reel (not preload)
+            //
+            // Our approach: enumerate all classes via objc_getClassList,
+            // find FB classes that respond to setVideoItem:, swizzle the setter.
+            // The setter captures: (vc=self, item=newItem, url=item.HDPlaybackURL)
+            // We cache the URL keyed by VC instance pointer.
+            //
+            // v8.2.32 also hooks 'currentVideoPlaybackItem' GETTER (alternative path)
+            // because some FB versions use property KVO instead of explicit setter.
+            extern void installGlowStyleReelsHook(void);
+            installGlowStyleReelsHook();
         }
 
         LOG("=== Done ===\n");
@@ -2279,7 +2485,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.31 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.32 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
