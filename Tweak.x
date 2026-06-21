@@ -1288,6 +1288,7 @@ static NSMutableSet *g_reelsViewsWithButton = nil;
 @end
 static GlowReelButtonHandler *g_reelButtonHandler = nil;
 
+// Rename to viewDidAppear hook (fires after view is laid out)
 static void hooked_reelsViewDidLoad(id self, SEL _cmd) {
     if (orig_reelsViewDidLoad) {
         typedef void (*FnType)(id, SEL);
@@ -1301,29 +1302,35 @@ static void hooked_reelsViewDidLoad(id self, SEL _cmd) {
         UIView *v = (UIView *)self;
         if (![v isKindOfClass:[UIView class]]) return;
         if ([g_reelsViewsWithButton containsObject:[NSValue valueWithNonretainedObject:v]]) return;
-        [g_reelsViewsWithButton addObject:[NSValue valueWithNonretainedObject:v]];
-        // Wait for view to layout
-        dispatch_async(dispatch_get_main_queue(), ^{
+        // Use dispatch_after to wait for layout to complete
+        // viewDidLoad fires BEFORE layout, so bounds might be 0
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
             @try {
+                // Get screen bounds as fallback
+                CGRect screenBounds = [UIScreen mainScreen].bounds;
                 CGFloat W = v.bounds.size.width;
                 CGFloat H = v.bounds.size.height;
+                if (W < 100) W = screenBounds.size.width;
+                if (H < 100) H = screenBounds.size.height;
                 if (W < 100 || H < 100) return;
-                // Reels UI has action buttons on right side around y=300-500 area
-                // Add a download button at bottom-right (above tab bar)
+                if ([g_reelsViewsWithButton containsObject:[NSValue valueWithNonretainedObject:v]]) return;
+                [g_reelsViewsWithButton addObject:[NSValue valueWithNonretainedObject:v]];
                 CGFloat btnSize = 44;
                 CGFloat btnX = W - btnSize - 16;
-                CGFloat btnY = H - 120;  // above tab bar
+                CGFloat btnY = H - 200;  // above tab bar + safe area
                 UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
                 btn.frame = CGRectMake(btnX, btnY, btnSize, btnSize);
                 btn.layer.cornerRadius = btnSize/2;
-                btn.backgroundColor = [UIColor colorWithWhite:0 alpha:0.5];
+                btn.backgroundColor = [UIColor colorWithRed:1.0 green:0.3 blue:0.3 alpha:0.9];
                 [btn setTitle:@"⬇" forState:UIControlStateNormal];
                 [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-                btn.titleLabel.font = [UIFont systemFontOfSize:22 weight:UIFontWeightSemibold];
+                btn.titleLabel.font = [UIFont systemFontOfSize:24 weight:UIFontWeightBold];
                 [btn addTarget:g_reelButtonHandler action:@selector(onReelButtonTap:) forControlEvents:UIControlEventTouchUpInside];
                 [v addSubview:btn];
-                LOG("[reels] added download button to %s frame=(%.0f,%.0f,%.0f,%.0f)\n",
-                    class_getName(object_getClass(v)), v.frame.origin.x, v.frame.origin.y, W, H);
+                // Bring to front
+                [v bringSubviewToFront:btn];
+                LOG("[reels] added download button to %s frame=(%.0f,%.0f,%.0f,%.0f) at (%.0f,%.0f)\n",
+                    class_getName(object_getClass(v)), v.frame.origin.x, v.frame.origin.y, W, H, btnX, btnY);
             } @catch (NSException *e) {
                 LOG("[reels] button exc: %s\n", e.reason.UTF8String);
             }
@@ -1608,7 +1615,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.8 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.9 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
