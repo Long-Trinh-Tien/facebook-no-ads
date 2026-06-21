@@ -86,118 +86,246 @@ static void prefsChanged(CFNotificationCenterRef center, void *observer, CFStrin
 }
 
 // ═══════════════════════════════════════════════════════════════
-// SECTION 2: Settings UI
+// SECTION 2: Settings UI (Glow-style modal sheet)
 // ═══════════════════════════════════════════════════════════════
 
-// Forward decl
-@class GlowSettingsViewController;
+// Localization helper
+static NSString *GlowLoc(NSString *key) {
+    static NSDictionary *cached = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        // Default to Vietnamese strings (Glow's vi translation)
+        cached = @{
+            // Sections
+            @"section.home": @"TRANG CHỦ",
+            @"section.reels": @"REELS",
+            @"section.stories": @"STORIES",
+            @"section.downloader": @"TRÌNH TẢI VIDEO",
+            @"section.other": @"KHÁC",
 
-@interface GlowSettingsViewController : UIViewController
+            // Home section
+            @"removeAds": @"Xóa quảng cáo",
+            @"removePYMK": @"Xóa gợi ý kết bạn",
+            @"removeReelsCarousel": @"Xóa thanh cuộn reels",
+            @"confirmLike": @"Xác nhận thích bài viết",
+            @"downloadVideo": @"Tải video",
+            @"downloadVideo.desc": @"Nhấn giữ để tải video từ bảng tin và story",
+            @"removeSuggested": @"Xóa bài viết được đề xuất",
+            @"removeSuggested.desc": @"Lưu ý: Cần đủ lượt theo dõi để hoạt động chính xác nhất",
+
+            // Reels
+            @"downloadReels": @"Tải reels",
+            @"hideOverlay": @"Ẩn lớp phủ",
+            @"confirmReelsLike": @"Xác nhận thích reels",
+            @"downloadLongPress": @"Tải xuống bằng nhấn giữ",
+            @"downloadLongPress.desc": @"Dùng cho phiên bản cũ không có nút tải về",
+
+            // Stories
+            @"downloadStory": @"Tải stories",
+            @"disableStorySeen": @"Xem ẩn danh",
+            @"disableAutoNext": @"Tắt tự động chuyển tiếp",
+            @"removeStoryPYMK": @"Xóa gợi ý kết bạn trong story",
+
+            // Downloader
+            @"allFormats": @"Bao gồm tất cả các định dạng",
+            @"encodingSpeed": @"Tốc độ mã hóa",
+            @"encodingSpeed.desc": @"Tốc độ mã hóa video:\n• Ultrafast: Xử lý nhanh nhất, kích thước tệp lớn hơn.\n• Faster: Cân bằng giữa tốc độ và kích thước tệp.\n• Medium: Xử lý chậm hơn, kích thước tệp nhỏ hơn.",
+
+            // Other
+            @"notifyUpdates": @"Thông báo về cập nhật mới",
+            @"clearCacheOnLaunch": @"Xóa bộ nhớ đệm khi khởi động",
+            @"clearCache": @"Xóa bộ nhớ đệm",
+
+            // Misc
+            @"title": @"Glow v8",
+            @"close": @"Đóng",
+            @"cancel": @"Hủy",
+            @"notYetImplemented": @"(chưa hỗ trợ)",
+        };
+    });
+    NSString *s = cached[key];
+    return s ?: key;
+}
+
+@interface GlowSwitchCell : UITableViewCell
+@property (nonatomic, strong) UISwitch *toggle;
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UILabel *subtitleLabel;
+@property (nonatomic, copy) void (^onToggle)(BOOL);
+- (void)configureWithTitle:(NSString *)title subtitle:(NSString *)subtitle value:(BOOL)value onChange:(void(^)(BOOL))onChange;
 @end
 
-@implementation GlowSettingsViewController {
-    UITableView *_tableView;
-    NSArray<NSDictionary *> *_items;
+@implementation GlowSwitchCell
+
+- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
+    if ((self = [super initWithStyle:style reuseIdentifier:reuseIdentifier])) {
+        self.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+        self.selectionStyle = UITableViewCellSelectionStyleNone;
+
+        _titleLabel = [[UILabel alloc] init];
+        _titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightRegular];
+        _titleLabel.textColor = [UIColor labelColor];
+        _titleLabel.numberOfLines = 1;
+        _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        [self.contentView addSubview:_titleLabel];
+
+        _subtitleLabel = [[UILabel alloc] init];
+        _subtitleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
+        _subtitleLabel.textColor = [UIColor secondaryLabelColor];
+        _subtitleLabel.numberOfLines = 0;
+        _subtitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        [self.contentView addSubview:_subtitleLabel];
+
+        _toggle = [[UISwitch alloc] init];
+        _toggle.translatesAutoresizingMaskIntoConstraints = NO;
+        [_toggle addTarget:self action:@selector(toggleChanged:) forControlEvents:UIControlEventValueChanged];
+        [self.contentView addSubview:_toggle];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [_titleLabel.leadingAnchor constraintEqualToAnchor:self.contentView.layoutMarginsGuide.leadingAnchor constant:4],
+            [_titleLabel.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:12],
+            [_titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:_toggle.leadingAnchor constant:-12],
+
+            [_subtitleLabel.leadingAnchor constraintEqualToAnchor:_titleLabel.leadingAnchor],
+            [_subtitleLabel.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:2],
+            [_subtitleLabel.trailingAnchor constraintEqualToAnchor:_titleLabel.trailingAnchor],
+            [_subtitleLabel.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-12],
+
+            [_toggle.trailingAnchor constraintEqualToAnchor:self.contentView.layoutMarginsGuide.trailingAnchor],
+            [_toggle.centerYAnchor constraintEqualToAnchor:self.contentView.centerYAnchor],
+        ]];
+    }
+    return self;
 }
+
+- (void)configureWithTitle:(NSString *)title subtitle:(NSString *)subtitle value:(BOOL)value onChange:(void(^)(BOOL))onChange {
+    self.titleLabel.text = title;
+    self.subtitleLabel.text = subtitle;
+    self.subtitleLabel.hidden = (subtitle.length == 0);
+    self.toggle.on = value;
+    self.onToggle = onChange;
+}
+
+- (void)toggleChanged:(UISwitch *)sender {
+    if (self.onToggle) self.onToggle(sender.isOn);
+}
+
+@end
+
+@interface GlowSettingsViewController : UIViewController <UITableViewDataSource, UITableViewDelegate>
+@property (nonatomic, strong) UITableView *tableView;
+@property (nonatomic, strong) NSArray<NSArray<NSDictionary *> *> *sections;
+@end
+
+@implementation GlowSettingsViewController
 
 - (instancetype)init {
     if ((self = [super init])) {
-        self.title = @"Glow v8";
-        _items = @[
-            @{@"section": @"Ad Blocking", @"rows": @[
-                @{@"key": @"removeAds", @"label": @"Remove Ads", @"value": @(s_removeAds)},
-            ]},
-            @{@"section": @"Privacy", @"rows": @[
-                @{@"key": @"disableStorySeen", @"label": @"Disable Story Seen", @"value": @(s_disableStorySeen)},
-            ]},
-            @{@"section": @"Downloads (not yet implemented)", @"rows": @[
-                @{@"key": @"downloadVideo", @"label": @"Download Video (long press)", @"value": @(s_downloadVideo)},
-                @{@"key": @"downloadStory", @"label": @"Download Story (button)", @"value": @(s_downloadStory)},
-            ]},
-            @{@"section": @"Hide UI (not yet implemented)", @"rows": @[
-                @{@"key": @"removePYMK", @"label": @"Hide People You May Know", @"value": @(s_removePYMK)},
-                @{@"key": @"removeReelsCarousel", @"label": @"Hide Reels Carousel", @"value": @(s_removeReelsCarousel)},
-                @{@"key": @"removeSuggested", @"label": @"Hide Suggested for You", @"value": @(s_removeSuggested)},
-                @{@"key": @"hideComposer", @"label": @"Hide Composer", @"value": @(s_hideComposer)},
-            ]},
-            @{@"section": @"Reels (not yet implemented)", @"rows": @[
-                @{@"key": @"disableAutoNext", @"label": @"Disable Auto-Advance Reels", @"value": @(s_disableAutoNext)},
-                @{@"key": @"confirmLike", @"label": @"Confirm Reels Like", @"value": @(s_confirmLike)},
-                @{@"key": @"markAsSeen", @"label": @"Mark Story as Seen", @"value": @(s_markAsSeen)},
-            ]},
-            @{@"section": @"Other (not yet implemented)", @"rows": @[
-                @{@"key": @"clearCacheOnLaunch", @"label": @"Clear Cache on Launch", @"value": @(s_clearCacheOnLaunch)},
-                @{@"key": @"notifyUpdates", @"label": @"Notify Updates", @"value": @(s_notifyUpdates)},
-            ]},
+        self.modalPresentationStyle = UIModalPresentationPageSheet;
+        if (@available(iOS 15.0, *)) {
+            UISheetPresentationController *sheet = self.sheetPresentationController;
+            sheet.detents = @[UISheetPresentationControllerDetent.largeDetent];
+            sheet.prefersGrabberVisible = YES;
+        }
+
+        // Build sections matching Glow's UI structure
+        self.sections = @[
+            @[  // TRANG CHỦ
+                @{@"key": @"removeAds", @"title": @"removeAds", @"subtitle": @"", @"value": @(s_removeAds)},
+                @{@"key": @"removePYMK", @"title": @"removePYMK", @"subtitle": @"", @"value": @(s_removePYMK)},
+                @{@"key": @"removeReelsCarousel", @"title": @"removeReelsCarousel", @"subtitle": @"", @"value": @(s_removeReelsCarousel)},
+                @{@"key": @"confirmLike", @"title": @"confirmLike", @"subtitle": @"", @"value": @(s_confirmLike)},
+                @{@"key": @"downloadVideo", @"title": @"downloadVideo", @"subtitle": @"downloadVideo.desc", @"value": @(s_downloadVideo)},
+                @{@"key": @"removeSuggested", @"title": @"removeSuggested", @"subtitle": @"removeSuggested.desc", @"value": @(s_removeSuggested)},
+            ],
+            @[  // REELS
+                @{@"key": @"downloadReels", @"title": @"downloadReels", @"subtitle": @"", @"value": @NO},
+                @{@"key": @"hideOverlay", @"title": @"hideOverlay", @"subtitle": @"", @"value": @NO},
+                @{@"key": @"confirmReelsLike", @"title": @"confirmReelsLike", @"subtitle": @"", @"value": @NO},
+                @{@"key": @"downloadLongPress", @"title": @"downloadLongPress", @"subtitle": @"downloadLongPress.desc", @"value": @NO},
+            ],
+            @[  // STORIES
+                @{@"key": @"downloadStory", @"title": @"downloadStory", @"subtitle": @"", @"value": @(s_downloadStory)},
+                @{@"key": @"disableStorySeen", @"title": @"disableStorySeen", @"subtitle": @"", @"value": @(s_disableStorySeen)},
+                @{@"key": @"disableAutoNext", @"title": @"disableAutoNext", @"subtitle": @"", @"value": @(s_disableAutoNext)},
+                @{@"key": @"removeStoryPYMK", @"title": @"removeStoryPYMK", @"subtitle": @"", @"value": @NO},
+            ],
+            @[  // TRÌNH TẢI VIDEO
+                @{@"key": @"allFormats", @"title": @"allFormats", @"subtitle": @"", @"value": @NO},
+            ],
+            @[  // KHÁC
+                @{@"key": @"notifyUpdates", @"title": @"notifyUpdates", @"subtitle": @"", @"value": @(s_notifyUpdates)},
+                @{@"key": @"clearCacheOnLaunch", @"title": @"clearCacheOnLaunch", @"subtitle": @"", @"value": @(s_clearCacheOnLaunch)},
+            ],
         ];
     }
     return self;
 }
 
-- (void)loadView {
-    _tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleGrouped];
-    _tableView.dataSource = self;
-    _tableView.delegate = self;
-    _tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    self.view = _tableView;
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    self.title = GlowLoc(@"title");
+
+    // X close button (top right) - matches Glow's design
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
+        initWithBarButtonSystemItem:UIBarButtonSystemItemClose
+        target:self
+        action:@selector(closeSettings)];
+
+    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
+    self.tableView.dataSource = self;
+    self.tableView.delegate = self;
+    self.tableView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.tableView.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    [self.tableView registerClass:[GlowSwitchCell class] forCellReuseIdentifier:@"switch"];
+    [self.view addSubview:self.tableView];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [self.tableView.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+        [self.tableView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.tableView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [self.tableView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+    ]];
 }
 
+- (void)closeSettings {
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+#pragma mark - Table
+
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
-    return _items.count;
+    return self.sections.count;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    return [_items[section][@"rows"] count];
+    return self.sections[section].count;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
-    return _items[section][@"section"];
+    NSArray *keys = @[@"section.home", @"section.reels", @"section.stories", @"section.downloader", @"section.other"];
+    if (section >= (NSInteger)keys.count) return nil;
+    return GlowLoc(keys[section]);
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    static NSString *cellId = @"cell";
-    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:cellId];
-    if (!cell) {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:cellId];
-    }
-    NSDictionary *row = _items[indexPath.section][@"rows"][indexPath.row];
-    cell.textLabel.text = row[@"label"];
-    BOOL val = [row[@"value"] boolValue];
-    cell.accessoryType = val ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
-    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-    cell.userInteractionEnabled = YES;
-    return cell;
-}
-
-- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    NSDictionary *row = _items[indexPath.section][@"rows"][indexPath.row];
+    GlowSwitchCell *cell = [tableView dequeueReusableCellWithIdentifier:@"switch" forIndexPath:indexPath];
+    NSDictionary *row = self.sections[indexPath.section][indexPath.row];
+    NSString *title = GlowLoc(row[@"title"]);
+    NSString *subtitleKey = row[@"subtitle"];
+    NSString *subtitle = subtitleKey.length > 0 ? GlowLoc(subtitleKey) : @"";
+    BOOL value = [row[@"value"] boolValue];
     NSString *key = row[@"key"];
-    NSString *label = row[@"label"];
 
-    // Toggle
-    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    BOOL current = [d boolForKey:[@"com.tommy.glow." stringByAppendingString:key]];
-    BOOL newVal = !current;
-    [d setBool:newVal forKey:[@"com.tommy.glow." stringByAppendingString:key]];
-    [d synchronize];
-
-    reloadPrefs();
-
-    // Update UI
-    NSMutableArray *newItems = [_items mutableCopy];
-    NSMutableArray *newRows = [newItems[indexPath.section][@"rows"] mutableCopy];
-    newRows[indexPath.row] = @{@"key": key, @"label": label, @"value": @(newVal)};
-    newItems[indexPath.section] = @{@"section": newItems[indexPath.section][@"section"], @"rows": newRows};
-    _items = newItems;
-    [tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationFade];
-
-    LOG("[settings] toggled %s = %d (re-installation required for hook change)\n", key.UTF8String, newVal);
-
-    // Show feedback
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:label message:newVal ? @"Enabled" : @"Disabled" preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
+    [cell configureWithTitle:title subtitle:subtitle value:value onChange:^(BOOL newValue) {
+        NSString *fullKey = [@"com.tommy.glow." stringByAppendingString:key];
+        [[NSUserDefaults standardUserDefaults] setBool:newValue forKey:fullKey];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+        reloadPrefs();
+        LOG("[settings] %s = %d\n", key.UTF8String, newValue);
+    }];
+    return cell;
 }
 
 @end
@@ -208,7 +336,6 @@ static void openGlowSettings(void) {
         @try {
             GlowSettingsViewController *vc = [[GlowSettingsViewController alloc] init];
             UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
-            nav.modalPresentationStyle = UIModalPresentationFormSheet;
 
             UIViewController *target = nil;
             UIApplication *app = [UIApplication sharedApplication];
