@@ -10,6 +10,7 @@
 // All output to /var/mobile/Documents/glow.txt
 
 #import <UIKit/UIKit.h>
+#import <Photos/Photos.h>
 #import <objc/runtime.h>
 #import <stdio.h>
 #import <string.h>
@@ -681,14 +682,19 @@ static void hooked_willDisplay(id self, SEL _cmd, UICollectionView *cv, UICollec
         if (already) return;
         objc_setAssociatedObject(cell, "GlowCellLP", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-        // g_videoHandler will be set later (after GlowVideoDownloadHandler
-        // is fully defined). Skip if nil - inject won't work until then.
-        // The first Reel button tap will set g_videoHandler, then on
-        // next newsfeed scroll, the gesture target will be valid.
+        // v8.2.42: LAZY INIT g_videoHandler here (don't skip if nil)
+        // Use NSClassFromString to get the class at runtime (we have
+        // forward declaration only at this point in the file)
         if (!g_videoHandler) {
-            LOG("[dl/news] willDisplay: g_videoHandler nil, skip inject\n");
-            objc_setAssociatedObject(cell, "GlowCellLP", nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            return;
+            Class handlerCls = NSClassFromString(@"GlowVideoDownloadHandler");
+            if (handlerCls && [handlerCls isSubclassOfClass:[NSObject class]]) {
+                g_videoHandler = [[handlerCls alloc] init];
+                LOG("[dl/news] lazy init g_videoHandler OK\n");
+            } else {
+                LOG("[dl/news] FAIL: GlowVideoDownloadHandler class not found yet\n");
+                objc_setAssociatedObject(cell, "GlowCellLP", nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                return;
+            }
         }
         UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
             initWithTarget:g_videoHandler
@@ -1037,9 +1043,22 @@ static void hooked_newsFeed_viewDidLoad(id self, SEL _cmd) {
                 LOG("[dl/story] saved image to Photos\n");
                 [self dismissProgressWithTitle:@"Đã lưu ảnh" message:@"Đã lưu vào Album Ảnh" success:YES];
             } else {
-                UISaveVideoAtPathToSavedPhotosAlbum(path, nil, nil, NULL);
-                LOG("[dl/story] saved video to Photos\n");
-                [self dismissProgressWithTitle:@"Đã lưu video" message:@"Đã lưu vào Album Ảnh" success:YES];
+                // v8.2.42: PHPhotoLibrary instead of UISaveVideoAtPathToSavedPhotosAlbum
+                NSURL *fileURL = [NSURL fileURLWithPath:path];
+                [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+                    [PHAssetChangeRequest creationRequestForAssetFromVideoAtFileURL:fileURL];
+                } completionHandler:^(BOOL success, NSError * _Nullable error) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if (success) {
+                            LOG("[dl/story] saved video to Photos via PHPhotoLibrary\n");
+                            [self dismissProgressWithTitle:@"Đã lưu video" message:@"Đã lưu vào Album Ảnh" success:YES];
+                        } else {
+                            LOG("[dl/story] PHPhotoLibrary err: %s\n",
+                                error ? [[error localizedDescription] UTF8String] : "nil");
+                            [self dismissProgressWithTitle:@"Lỗi" message:@"Không lưu được video" success:NO];
+                        }
+                    });
+                }];
             }
         });
     }];
@@ -1261,13 +1280,29 @@ static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *w
         NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:name];
         [[NSFileManager defaultManager] moveItemAtURL:loc toURL:[NSURL fileURLWithPath:path] error:nil];
         LOG("[dl/video] saved to %s\n", [path UTF8String]);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            UISaveVideoAtPathToSavedPhotosAlbum(path, nil, nil, NULL);
-            [self showToast:[NSString stringWithFormat:@"✅ Đã lưu %@ vào Photos", q]];
-            LOG("[dl/video] saved video to Photos\n");
-            UINotificationFeedbackGenerator *gen = [[UINotificationFeedbackGenerator alloc] init];
-            [gen notificationOccurred:UINotificationFeedbackTypeSuccess];
-        });
+        // v8.2.42: Use PHPhotoLibrary (block-based) instead of UISaveVideoAtPathToSavedPhotosAlbum
+        // Old API requires selector callback - crashes if method name/sig doesn't match
+        // New API is block-based, no callback needed
+        NSURL *fileURL = [NSURL fileURLWithPath:path];
+        NSString *qualityLabel = [q copy];  // capture for block
+        [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+            [PHAssetChangeRequest creationRequestForAssetFromVideoAtFileURL:fileURL];
+        } completionHandler:^(BOOL success, NSError * _Nullable error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (success) {
+                    [self showToast:[NSString stringWithFormat:@"✅ Đã lưu %@ vào Photos", qualityLabel]];
+                    LOG("[dl/video] saved to Photos via PHPhotoLibrary\n");
+                    UINotificationFeedbackGenerator *gen = [[UINotificationFeedbackGenerator alloc] init];
+                    [gen notificationOccurred:UINotificationFeedbackTypeSuccess];
+                } else {
+                    LOG("[dl/video] PHPhotoLibrary err: %s\n",
+                        error ? [[error localizedDescription] UTF8String] : "nil");
+                    [self showToast:[NSString stringWithFormat:@"❌ Lỗi lưu Photos"]];
+                    UINotificationFeedbackGenerator *gen = [[UINotificationFeedbackGenerator alloc] init];
+                    [gen notificationOccurred:UINotificationFeedbackTypeError];
+                }
+            });
+        }];
     }];
     [task resume];
 }
@@ -2928,7 +2963,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.40 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.42 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
