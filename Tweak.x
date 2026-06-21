@@ -1075,6 +1075,34 @@ static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *w
 @end
 @implementation GlowVideoDownloadHandler
 
+// Reels-specific: long press on Reel video view
+- (void)onReelLongPress:(UILongPressGestureRecognizer *)gr {
+    if (gr.state != UIGestureRecognizerStateBegan) return;
+    if (!s_downloadVideo) return;
+    @try {
+        // Walk up the view hierarchy looking for currentVideoPlaybackItem
+        SEL curSel = sel_registerName("currentVideoPlaybackItem");
+        id item = [self findObjectRespondingTo:curSel startingAt:gr.view];
+        if (!item) {
+            LOG("[dl/reel] no playback item in hierarchy\n");
+            return;
+        }
+        SEL hdSel = sel_registerName("HDPlaybackURL");
+        SEL sdSel = sel_registerName("SDPlaybackURL");
+        NSURL *hd = [item respondsToSelector:hdSel] ? [item performSelector:hdSel] : nil;
+        NSURL *sd = [item respondsToSelector:sdSel] ? [item performSelector:sdSel] : nil;
+        if (!hd && !sd) {
+            LOG("[dl/reel] item has no URLs\n");
+            return;
+        }
+        LOG("[dl/reel] downloading HD=%d SD=%d\n", hd != nil, sd != nil);
+        if (hd) [self downloadVideoURL:hd quality:@"reel_hd"];
+        if (sd) [self downloadVideoURL:sd quality:@"reel_sd"];
+    } @catch (NSException *e) {
+        LOG("[dl/reel] exc: %s\n", e.reason.UTF8String);
+    }
+}
+
 - (void)downloadVideoURL:(NSURL *)url quality:(NSString *)q {
     if (!url) return;
     NSString *name = [NSString stringWithFormat:@"video_%@_%lld.mp4", q, (long long)[[NSDate date] timeIntervalSince1970]];
@@ -1205,6 +1233,35 @@ static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *w
 @end
 
 static GlowVideoDownloadHandler *g_videoHandler = nil;
+
+static IMP orig_reelsViewDidLoad = NULL;
+static void hooked_reelsViewDidLoad(id self, SEL _cmd);
+static void hooked_reelsViewDidLoad(id self, SEL _cmd) {
+    if (orig_reelsViewDidLoad) {
+        typedef void (*FnType)(id, SEL);
+        FnType fn = (FnType)(uintptr_t)orig_reelsViewDidLoad;
+        fn(self, _cmd);
+    }
+    if (!s_downloadVideo) return;
+    if (!g_videoHandler) g_videoHandler = [[GlowVideoDownloadHandler alloc] init];
+    @try {
+        UIView *v = (UIView *)self;
+        if (![v isKindOfClass:[UIView class]]) return;
+        if (!v.subviews.count) return;
+        for (UIView *sub in v.subviews) {
+            if (sub.frame.size.width < 100 || sub.frame.size.height < 100) continue;
+            UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
+                initWithTarget:g_videoHandler
+                action:@selector(onReelLongPress:)];
+            lp.minimumPressDuration = 0.5;
+            lp.cancelsTouchesInView = NO;
+            [sub addGestureRecognizer:lp];
+        }
+        LOG("[reels] added long press to %lu subviews\n", (unsigned long)v.subviews.count);
+    } @catch (NSException *e) {
+        LOG("[reels] exc: %s\n", e.reason.UTF8String);
+    }
+}
 
 static IMP orig_didLongPress = NULL;
 static void hooked_didLongPress(id self, SEL _cmd, id recognizer) {
@@ -1365,6 +1422,25 @@ static void installHooks(void) {
             }
         }
 
+        // Hook 10: Reels download - hook FBVideoHomeUnifiedPlayerViewController.viewDidLoad
+        // When Reels player loads, walk view hierarchy, find video view, add long press
+        if (s_downloadVideo) {
+            Class reelsCls = objc_getClass("FBVideoHomeUnifiedPlayerViewController");
+            if (reelsCls) {
+                SEL vdlSel = @selector(viewDidLoad);
+                Method m = class_getInstanceMethod(reelsCls, vdlSel);
+                if (m) {
+                    orig_reelsViewDidLoad = method_getImplementation(m);
+                    method_setImplementation(m, (IMP)hooked_reelsViewDidLoad);
+                    LOG("  hook #10: FBVideoHomeUnifiedPlayerViewController.viewDidLoad -> add reel download\n");
+                } else {
+                    LOG("  FBVideoHomeUnifiedPlayerViewController.viewDidLoad NOT FOUND\n");
+                }
+            } else {
+                LOG("  FBVideoHomeUnifiedPlayerViewController NOT FOUND\n");
+            }
+        }
+
         LOG("=== Done ===\n");
     } @catch (NSException *e) {
         LOG("  EXC: %s\n", e.reason.UTF8String);
@@ -1372,6 +1448,8 @@ static void installHooks(void) {
         LOG("  EXC(c++)\n");
     }
 }
+
+// (Reels hooks declared above installHooks)
 
 static void hooked_viewDidAppear(id self, SEL _cmd, BOOL animated) {
     if (orig_viewDidAppear) {
@@ -1442,7 +1520,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.5 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.6 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
