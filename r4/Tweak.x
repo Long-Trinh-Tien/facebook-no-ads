@@ -101,13 +101,11 @@ static void dumpClass(const char *name) {
     free(props);
 }
 
-// Enumerate all classes with a substring match
+// Enumerate all classes with a substring match (just names, not full dump)
 static void dumpClassesMatching(const char *substring, int maxResults) {
     int numClasses = 0;
     Class *classes = NULL;
 
-    // First pass: count
-    classes = NULL;
     numClasses = objc_getClassList(NULL, 0);
     if (numClasses <= 0) return;
 
@@ -120,13 +118,13 @@ static void dumpClassesMatching(const char *substring, int maxResults) {
         if (name && strstr(name, substring)) {
             // Only top-level classes (no $Subclass)
             if (strchr(name, '$') == NULL) {
-                dumpClass(name);
+                LOG("  %s\n", name);
                 shown++;
             }
         }
     }
     free(classes);
-    LOG("\n--- %d classes matching '%s' ---\n", shown, substring);
+    LOG("--- %d classes matching '%s' ---\n\n", shown, substring);
 }
 
 // Enumerate ALL FB* classes
