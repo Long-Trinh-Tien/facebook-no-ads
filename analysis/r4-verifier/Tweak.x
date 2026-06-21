@@ -485,14 +485,15 @@ static void r4_init(void) {
 // ═══════════════════════════════════════════════════════════════
 
 // Walk subviews recursively, up to maxDepth levels
-// Logs class + frame of each subview. Used to find like/share/comment
-// buttons in Reels.
+// Logs class + frame of each subview. v1.5: HIGHLIGHT UIButton class
+// to find like/share/comment buttons. Also print accessibility label
+// (FB usually sets these on action buttons).
 static int g_walkCount = 0;
+static int g_buttonCount = 0;
 static void walkSubviews(UIView *view, int depth, int maxDepth) {
     if (!view || depth > maxDepth) return;
-    // Safety: don't walk forever
-    if (g_walkCount > 500) {
-        LOG("  ... (walkCount > 500, stopping)\n");
+    if (g_walkCount > 1000) {
+        LOG("  ... (walkCount > 1000, stopping)\n");
         return;
     }
     g_walkCount++;
@@ -506,17 +507,65 @@ static void walkSubviews(UIView *view, int depth, int maxDepth) {
         // Print class + frame + subview count
         CGRect f = view.frame;
         unsigned long subCount = (unsigned long)view.subviews.count;
-        LOG("  %s[%d] %s frame=(%.0f,%.0f,%.0f,%.0f) subs=%lu hidden=%d alpha=%.2f\n",
-            indent, depth, name,
-            f.origin.x, f.origin.y, f.size.width, f.size.height,
-            subCount,
-            view.hidden, view.alpha);
+        // Highlight UIButton + UIControl + CKComponentHostingView
+        BOOL isButton = [view isKindOfClass:[UIControl class]];
+        const char *marker = isButton ? ">>> " : "    ";
+        if (isButton) g_buttonCount++;
+        // Get accessibility label (FB usually sets it on action buttons)
+        NSString *accLabel = view.accessibilityLabel;
+        const char *labelStr = accLabel ? [accLabel UTF8String] : "";
+        if (isButton) {
+            LOG("  %s%s[%d] %s frame=(%.0f,%.0f,%.0f,%.0f) subs=%lu label=\"%s\"\n",
+                marker, indent, depth, name,
+                f.origin.x, f.origin.y, f.size.width, f.size.height,
+                subCount, labelStr);
+        } else {
+            LOG("  %s%s[%d] %s frame=(%.0f,%.0f,%.0f,%.0f) subs=%lu hidden=%d alpha=%.2f\n",
+                marker, indent, depth, name,
+                f.origin.x, f.origin.y, f.size.width, f.size.height,
+                subCount,
+                view.hidden, view.alpha);
+        }
         // Recurse
         for (UIView *sub in view.subviews) {
             walkSubviews(sub, depth + 1, maxDepth);
         }
     } @catch (NSException *e) {
         LOG("  ... walk exc at depth %d: %s\n", depth, e.reason.UTF8String);
+    }
+}
+
+// v1.5: hook viewDidLayoutSubviews of UIView to catch later subview adds
+// Reels buttons are added AFTER viewDidAppear (lazy render)
+static IMP orig_viewDidLayoutSubviews = NULL;
+static int g_layoutHookCount = 0;
+static void hooked_viewDidLayoutSubviews(id self, SEL _cmd) {
+    if (orig_viewDidLayoutSubviews) {
+        typedef void (*FnType)(id, SEL);
+        FnType fn = (FnType)(uintptr_t)orig_viewDidLayoutSubviews;
+        fn(self, _cmd);
+    }
+    @try {
+        if (![self isKindOfClass:[UIView class]]) return;
+        Class cls = object_getClass(self);
+        const char *name = class_getName(cls);
+        if (!name) return;
+        // Only for Reels-related views
+        BOOL isReelsView = (strstr(name, "VideoHome") != NULL ||
+                            strstr(name, "ComponentHosting") != NULL ||
+                            strstr(name, "Passthrough") != NULL ||
+                            strstr(name, "Surface") != NULL);
+        if (!isReelsView) return;
+        // Only first 3 layout passes to avoid spam
+        g_layoutHookCount++;
+        if (g_layoutHookCount > 20) return;
+        LOG("\n[Layout #%d] %s subs=%lu\n", g_layoutHookCount, name, (unsigned long)[(UIView *)self subviews].count);
+        g_walkCount = 0;
+        g_buttonCount = 0;
+        walkSubviews(self, 0, 5);
+        LOG("  --- found %d UIButton/UIControl views ---\n", g_buttonCount);
+    } @catch (NSException *e) {
+        LOG("[Layout] exc: %s\n", e.reason.UTF8String);
     }
 }
 
@@ -545,14 +594,15 @@ static void hooked_vc_viewDidAppear(id self, SEL _cmd, BOOL animated) {
             sup = class_getSuperclass(sup);
             d++;
         }
-        // Walk self.view subviews to find action buttons (3 levels deep)
+        // Walk self.view subviews to find action buttons (5 levels deep in v1.5)
         // Trigger only for Reels-related VCs to avoid spam
         BOOL isReels = (strstr(name, "VideoHome") != NULL ||
                         strstr(name, "Reel") != NULL ||
                         strstr(name, "SurfaceView") != NULL);
         if (isReels) {
-            LOG("  --- Reels subview walk (3 levels) ---\n");
+            LOG("  --- Reels subview walk (5 levels) ---\n");
             g_walkCount = 0;
+            g_buttonCount = 0;
             UIView *root = nil;
             @try {
                 root = [(UIViewController *)self view];
@@ -560,7 +610,8 @@ static void hooked_vc_viewDidAppear(id self, SEL _cmd, BOOL animated) {
                 LOG("  exc getting self.view: %s\n", e.reason.UTF8String);
             }
             if (root) {
-                walkSubviews(root, 0, 3);
+                walkSubviews(root, 0, 5);
+                LOG("  --- found %d UIButton/UIControl views ---\n", g_buttonCount);
             } else {
                 LOG("  no root view\n");
             }
@@ -581,15 +632,27 @@ static void installViewControllerHook(void) {
     LOG("[R4] HOOKED UIViewController.viewDidAppear:\n");
 }
 
+static void installViewLayoutHook(void) {
+    Class viewCls = objc_getClass("UIView");
+    if (!viewCls) return;
+    SEL sel = @selector(layoutSubviews);
+    Method m = class_getInstanceMethod(viewCls, sel);
+    if (!m) return;
+    orig_viewDidLayoutSubviews = method_getImplementation(m);
+    method_setImplementation(m, (IMP)hooked_viewDidLayoutSubviews);
+    LOG("[R4] HOOKED UIView.layoutSubviews\n");
+}
+
 __attribute__((constructor))
 static void r4_install_hooks(void) {
-    // Delay slightly to ensure UIViewController is loaded
+    // Delay slightly to ensure UIViewController/UIView are loaded
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{
         @try {
             installViewControllerHook();
+            installViewLayoutHook();
         } @catch (NSException *e) {
-            LOG("[R4] installViewControllerHook exc: %s\n", e.reason.UTF8String);
+            LOG("[R4] installHook exc: %s\n", e.reason.UTF8String);
         }
     });
 }
