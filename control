@@ -1,8 +1,8 @@
 Package: com.tommy.glowv3
 Name: GlowV3
-Version: 1.2.16
+Version: 1.2.17
 Architecture: iphoneos-arm
-Description: Facebook ad blocker + Reels v8.2.16 (button in FBShortsSideBarView)
+Description: Facebook ad blocker + Reels v8.2.17 (filter Reels context)
 Maintainer: tommy
 Author: tommy
 Section: Tweaks

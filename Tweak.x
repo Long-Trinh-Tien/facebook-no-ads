@@ -1568,7 +1568,7 @@ static void hooked_reelsViewDidLoad(id self, SEL _cmd) {
     }
 }
 
-// v8.2.16: Hook FBShortsSideBarView.layoutSubviews to add download button
+// v8.2.17: Hook FBShortsSideBarView.layoutSubviews to add download button
 // DIRECTLY as a child of the sidebar (same parent as like/share).
 // This guarantees the button is in the same column with correct z-order.
 //
@@ -1584,9 +1584,38 @@ static void hooked_reelsViewDidLoad(id self, SEL _cmd) {
 //       FBShortsDescriptionView
 //       ...
 //
-// We add our button at (0, 333, 56, 72) - right below "More".
+// v8.2.17: CRITICAL FIX - FBShortsSideBarView is also used in comment
+// sheets when comments contain video/image attachments. We must filter
+// to only add button when sidebar is in REELS context (parent chain
+// contains FBShortsViewerOverlayComponentView or FBVideoHomeUnifiedPlayerViewController).
 static NSMutableSet *g_sideBarsWithButton = nil;
 static IMP orig_shortsSideBarLayoutSubviews = NULL;
+
+// Check if a view is in Reels context (vs comment sheet context)
+// by walking up the view chain looking for Reels-specific parents.
+static BOOL isInReelsContext(UIView *view) {
+    UIView *cur = view;
+    int depth = 0;
+    while (cur && depth < 30) {
+        Class cls = object_getClass(cur);
+        const char *name = class_getName(cls);
+        if (name) {
+            // FBShortsViewerOverlayComponentView is ONLY in Reels
+            if (strstr(name, "FBShortsViewerOverlayComponentView") != NULL) return YES;
+            // FBVideoHomeUnifiedPlayerViewController is Reels container
+            if (strstr(name, "FBVideoHomeUnifiedPlayerViewController") != NULL) return YES;
+            // FBVideoHomePassthroughView is Reels overlay
+            if (strstr(name, "FBVideoHomePassthroughView") != NULL) return YES;
+            // EXCLUDE comment sheet contexts
+            if (strstr(name, "FBCommentStream") != NULL) return NO;
+            if (strstr(name, "FBBottomSheet") != NULL) return NO;
+        }
+        cur = cur.superview;
+        depth++;
+    }
+    return NO;  // default: not in Reels (safer)
+}
+
 static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
     if (orig_shortsSideBarLayoutSubviews) {
         typedef void (*FnType)(id, SEL);
@@ -1605,6 +1634,15 @@ static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
         if (sideBar.hidden || sideBar.alpha < 0.01) return;
         // Skip if size is too small (0x0 or 56x0)
         if (sideBar.bounds.size.width < 20 || sideBar.bounds.size.height < 100) return;
+        // v8.2.17: CRITICAL - check Reels context!
+        // Without this, button appears in comment sheet (image/video
+        // attachments in comments also use FBShortsSideBarView).
+        if (!isInReelsContext(sideBar)) {
+            LOG("[reels/sidebar] SKIP non-Reels context: %s\n", class_getName(object_getClass(sideBar)));
+            // Still add to set to avoid re-checking
+            [g_sideBarsWithButton addObject:vkey];
+            return;
+        }
         [g_sideBarsWithButton addObject:vkey];
 
         // Sidebar width 56, height varies (333 in test, but we use bounds)
@@ -1612,10 +1650,9 @@ static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
         CGFloat H = sideBar.bounds.size.height;
         CGFloat btnW = 40;   // smaller than like (56) to fit
         CGFloat btnH = 40;
-        // Place at top-right of sidebar (above "Like") so it's
-        // at the start of the action column, very visible
+        // Place ABOVE the sidebar (negative y) - very visible at top of action column
         CGFloat btnX = (W - btnW) / 2.0;  // center horizontally
-        CGFloat btnY = -btnH - 8;  // ABOVE the sidebar (negative y)
+        CGFloat btnY = -btnH - 8;  // ABOVE the sidebar
 
         UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
         btn.frame = CGRectMake(btnX, btnY, btnW, btnH);
@@ -1969,7 +2006,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.16 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.17 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
