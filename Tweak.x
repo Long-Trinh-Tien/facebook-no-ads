@@ -1602,10 +1602,26 @@ static NSMutableDictionary *g_urlCacheBySidebar = nil;
         }
 
         if (!item && !directURL) {
-            LOG("[dl/reel] no playback item AND no AVPlayerLayer URL found\n");
-            // Show error toast
-            [self showToast:@"❌ Không tìm thấy video"];
-            return;
+            // v8.2.31: LAST RESORT - use global URL captured by hook.
+            // The hook fires when FB reads HDPlaybackURL/SDPlaybackURL.
+            // The global might be from a different Reel (FB preload), but
+            // better than "không tìm thấy video".
+            if (g_cachedHDURL || g_cachedSDURL) {
+                LOG("[dl/reel] M0: using GLOBAL cached URL as fallback (age=%.1fs)\n",
+                    g_cachedAt ? -[g_cachedAt timeIntervalSinceNow] : 0);
+                hd = g_cachedHDURL;
+                sd = g_cachedSDURL;
+                if (!g_urlCacheBySidebar) g_urlCacheBySidebar = [[NSMutableDictionary alloc] init];
+                NSMutableDictionary *entry = [NSMutableDictionary dictionary];
+                entry[@"HD"] = hd ?: [NSNull null];
+                entry[@"SD"] = sd ?: [NSNull null];
+                g_urlCacheBySidebar[sbKey] = entry;
+                // Don't return - let it fall through to action sheet
+            } else {
+                LOG("[dl/reel] no playback item AND no AVPlayerLayer URL found\n");
+                [self showToast:@"❌ Không tìm thấy video"];
+                return;
+            }
         }
 
         if (item) {
@@ -2263,7 +2279,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.30 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.31 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
