@@ -1,0 +1,4 @@
+# Large binaries (rebuild from sources)
+*.dylib
+*.deb
+*.ipa
