@@ -1100,8 +1100,25 @@ static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *w
             top = win.rootViewController;
             while (top.presentedViewController) top = top.presentedViewController;
         }
+        // v8.2.38: Always try to find SOME presenting VC (fallback to rootVC
+        // if keyWindow is missing) so action sheet can ALWAYS show.
+        // Previously: top=nil -> auto-download BOTH HD+SD (BAD UX + no choice)
         if (!top) {
-            // Fallback: download HD if available, else SD
+            // Try the keyWindow directly
+            win = [UIApplication sharedApplication].keyWindow;
+            if (!win) {
+                // Last resort: any window
+                for (UIWindow *w in [UIApplication sharedApplication].windows) {
+                    if (w) { win = w; break; }
+                }
+            }
+            if (win) top = win.rootViewController;
+            while (top && top.presentedViewController) top = top.presentedViewController;
+        }
+        if (!top) {
+            // Truly no VC available. Download HD only (not both!)
+            // v8.2.38: was downloading BOTH HD+SD, now just HD
+            LOG("[dl/video] no top VC, downloading HD only as fallback\n");
             if (hd) [self downloadVideoURL:hd quality:@"HD"];
             else if (sd) [self downloadVideoURL:sd quality:@"SD"];
             return;
@@ -1136,7 +1153,21 @@ static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *w
             alert.popoverPresentationController.sourceView = srcView;
             alert.popoverPresentationController.sourceRect = srcView.bounds;
         }
-        [top presentViewController:alert animated:YES completion:nil];
+        // v8.2.38: Wrap presentViewController in @try - if top is still
+        // deallocated (race), don't crash - download HD only as last resort
+        @try {
+            if (top && [top isKindOfClass:[UIViewController class]]) {
+                [top presentViewController:alert animated:YES completion:nil];
+            } else {
+                LOG("[dl/video] top deallocated, downloading HD only\n");
+                if (hd) [self downloadVideoURL:hd quality:@"HD"];
+                else if (sd) [self downloadVideoURL:sd quality:@"SD"];
+            }
+        } @catch (NSException *e) {
+            LOG("[dl/video] present exc: %s - downloading HD only\n", e.reason.UTF8String);
+            if (hd) [self downloadVideoURL:hd quality:@"HD"];
+            else if (sd) [self downloadVideoURL:sd quality:@"SD"];
+        }
     });
 }
 
@@ -1607,9 +1638,15 @@ void installGlowStyleReelsHook(void) {
         SEL setPlayCtrlSel = sel_registerName("setPlaybackController:");
         SEL cfgVideoSel = sel_registerName("configureWithVideo:");
         SEL cfgModelSel = sel_registerName("configureWithModel:");
+        // v8.2.38: Wrap EACH class iteration in @try-@catch
+        // Some FB classes (e.g. FBGraphQLQueryBuilder) trigger initInfoPtr
+        // which throws "unrecognized selector" - kills the whole loop
+        // Per-class catch lets us skip the bad class and continue
         for (int i = 0; i < count; i++) {
             Class cls = classes[i];
             if (!cls) continue;
+            @try {
+            // start of per-class try block
             const char *name = class_getName(cls);
             if (!name) continue;
             // Only FB classes
@@ -1686,6 +1723,19 @@ void installGlowStyleReelsHook(void) {
                     cfgModelHooked++;
                     LOG("[dl/reel] hooked configureWithModel: on %s\n", name);
                 }
+            }
+            // v8.2.38: per-class catch - skip bad class, continue loop
+            } @catch (NSException *ex) {
+                // Some FB classes (FBGraphQLQueryBuilder, etc) trigger
+                // init during class_respondsToSelector -> unrecognized
+                // selector exception. Just skip and continue.
+                const char *badName = "unknown";
+                @try { badName = class_getName(cls); } @catch (...) {}
+                if (badName && strncmp(badName, "FBGraphQL", 9) == 0) {
+                    // Only log the GraphQL one (very chatty)
+                    LOG("[dl/reel] skip %s (exc)\n", badName);
+                }
+                continue;
             }
         }
         free(classes);
@@ -2819,7 +2869,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.37 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.38 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
