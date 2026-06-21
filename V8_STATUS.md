@@ -1,109 +1,120 @@
-# Glow v8 — Multi-feature Framework (Stage v8.0/v8)
+# v8 Status Document
 
-> Status: **FRAMEWORK COMPLETE** ✅
-> Build: `glow_v8.ipa` (195MB, working)
-> Branch: `v8-glow-framework`
+> **Status**: v8.2.17 working (with Reels context filter)
+> **Last update**: 2026-06-21 17:05 UTC
 
-## What's Working in v8
+---
 
-✅ Ad blocking: FBMemNewsFeedEdge.node returns nil for SPONSORED (from v7)
-✅ Story seen: 3 paths blocked on FBSnacksBucketsSeenStateManager (from v7)
-✅ Settings UI: GlowSettingsViewController with toggles
-✅ Settings storage: NSUserDefaults with com.tommy.glow.* keys
-✅ Long press to open settings: hooked tab bar didSelect
-✅ Multi-language ready: vi translation included
-✅ Build: glow_v8.ipa ready for sideload
+## What's Working
 
-## Framework Architecture (8 sections in Tweak.x)
+| Feature | Version | Verified |
+|---------|---------|----------|
+| Ad block (home feed) | v1.0.0+ | ✅ |
+| Story seen (3 paths) | v1.0.0+ | ✅ |
+| Settings UI (Vietnamese) | v1.0.0+ | ✅ |
+| Hide composer | v1.0.0+ | ✅ |
+| Download story (long press) | v1.0.0+ | ✅ |
+| Download video (long press) | v1.0.0+ | ✅ in-feed only |
+| Reels download button | v1.2.17 | ✅ verified |
+| PROMOTION block | v1.2.4+ | ✅ |
 
+## Reels Download — Current Implementation
+
+### Hook (v8.2.16)
+`FBShortsSideBarView.layoutSubviews` — fires when sidebar lays out (every Reel transition)
+
+### Filter (v8.2.17)
+`isInReelsContext()` walks superview chain:
+- Returns YES if ancestor contains: `FBShortsViewerOverlayComponentView`, `FBVideoHomeUnifiedPlayerViewController`, `FBVideoHomePassthroughView`
+- Returns NO if ancestor contains: `FBCommentStream`, `FBBottomSheet`
+- **CRITICAL**: Without this filter, button appears in comment sheet (FBShortsSideBarView exists there too)
+
+### Button
+- **Frame**: (8, -48, 40, 40) — above sidebar, centered
+- **Style**: Red circle, white border, ⬇ icon
+- **zPosition**: 9999
+- **Parent**: `FBShortsSideBarView` (same as Like/Comment/Share buttons)
+
+## Changelog
+
+| Version | Change |
+|---------|--------|
+| v1.0.0 | Initial: ad block + story seen |
+| v1.0.0 | Add settings UI (English) |
+| v1.0.0 | Vietnamese i18n |
+| v1.0.0 | Modal sheet UI |
+| v1.0.0 | Fix toggle bug |
+| v1.0.0 | Add Reels hook (viewDidLoad) |
+| v1.0.0 | Hide Composer hook |
+| v1.0.0 | Download Story (init) |
+| v1.0.0 | Download Video (long press) |
+| v1.0.0 | Reels button (long press) |
+| v1.0.0 | Lazy install Reels hook |
+| v1.0.0 | Button with delay + screen bounds fallback |
+| v1.0.0 | **CRITICAL FIX**: cast self as UIViewController to get .view |
+| v1.0.0 | Switch to viewWillAppear: hook |
+| v1.0.0 | Hook ALL Reels classes |
+| v1.0.0 | Reels button: zPosition + keyWindow fallback |
+| v1.0.0 | Add viewWillDisappear: hook for cleanup |
+| v1.0.0 | Button in FBVideoHomePassthroughView (right column) |
+| **v1.2.16** | **Hook FBShortsSideBarView.layoutSubviews (perfect alignment)** |
+| **v1.2.17** | **isInReelsContext() filter (prevents button in comment sheet)** |
+
+## Hooks (current count: 11)
+
+1. FBMemNewsFeedEdge.node → nil for SPONSORED
+2. FBComponentCollectionViewDataSource cellForItem
+3. FBComponentCollectionViewDataSource willDisplay
+4. FBSnacksBucketsSeenStateManager markThreadsViewReceiptsAndLightweightReactionsAsSeen
+5. FBSnacksBucketsSeenStateManager _markThreadAsSeen
+6. FBSnacksBucketsSeenStateManager _sendSeenThreadIDsWithBucket
+7. UIViewController.viewDidAppear (settings + lazy install)
+8. FBNewsFeedViewController.viewDidLoad (composer hide)
+9. FBSnacksMediaContainerView (init + didMoveToWindow) → long press for story
+10. FBVideoOverlayPluginComponentBackgroundView.didLongPress → video download
+11. **FBShortsSideBarView.layoutSubviews → Reels download button**
+
+## File Layout
+
+- `Tweak.x`: 1985 lines, all hooks
+- `control`: v1.2.17
+- `Makefile`: GlowV3
+- `GlowV3.plist`: filter for `com.facebook.Facebook` + `com.facebook.Facebook6`
+
+## Key Settings
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `s_removeAds` | YES | Block ads in home feed |
+| `s_disableStorySeen` | YES | Don't mark stories as seen |
+| `s_downloadVideo` | NO | In-feed video long-press download |
+| `s_downloadStory` | NO | Story long-press download |
+| `s_removePYMK` | NO | (not yet implemented) |
+| `s_hideComposer` | YES | Hide composer in newsfeed |
+| `s_hideOverlay` | NO | (not yet implemented) |
+| `s_downloadReels` | YES | Reels button (v1.2.17) |
+
+## Build Commands
+
+```bash
+cd /tmp/facebook-no-ads
+rm -rf .theos/ packages/
+THEOS=/home/tommy/theos make package FINALPACKAGE=1
+cyan -i /home/tommy/test/glow/facebook.ipa -o /tmp/glow_v8.ipa \
+    -f packages/com.tommy.glowv3_1.2.17_iphoneos-arm.deb \
+    --overwrite -s -d
+cp /tmp/glow_v8.ipa /home/tommy/test/glow/glow_v8.ipa
 ```
-SECTION 1: Settings storage       (NSUserDefaults, reloadPrefs)
-SECTION 2: Settings UI           (GlowSettingsViewController)
-SECTION 3: Ad blocking           (FBMemNewsFeedEdge.node + cell hiding)
-SECTION 4: Story seen            (3 paths blocked)
-SECTION 5: Long press to settings (tab bar hook)
-SECTION 6: Install hooks         (deferred to main queue)
-SECTION 7: %ctor                 (load prefs, install viewDidAppear)
-```
 
-## Settings (NSUserDefaults keys)
+## Sideload
 
-| Key | Default | Status |
-|-----|---------|--------|
-| `com.tommy.glow.removeAds` | YES | ✅ wired |
-| `com.tommy.glow.disableStorySeen` | YES | ✅ wired |
-| `com.tommy.glow.downloadVideo` | NO | 🆕 toggle only (not implemented) |
-| `com.tommy.glow.downloadStory` | NO | 🆕 toggle only (not implemented) |
-| `com.tommy.glow.removePYMK` | NO | 🆕 toggle only (not implemented) |
-| `com.tommy.glow.removeReelsCarousel` | NO | 🆕 toggle only (not implemented) |
-| `com.tommy.glow.removeSuggested` | NO | 🆕 toggle only (not implemented) |
-| `com.tommy.glow.hideComposer` | NO | 🆕 toggle only (not implemented) |
-| `com.tommy.glow.disableAutoNext` | NO | 🆕 toggle only (not implemented) |
-| `com.tommy.glow.confirmLike` | NO | 🆕 toggle only (not implemented) |
-| `com.tommy.glow.markAsSeen` | NO | 🆕 toggle only (not implemented) |
-| `com.tommy.glow.clearCacheOnLaunch` | NO | 🆕 toggle only (not implemented) |
-| `com.tommy.glow.notifyUpdates` | NO | 🆕 toggle only (not implemented) |
+1. Open TrollStore
+2. Long press Facebook icon → Remove → Delete
+3. Install `glow_v8.ipa`
+4. Open Facebook → wait 3s for hooks to install
+5. Verify: no ads, story seen, settings (long press Reel), Reels download button
 
-## Build Pipeline
+## Git
 
-```
-Tweak.x (Tweak.xm)
-  ↓ THEOS=/home/tommy/theos make package FINALPACKAGE=1
-  ↓ com.tommy.glowv3_1.0.0_iphoneos-arm.deb
-  ↓ cyan inject into facebook.ipa
-glow_v8.ipa (195MB)
-  ↓ TrollStore install on device
-  ↓ App opens → viewDidAppear hook → installHooks
-  ↓ Settings via long press on any tab
-```
-
-## Open Items (Stage v8.1+)
-
-1. **Settings effect** — currently toggles only update settings but don't re-install hooks. User must restart FB for changes to take effect.
-2. **Download video** — need to verify FBVideoOverlayPluginComponentBackgroundView in 560.x
-3. **Download story** — need to verify FBSnacksMediaContainerView init signature in 560.x
-4. **Hide sections** — need to discover class names for PYMK, Suggested, Reels carousel
-5. **Localize** — copy all 11 language files from Glow 1.3.1
-6. **Onboarding** — WelcomeVC (optional)
-7. **Update checker** (optional)
-
-## Files
-
-| File | Purpose |
-|------|---------|
-| `/tmp/facebook-no-ads/Tweak.x` | v8.0 framework (522 lines) |
-| `/tmp/facebook-no-ads/Makefile` | Build config |
-| `/tmp/facebook-no-ads/control` | Package metadata |
-| `/tmp/facebook-no-ads/GlowV3.plist` | Filter (com.facebook.Facebook + Facebook6) |
-| `/tmp/glow_v8.ipa` | Built tweak |
-| `/home/tommy/test/glow/glow_v8.ipa` | Same (for sideload) |
-
-## Build Output
-
-```
-$ THEOS=/home/tommy/theos make package FINALPACKAGE=1
-==> Building GlowV3 (arm64 + arm64e + armv7)
-==> Making stage for tweak GlowV3...
-dm.pl: building package `com.tommy.glowv3:iphoneos-arm' in `./packages/com.tommy.glowv3_1.0.0_iphoneos-arm.deb'
-
-$ cyan -i facebook.ipa -o glow_v8.ipa -f com.tommy.glowv3_1.0.0_iphoneos-arm.deb --overwrite -s -d
-[*] injected GlowV3.dylib
-[*] generated ipa at /tmp/glow_v8.ipa
-```
-
-## Next Steps for v8.1
-
-1. **Test v8.0 on device** — verify ad block + story seen still work
-2. **Verify settings UI appears** when tapping any tab
-3. **Verify toggles persist** across app restarts
-4. **Add i18n** — copy language files from Glow 1.3.1
-5. **Wire up next feature** — based on user feedback
-
-## Key Design Decisions
-
-1. **Settings via NSUserDefaults** (vs Glow's plist) — standard, easier to share with companion app
-2. **Settings UI is a UITableView** (vs Glow's complex WelcomeVC) — simpler, works on all iOS versions
-3. **Long press on tab bar** (vs Glow's complex DVNLongPressGestureRecognizer) — simpler implementation
-4. **No FFmpeg** (vs Glow's 16MB) — we don't re-encode, just save raw media
-5. **No welcome screen** — first time users can read the README
-6. **Hooks re-installed on every app launch** — not on setting toggle (would require re-hooking API)
+- Branch: `v8-glow-framework`
+- Repo: `https://github.com/Long-Trinh-Tien/facebook-no-ads.git`
