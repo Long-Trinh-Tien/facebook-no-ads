@@ -1,8 +1,8 @@
 Package: com.tommy.glowr4
 Name: GlowR4
-Version: 1.1.0
+Version: 1.2.0
 Architecture: iphoneos-arm
-Description: R4 Verifier v3.1 — +Phase 7 (Reels action buttons)
+Description: R4 Verifier v1.2 — +Phase 8 (FB class enum) + Phase 9 (VC hook)
 Maintainer: tommy
 Author: tommy
 Section: Tweaks

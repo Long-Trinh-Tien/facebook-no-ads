@@ -119,6 +119,71 @@ static void checkAndDump(const char *name) {
     }
 }
 
+// Dump all FB-prefixed UIView/UIViewController classes.
+// Why: Phase 2-7 candidates returned 0/30, 0/37. Class names have been
+// completely renamed in 560.x. We need to enumerate for real.
+// Strategy:
+//   1. objc_copyClassList all loaded classes (safe - read-only)
+//   2. Filter: name starts with "FB" or "NSKVONotifying_FB"
+//   3. Check superclass chain contains UIView or UIViewController
+//   4. Print matching class names to glow_fb_classes.txt
+// Timing: classes are loaded lazily. We call this 4 times (0, +5, +15, +30s)
+// to capture classes that get loaded when user navigates to Reels.
+static int g_dump_count = 0;
+static void dumpFBCurrentlyLoaded(void) {
+    g_dump_count++;
+    char fb_path[512];
+    snprintf(fb_path, sizeof(fb_path), "%s.fb_classes.%d.txt", g_log_path, g_dump_count);
+    FILE *fb_file = fopen(fb_path, "w");
+    if (!fb_file) {
+        LOG("  Cannot open %s\n", fb_path);
+        return;
+    }
+    unsigned int count = 0;
+    Class *classes = objc_copyClassList(&count);
+    int fb_ui = 0, fb_all = 0;
+    // Buffer output, flush at end (avoid IO pressure)
+    char *buf = (char *)malloc(2 * 1024 * 1024);  // 2MB
+    if (!buf) { fclose(fb_file); free(classes); return; }
+    size_t blen = 0;
+    blen += snprintf(buf + blen, 2*1024*1024 - blen,
+                     "# FB classes loaded (snapshot #%d, total %u classes)\n", g_dump_count, count);
+    for (unsigned i = 0; i < count; i++) {
+        const char *name = class_getName(classes[i]);
+        if (!name) continue;
+        if (strncmp(name, "FB", 2) != 0) continue;
+        fb_all++;
+        // Walk superclass chain
+        Class sup = classes[i];
+        int depth = 0;
+        int isUI = 0;
+        while (sup && depth < 20) {
+            const char *sn = class_getName(sup);
+            if (sn && (strcmp(sn, "UIView") == 0 || strcmp(sn, "UIViewController") == 0)) {
+                isUI = 1;
+                break;
+            }
+            sup = class_getSuperclass(sup);
+            depth++;
+        }
+        if (isUI) {
+            blen += snprintf(buf + blen, 2*1024*1024 - blen, "  %s\n", name);
+            fb_ui++;
+        }
+    }
+    blen += snprintf(buf + blen, 2*1024*1024 - blen,
+                     "# Total FB classes: %d, FB UI classes: %d\n", fb_all, fb_ui);
+    if (blen > 0) {
+        fwrite(buf, 1, blen, fb_file);
+        fflush(fb_file);
+    }
+    free(buf);
+    free(classes);
+    fclose(fb_file);
+    LOG("  Snapshot #%d: %d FB classes, %d FB UI classes -> %s\n",
+        g_dump_count, fb_all, fb_ui, fb_path);
+}
+
 __attribute__((constructor))
 static void r4_init(void) {
     LOG("=== R4 Verifier v3 (targeted) — %s ===\n\n", __DATE__ " " __TIME__);
@@ -358,6 +423,27 @@ static void r4_init(void) {
             };
             checkCandidates("Reels action buttons", reelsActions, sizeof(reelsActions)/sizeof(reelsActions[0]));
 
+            // ─── Phase 8: Dump ALL FB-prefixed UI classes ───
+            // Because Phase 2-7 found 0/30, 0/37 candidates, we need to
+            // actually enumerate. This dumps all FB classes that are
+            // UIView or UIViewController subclasses, to glow_fb_classes.txt.
+            // User navigates to Reels first, then we dump after 5s.
+            LOG("\n########## PHASE 8: FB class enumeration ##########\n");
+            dumpFBCurrentlyLoaded();
+
+            // Schedule more dumps at 5s, 15s, 30s
+            for (int t = 5; t <= 30; t += 10) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, t * NSEC_PER_SEC),
+                               dispatch_get_main_queue(), ^{
+                    @try {
+                        LOG("\n=== Phase 8 snapshot at +%ds ===\n", t);
+                        dumpFBCurrentlyLoaded();
+                    } @catch (NSException *e) {
+                        LOG("Phase 8 snapshot exc: %s\n", e.reason.UTF8String);
+                    }
+                });
+            }
+
             LOG("\n=== R4 Verification Complete ===\n");
             LOG("Output: %s\n", g_log_path);
             if (g_log_file) {
@@ -371,6 +457,66 @@ static void r4_init(void) {
         } @catch (...) {
             LOG("EXC(c++)\n");
             if (g_log_file) { fflush(g_log_file); fclose(g_log_file); }
+        }
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PHASE 9: Hook UIViewController.viewDidAppear: to log FB classes
+// Why: dumps only happen at startup, but Reels classes load later.
+// Hooking viewDidAppear: gives us the real class name of every VC
+// the user navigates to.
+// ═══════════════════════════════════════════════════════════════
+static IMP orig_vc_viewDidAppear = NULL;
+static int g_vcLog_count = 0;
+static void hooked_vc_viewDidAppear(id self, SEL _cmd, BOOL animated) {
+    if (orig_vc_viewDidAppear) {
+        typedef void (*FnType)(id, SEL, BOOL);
+        FnType fn = (FnType)(uintptr_t)orig_vc_viewDidAppear;
+        fn(self, _cmd, animated);
+    }
+    @try {
+        if (![self isKindOfClass:[UIViewController class]]) return;
+        Class realCls = object_getClass(self);
+        const char *name = class_getName(realCls);
+        if (!name) return;
+        // Only log FB* and NSKVONotifying_*
+        if (strncmp(name, "FB", 2) != 0 && strncmp(name, "NSKVONotifying_", 15) != 0) return;
+        g_vcLog_count++;
+        // Print class + superclass chain
+        LOG("\n[VC #%d] viewDidAppear: %s\n", g_vcLog_count, name);
+        Class sup = class_getSuperclass(realCls);
+        int d = 1;
+        while (sup && d < 10) {
+            LOG("  [%d] %s\n", d, class_getName(sup));
+            sup = class_getSuperclass(sup);
+            d++;
+        }
+    } @catch (NSException *e) {
+        LOG("[VC] exc: %s\n", e.reason.UTF8String);
+    }
+}
+
+static void installViewControllerHook(void) {
+    Class vcCls = objc_getClass("UIViewController");
+    if (!vcCls) return;
+    SEL sel = @selector(viewDidAppear:);
+    Method m = class_getInstanceMethod(vcCls, sel);
+    if (!m) return;
+    orig_vc_viewDidAppear = method_getImplementation(m);
+    method_setImplementation(m, (IMP)hooked_vc_viewDidAppear);
+    LOG("[R4] HOOKED UIViewController.viewDidAppear:\n");
+}
+
+__attribute__((constructor))
+static void r4_install_hooks(void) {
+    // Delay slightly to ensure UIViewController is loaded
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC),
+                   dispatch_get_main_queue(), ^{
+        @try {
+            installViewControllerHook();
+        } @catch (NSException *e) {
+            LOG("[R4] installViewControllerHook exc: %s\n", e.reason.UTF8String);
         }
     });
 }
