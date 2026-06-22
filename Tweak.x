@@ -1551,6 +1551,32 @@ static IMP orig_SDPlaybackURL = NULL;
 //        @"at" (NSDate).
 // This solves the "wrong Reel" problem: each VC has its OWN URL.
 static NSMutableDictionary *g_vcToURLDict = nil;
+
+// v8.2.46: Item-keyed URL cache (THE definitive source for Reels)
+// Key = NSValue (non-retained pointer to FBVideoPlaybackItem)
+// Value = NSDictionary {HD, SD, at}
+//
+// Each item instance has its OWN URL entry. Pre-buffering the next Reel
+// creates a new item, so its URL goes to a different dict key.
+// No collision with the currently-watched Reel's item.
+//
+// Safety: when the item is associated as an Associated Object on a View
+// (with OBJC_ASSOCIATION_RETAIN), the View retains the item, so the
+// non-retained pointer in the dict stays valid for the View's lifetime.
+static NSMutableDictionary *g_itemToURLDict = nil;
+
+// v8.2.46: Clear stale Glow tags on a view (used when view is recycled
+// to a new Reel). Per user refinement to prevent stale data leaks.
+static void clearGlowTagsOnView(UIView *v) {
+    if (!v) return;
+    @try {
+        objc_setAssociatedObject(v, "GlowReelHD", nil, OBJC_ASSOCIATION_RETAIN);
+        objc_setAssociatedObject(v, "GlowReelSD", nil, OBJC_ASSOCIATION_RETAIN);
+        objc_setAssociatedObject(v, "GlowReelItem", nil, OBJC_ASSOCIATION_RETAIN);
+    } @catch (NSException *e) {
+        LOG("[dl/reel] clearGlowTags exc: %s\n", e.reason.UTF8String);
+    }
+}
 static int g_glowStyleInstalled = 0;
 
 // v8.2.32: setVideoItem: hook implementation. Called when FB sets a new
@@ -1691,6 +1717,19 @@ static void hooked_setVideoItem(id self, SEL _cmd, id newItem) {
             class_getName(object_getClass(newItem)),
             hd ? "YES" : "NO",
             sd ? "YES" : "NO");
+
+        // v8.2.46: Tag VC with item reference (for View Hierarchy walk in onReelButtonTap)
+        // Per user confirmation: don't filter Reels VCs - keep the tag universal.
+        // The View retains the item via OBJC_ASSOCIATION_RETAIN so the pointer stays valid.
+        @try {
+            // Clear stale tags first (per user refinement to prevent stale data leaks)
+            // Then set fresh tags with current item + URLs
+            objc_setAssociatedObject(self, "GlowReelHD", hd ?: [NSNull null], OBJC_ASSOCIATION_RETAIN);
+            objc_setAssociatedObject(self, "GlowReelSD", sd ?: [NSNull null], OBJC_ASSOCIATION_RETAIN);
+            objc_setAssociatedObject(self, "GlowReelItem", newItem, OBJC_ASSOCIATION_RETAIN);
+        } @catch (NSException *e) {
+            LOG("[dl/reel] tag VC exc: %s\n", e.reason.UTF8String);
+        }
 
         // v8.2.36/37: GESTURE INJECTION (per user's pro approach)
         // Inject our UILongPressGestureRecognizer into the VC's view
@@ -1938,6 +1977,10 @@ static NSMutableDictionary *g_urlCacheBySidebar = nil;
 
 @interface GlowReelButtonHandler : NSObject
 - (void)downloadReelVideoFromView:(UIView *)view;
+- (BOOL)findReelURLViaViewTag:(UIView *)btnView
+                          hdOut:(NSURL **)outHD
+                          sdOut:(NSURL **)outSD
+                          sbKey:(NSValue *)sbKey;
 - (void)presentQualityActionSheetHD:(NSURL *)hd sd:(NSURL *)sd sourceView:(UIView *)srcView;
 @end
 @implementation GlowReelButtonHandler
@@ -2046,6 +2089,86 @@ static NSMutableDictionary *g_urlCacheBySidebar = nil;
 //      currentItem, videoController, playbackController, etc.)
 //   3. Walk down from VC's view to find AVPlayerLayer and get URL
 //   4. Use cached URL (from hooked_HDPlaybackURL/SDPlaybackURL)
+//
+// v8.2.46: PRIORITY order changed to fix "sai video" bug:
+//   M-2 (HIGHEST): Walk superview from button, find Associated Object
+//                 "GlowReelItem" tag → use item as key in g_itemToURLDict
+//   M-1: per-VC cache (g_vcToURLDict)
+//   M-0: per-sidebar cache (g_urlCacheBySidebar)
+//   FALLBACK: Direct VC property walk (existing M1-M5)
+//   GLOBAL CACHE (g_cachedHDURL/SD): REMOVED in v8.2.46 (was the bug source)
+- (BOOL)findReelURLViaViewTag:(UIView *)btnView
+                          hdOut:(NSURL **)outHD
+                          sdOut:(NSURL **)outSD
+                          sbKey:(NSValue *)sbKey {
+    if (!btnView || !outHD || !outSD) return NO;
+    @try {
+        UIView *v = btnView;
+        int depth = 0;
+        while (v && depth < 15) {
+            // 2a: Check for "GlowReelItem" tag (item-keyed lookup)
+            id taggedItem = objc_getAssociatedObject(v, "GlowReelItem");
+            if (taggedItem && g_itemToURLDict) {
+                NSValue *itemKey = [NSValue valueWithNonretainedObject:taggedItem];
+                NSDictionary *itemEntry = g_itemToURLDict[itemKey];
+                if (itemEntry) {
+                    id hdObj = itemEntry[@"HD"];
+                    id sdObj = itemEntry[@"SD"];
+                    // v8.2.46: Support both NSURL and NSString (per user refinement)
+                    BOOL hasHD = (hdObj && hdObj != [NSNull null] &&
+                                  ([hdObj isKindOfClass:[NSURL class]] || [hdObj isKindOfClass:[NSString class]]));
+                    BOOL hasSD = (sdObj && sdObj != [NSNull null] &&
+                                  ([sdObj isKindOfClass:[NSURL class]] || [sdObj isKindOfClass:[NSString class]]));
+                    if (hasHD) *outHD = [hdObj isKindOfClass:[NSURL class]] ? (NSURL *)hdObj : [NSURL URLWithString:(NSString *)hdObj];
+                    if (hasSD) *outSD = [sdObj isKindOfClass:[NSURL class]] ? (NSURL *)sdObj : [NSURL URLWithString:(NSString *)sdObj];
+                    if (*outHD || *outSD) {
+                        // Safe validation: check item is FBVideoPlaybackItem
+                        // (avoids using dangling pointer if item was dealloced)
+                        Class fbiCls = NSClassFromString(@"FBVideoPlaybackItem");
+                        if (fbiCls && [taggedItem isKindOfClass:fbiCls]) {
+                            LOG("[dl/reel] M-2a: View-tagged ITEM at depth=%d class=%s HD=%d SD=%d\n",
+                                depth, class_getName(object_getClass(v)), *outHD != nil, *outSD != nil);
+                            // Cache to per-sidebar for next tap
+                            if (!g_urlCacheBySidebar) g_urlCacheBySidebar = [[NSMutableDictionary alloc] init];
+                            NSMutableDictionary *sidebarEntry = [NSMutableDictionary dictionary];
+                            sidebarEntry[@"HD"] = *outHD ?: [NSNull null];
+                            sidebarEntry[@"SD"] = *outSD ?: [NSNull null];
+                            if (sbKey) g_urlCacheBySidebar[sbKey] = sidebarEntry;
+                            return YES;
+                        }
+                    }
+                }
+            }
+            // 2b: Check for direct HD/SD tag on view (fallback if item-keyed fails)
+            id hdObj = objc_getAssociatedObject(v, "GlowReelHD");
+            id sdObj = objc_getAssociatedObject(v, "GlowReelSD");
+            if ((hdObj && hdObj != [NSNull null]) || (sdObj && sdObj != [NSNull null])) {
+                BOOL hasHD = (hdObj && hdObj != [NSNull null] &&
+                              ([hdObj isKindOfClass:[NSURL class]] || [hdObj isKindOfClass:[NSString class]]));
+                BOOL hasSD = (sdObj && sdObj != [NSNull null] &&
+                              ([sdObj isKindOfClass:[NSURL class]] || [sdObj isKindOfClass:[NSString class]]));
+                if (hasHD) *outHD = [hdObj isKindOfClass:[NSURL class]] ? (NSURL *)hdObj : [NSURL URLWithString:(NSString *)hdObj];
+                if (hasSD) *outSD = [sdObj isKindOfClass:[NSURL class]] ? (NSURL *)sdObj : [NSURL URLWithString:(NSString *)sdObj];
+                if (*outHD || *outSD) {
+                    LOG("[dl/reel] M-2b: View-tagged URL at depth=%d class=%s\n",
+                        depth, class_getName(object_getClass(v)));
+                    if (!g_urlCacheBySidebar) g_urlCacheBySidebar = [[NSMutableDictionary alloc] init];
+                    NSMutableDictionary *sidebarEntry = [NSMutableDictionary dictionary];
+                    sidebarEntry[@"HD"] = *outHD ?: [NSNull null];
+                    sidebarEntry[@"SD"] = *outSD ?: [NSNull null];
+                    if (sbKey) g_urlCacheBySidebar[sbKey] = sidebarEntry;
+                    return YES;
+                }
+            }
+            v = v.superview;
+            depth++;
+        }
+    } @catch (NSException *e) {
+        LOG("[dl/reel] M-2 exc: %s\n", e.reason.UTF8String);
+    }
+    return NO;
+}
+
 - (void)downloadReelVideoFromView:(UIView *)startView {
     @try {
         SEL curSel = sel_registerName("currentVideoPlaybackItem");
@@ -2054,6 +2177,18 @@ static NSMutableDictionary *g_urlCacheBySidebar = nil;
         UIView *thisSideBar = btnView.superview;
         NSValue *sbKey = [NSValue valueWithNonretainedObject:thisSideBar];
         NSURL *hd = nil, *sd = nil;
+
+        // v8.2.46: M-2 (HIGHEST PRIORITY) - walk superview from button,
+        // look for "GlowReelItem" tag. This is the most accurate method
+        // because each Reel has its own view hierarchy with unique item tag.
+        // Pre-buffering the next Reel does NOT affect the current Reel's view.
+        // We use a separate function so we can return early without goto.
+        if ([self findReelURLViaViewTag:btnView hdOut:&hd sdOut:&sd sbKey:sbKey]) {
+            // v8.2.46: M-2 hit - show action sheet directly
+            if (!g_videoHandler) g_videoHandler = [[GlowVideoDownloadHandler alloc] init];
+            [g_videoHandler presentQualityActionSheetHD:hd sd:sd sourceView:btnView];
+            return;
+        }
 
         // v8.2.32: Method -1 (HIGHEST PRIORITY) - check GLOW-style per-VC cache
         // The cache is keyed by VC instance. Walk up nextResponder to find VC,
@@ -2156,6 +2291,12 @@ static NSMutableDictionary *g_urlCacheBySidebar = nil;
         }
         if (hd || sd) {
             // v8.2.33: Use shared action sheet helper (1 tap = 1 download)
+            if (!g_videoHandler) g_videoHandler = [[GlowVideoDownloadHandler alloc] init];
+            [g_videoHandler presentQualityActionSheetHD:hd sd:sd sourceView:btnView];
+            return;
+        }
+        m_show_action_sheet:  // v8.2.46: target label for M-2 goto
+        if (hd || sd) {
             if (!g_videoHandler) g_videoHandler = [[GlowVideoDownloadHandler alloc] init];
             [g_videoHandler presentQualityActionSheetHD:hd sd:sd sourceView:btnView];
             return;
@@ -2344,27 +2485,14 @@ static NSMutableDictionary *g_urlCacheBySidebar = nil;
             } @catch (...) {}
         }
 
+        // v8.2.46: REMOVED global cache fallback (was the "sai video" source)
+        // Pre-buffering the next Reel overwrites g_cachedHDURL/SD, causing
+        // the current Reel to download the wrong video. Now we rely on
+        // M-2 (view-tagged item) and M-1 (per-VC) which are context-isolated.
         if (!item && !directURL) {
-            // v8.2.31: LAST RESORT - use global URL captured by hook.
-            // The hook fires when FB reads HDPlaybackURL/SDPlaybackURL.
-            // The global might be from a different Reel (FB preload), but
-            // better than "không tìm thấy video".
-            if (g_cachedHDURL || g_cachedSDURL) {
-                LOG("[dl/reel] M0: using GLOBAL cached URL as fallback (age=%.1fs)\n",
-                    g_cachedAt ? -[g_cachedAt timeIntervalSinceNow] : 0);
-                hd = g_cachedHDURL;
-                sd = g_cachedSDURL;
-                if (!g_urlCacheBySidebar) g_urlCacheBySidebar = [[NSMutableDictionary alloc] init];
-                NSMutableDictionary *entry = [NSMutableDictionary dictionary];
-                entry[@"HD"] = hd ?: [NSNull null];
-                entry[@"SD"] = sd ?: [NSNull null];
-                g_urlCacheBySidebar[sbKey] = entry;
-                // Don't return - let it fall through to action sheet
-            } else {
-                LOG("[dl/reel] no playback item AND no AVPlayerLayer URL found\n");
-                showSafeToast(@"❌ Không tìm thấy video");
-                return;
-            }
+            LOG("[dl/reel] no playback item AND no AVPlayerLayer URL found\n");
+            showSafeToast(@"❌ Video chưa load - thử lại sau 2-3s");
+            return;
         }
 
         if (item) {
@@ -2655,6 +2783,31 @@ static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
                                 g_urlCacheBySidebar[sbKey] = entry;
                                 LOG("[reels/main] PRE-WARM cached for sidebar: HD=%d SD=%d\n",
                                     hdURL != nil, sdURL != nil);
+
+                                // v8.2.46: Tag sidebar + overlay with item reference
+                                // The View RETAINs the item (OBJC_ASSOCIATION_RETAIN),
+                                // so the item pointer stays valid for the View's lifetime.
+                                // In onReelButtonTap:, walk superview from button
+                                // to find the tag, then use item as key in g_itemToURLDict.
+                                @try {
+                                    // Clear stale tags first (per user refinement)
+                                    clearGlowTagsOnView(sideBar);
+                                    // Tag sidebar
+                                    objc_setAssociatedObject(sideBar, "GlowReelItem", item, OBJC_ASSOCIATION_RETAIN);
+                                    if (hdURL) objc_setAssociatedObject(sideBar, "GlowReelHD", hdURL, OBJC_ASSOCIATION_RETAIN);
+                                    if (sdURL) objc_setAssociatedObject(sideBar, "GlowReelSD", sdURL, OBJC_ASSOCIATION_RETAIN);
+                                    // Tag overlay too (in case button is added to overlay, not sidebar)
+                                    if (overlay) {
+                                        clearGlowTagsOnView(overlay);
+                                        objc_setAssociatedObject(overlay, "GlowReelItem", item, OBJC_ASSOCIATION_RETAIN);
+                                        if (hdURL) objc_setAssociatedObject(overlay, "GlowReelHD", hdURL, OBJC_ASSOCIATION_RETAIN);
+                                        if (sdURL) objc_setAssociatedObject(overlay, "GlowReelSD", sdURL, OBJC_ASSOCIATION_RETAIN);
+                                    }
+                                    LOG("[reels/main] TAGGED sidebar+overlay with item=%s\n",
+                                        class_getName(object_getClass(item)));
+                                } @catch (NSException *tagExc) {
+                                    LOG("[reels/main] tag exc: %s\n", tagExc.reason.UTF8String);
+                                }
                             }
                         }
                     }
@@ -2678,9 +2831,22 @@ static NSURL *hooked_HDPlaybackURL(id self, SEL _cmd) {
         typedef NSURL *(*FnType)(id, SEL);
         url = ((FnType)orig_HDPlaybackURL)(self, _cmd);
     }
-    if (url) {
+    if (url && self) {
+        // Keep global cache for newsfeed (backward compat)
         g_cachedHDURL = url;
         g_cachedAt = [NSDate date];
+        // v8.2.46: Also save in item-keyed dict (THE definitive source for Reels)
+        // Key = item instance. Pre-buffering creates new item, no collision.
+        if (!g_itemToURLDict) g_itemToURLDict = [[NSMutableDictionary alloc] init];
+        NSValue *itemKey = [NSValue valueWithNonretainedObject:self];
+        NSMutableDictionary *itemEntry = [g_itemToURLDict[itemKey] mutableCopy];
+        if (!itemEntry) itemEntry = [NSMutableDictionary dictionary];
+        itemEntry[@"HD"] = url;
+        if (!itemEntry[@"SD"] || itemEntry[@"SD"] == [NSNull null]) {
+            // don't overwrite SD with nil
+        }
+        itemEntry[@"at"] = [NSDate date];
+        g_itemToURLDict[itemKey] = itemEntry;
         LOG("[dl/reel] CAPTURED HD: %s\n", [[url absoluteString] UTF8String]);
     }
     return url;
@@ -2693,9 +2859,17 @@ static NSURL *hooked_SDPlaybackURL(id self, SEL _cmd) {
         typedef NSURL *(*FnType)(id, SEL);
         url = ((FnType)orig_SDPlaybackURL)(self, _cmd);
     }
-    if (url) {
+    if (url && self) {
         g_cachedSDURL = url;
         g_cachedAt = [NSDate date];
+        // v8.2.46: Also save in item-keyed dict
+        if (!g_itemToURLDict) g_itemToURLDict = [[NSMutableDictionary alloc] init];
+        NSValue *itemKey = [NSValue valueWithNonretainedObject:self];
+        NSMutableDictionary *itemEntry = [g_itemToURLDict[itemKey] mutableCopy];
+        if (!itemEntry) itemEntry = [NSMutableDictionary dictionary];
+        itemEntry[@"SD"] = url;
+        itemEntry[@"at"] = [NSDate date];
+        g_itemToURLDict[itemKey] = itemEntry;
         LOG("[dl/reel] CAPTURED SD: %s\n", [[url absoluteString] UTF8String]);
     }
     return url;
@@ -3032,7 +3206,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.44 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.46 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
