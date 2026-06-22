@@ -1,8 +1,8 @@
 Package: com.tommy.glowv3
 Name: GlowV3
-Version: 1.2.48
+Version: 1.2.50
 Architecture: iphoneos-arm
-Description: Facebook ad blocker + Reels v8.2.48 (UIResponder chain M-2 fix - VC tag reachable from button)
+Description: Facebook ad blocker + Reels v8.2.50 (live controller binding via setPlaybackController: hook - real-time engine query at tap)
 Maintainer: tommy
 Author: tommy
 Section: Tweaks

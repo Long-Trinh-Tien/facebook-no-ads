@@ -1638,6 +1638,10 @@ static void hooked_setVideoPlayer(id self, SEL _cmd, id player) {
 }
 
 // v8.2.37: setPlaybackController: hook
+// v8.2.50: UPGRADED - tag the LIVE controller onto the View for realtime engine query
+// Background: This is the REAL View<->Controller binding that FB sets up.
+// The View calls setPlaybackController: to wire itself to its media engine.
+// We tag the controller onto the View so M-2a-controller can query it at tap time.
 static void hooked_setPlaybackController(id self, SEL _cmd, id ctrl) {
     if (orig_setPlaybackController) {
         typedef void (*FnType)(id, SEL, id);
@@ -1646,6 +1650,20 @@ static void hooked_setPlaybackController(id self, SEL _cmd, id ctrl) {
     LOG("[dl/debug_entrance] setPlaybackController: VC=%s ctrl=%s\n",
         self ? class_getName(object_getClass(self)) : "nil",
         ctrl ? class_getName(object_getClass(ctrl)) : "nil");
+    @try {
+        if (self && ctrl) {
+            // v8.2.50: Bind controller to view - this is the real View<->Engine link
+            // OBJC_ASSOCIATION_RETAIN_NONATOMIC keeps controller alive while View holds it.
+            // The tag persists for the View's lifetime (lifecycle-bound, not layout-bound).
+            objc_setAssociatedObject(self, "GlowPlaybackController", ctrl,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            LOG("[dl/reel] BOUND controller=%s to view=%s\n",
+                class_getName(object_getClass(ctrl)),
+                class_getName(object_getClass(self)));
+        }
+    } @catch (NSException *e) {
+        LOG("[dl/reel] setPlaybackController: tag exc: %s\n", e.reason.UTF8String);
+    }
     if (s_downloadVideo) {
         injectLongPressForObject(self, "setPlaybackController:");
     }
@@ -1718,18 +1736,13 @@ static void hooked_setVideoItem(id self, SEL _cmd, id newItem) {
             hd ? "YES" : "NO",
             sd ? "YES" : "NO");
 
-        // v8.2.46: Tag VC with item reference (for View Hierarchy walk in onReelButtonTap)
-        // Per user confirmation: don't filter Reels VCs - keep the tag universal.
-        // The View retains the item via OBJC_ASSOCIATION_RETAIN so the pointer stays valid.
-        @try {
-            // Clear stale tags first (per user refinement to prevent stale data leaks)
-            // Then set fresh tags with current item + URLs
-            objc_setAssociatedObject(self, "GlowReelHD", hd ?: [NSNull null], OBJC_ASSOCIATION_RETAIN);
-            objc_setAssociatedObject(self, "GlowReelSD", sd ?: [NSNull null], OBJC_ASSOCIATION_RETAIN);
-            objc_setAssociatedObject(self, "GlowReelItem", newItem, OBJC_ASSOCIATION_RETAIN);
-        } @catch (NSException *e) {
-            LOG("[dl/reel] tag VC exc: %s\n", e.reason.UTF8String);
-        }
+        // v8.2.50: REMOVED dead VC tag.
+        // Background: setVideoItem: is called on FBVideoPlaybackController
+        // (a Media Engine NSObject, NOT a UIViewController). The engine is
+        // NOT in the player view's responder chain, so any tag we put on
+        // self here is orphan code (unreachable from the button walk).
+        // Replaced by live controller binding in hooked_setPlaybackController:
+        // which is the REAL View<->Engine link that FB sets up.
 
         // v8.2.36/37: GESTURE INJECTION (per user's pro approach)
         // Inject our UILongPressGestureRecognizer into the VC's view
@@ -2102,56 +2115,80 @@ static NSMutableDictionary *g_urlCacheBySidebar = nil;
 //   Reason: superview is a UIView-only chain and CANNOT reach UIViewController,
 //   so the VC tag set in hooked_setVideoItem was unreachable. UIResponder chain
 //   covers BOTH UIView and UIViewController, so the VC tag is now reachable.
+//
+// v8.2.50: BREAKTHROUGH - LIVE ENGINE QUERY
+//   Previous attempts (v8.2.46 superview, v8.2.48 responder) FAILED because:
+//   - setVideoItem: is called on FBVideoPlaybackController (a Media Engine NSObject),
+//     NOT a UIViewController. The engine is not in the player view's responder chain.
+//   - Tagging the engine was dead code - the tag was orphan.
+//   - v8.2.48 verified: M-2 walk found NO tags at all (no M-2a-responder logs).
+//
+//   v8.2.50 FIX: hook setPlaybackController: (called on the PLAYER VIEW itself)
+//   to tag the controller onto the view. This IS the real View<->Engine binding
+//   that FB uses. At tap time, M-2a-controller walks responder chain to find
+//   the tag, then queries [controller currentVideoPlaybackItem] LIVE - asking
+//   the engine "what is playing right now?" - always correct, immune to pre-buffer.
 - (BOOL)findReelURLViaViewTag:(UIView *)btnView
                           hdOut:(NSURL **)outHD
                           sdOut:(NSURL **)outSD
                           sbKey:(NSValue *)sbKey {
     if (!btnView || !outHD || !outSD) return NO;
     @try {
-        // v8.2.48: UIResponder chain navigation to bridge the View-VC gap smoothly
-        // Background: in v8.2.46 we tagged VC with "GlowReelItem/HD/SD" in
-        // hooked_setVideoItem, but the finder used `v.superview` which is a
-        // UIView-only chain and CANNOT reach UIViewController. Result: the
-        // VC tag was unreachable. Now we walk `responder.nextResponder` which
-        // traverses BOTH UIView and UIViewController, so the VC tag is hit-able.
+        // v8.2.50: UIResponder chain -> find GlowPlaybackController -> LIVE engine query
         UIResponder *responder = btnView;
         int depth = 0;
 
         while (responder && depth < 20) {
-            // M-2a-responder: Check for retained item reference
-            id taggedItem = objc_getAssociatedObject(responder, "GlowReelItem");
-            if (taggedItem && g_itemToURLDict) {
-                NSValue *itemKey = [NSValue valueWithNonretainedObject:taggedItem];
-                NSDictionary *itemEntry = g_itemToURLDict[itemKey];
-
-                if (itemEntry) {
-                    // v8.2.48: Safe validation FIRST - reject dangling/foreign items
-                    Class fbiCls = NSClassFromString(@"FBVideoPlaybackItem");
-                    if (fbiCls && [taggedItem isKindOfClass:fbiCls]) {
-                        id hdObj = itemEntry[@"HD"];
-                        id sdObj = itemEntry[@"SD"];
-                        // v8.2.46: Support both NSURL and NSString (per user refinement)
-                        BOOL hasHD = (hdObj && hdObj != [NSNull null] &&
-                                      ([hdObj isKindOfClass:[NSURL class]] || [hdObj isKindOfClass:[NSString class]]));
-                        BOOL hasSD = (sdObj && sdObj != [NSNull null] &&
-                                      ([sdObj isKindOfClass:[NSURL class]] || [sdObj isKindOfClass:[NSString class]]));
-                        if (hasHD) *outHD = [hdObj isKindOfClass:[NSURL class]] ? (NSURL *)hdObj : [NSURL URLWithString:(NSString *)hdObj];
-                        if (hasSD) *outSD = [sdObj isKindOfClass:[NSURL class]] ? (NSURL *)sdObj : [NSURL URLWithString:(NSString *)sdObj];
-                        if (*outHD || *outSD) {
-                            LOG("[dl/reel] M-2a-responder: Hit via responder chain at depth=%d class=%s HD=%d SD=%d\n",
-                                depth, class_getName(object_getClass(responder)), *outHD != nil, *outSD != nil);
-                            // Populate sidebar cache fallback dynamically
-                            if (!g_urlCacheBySidebar) g_urlCacheBySidebar = [[NSMutableDictionary alloc] init];
-                            NSMutableDictionary *sidebarEntry = [NSMutableDictionary dictionary];
-                            sidebarEntry[@"HD"] = *outHD ?: [NSNull null];
-                            sidebarEntry[@"SD"] = *outSD ?: [NSNull null];
-                            if (sbKey) g_urlCacheBySidebar[sbKey] = sidebarEntry;
-                            return YES;
+            // M-2a-controller (HIGHEST PRIORITY): Live engine query
+            // Find the controller tagged by hooked_setPlaybackController:,
+            // then ask it "what is currently playing on this view?" via
+            // currentVideoPlaybackItem. This is ALWAYS correct at tap time.
+            id controller = objc_getAssociatedObject(responder, "GlowPlaybackController");
+            if (controller) {
+                SEL itemSel = sel_registerName("currentVideoPlaybackItem");
+                if ([controller respondsToSelector:itemSel]) {
+                    id liveItem = [controller performSelector:itemSel];
+                    if (liveItem && g_itemToURLDict) {
+                        // Safe validation: must be FBVideoPlaybackItem
+                        Class fbiCls = NSClassFromString(@"FBVideoPlaybackItem");
+                        if (fbiCls && [liveItem isKindOfClass:fbiCls]) {
+                            NSValue *itemKey = [NSValue valueWithNonretainedObject:liveItem];
+                            NSDictionary *itemEntry = g_itemToURLDict[itemKey];
+                            if (itemEntry) {
+                                id hdObj = itemEntry[@"HD"];
+                                id sdObj = itemEntry[@"SD"];
+                                // v8.2.46: Support both NSURL and NSString (per user refinement)
+                                BOOL hasHD = (hdObj && hdObj != [NSNull null] &&
+                                              ([hdObj isKindOfClass:[NSURL class]] || [hdObj isKindOfClass:[NSString class]]));
+                                BOOL hasSD = (sdObj && sdObj != [NSNull null] &&
+                                              ([sdObj isKindOfClass:[NSURL class]] || [sdObj isKindOfClass:[NSString class]]));
+                                if (hasHD) *outHD = [hdObj isKindOfClass:[NSURL class]] ? (NSURL *)hdObj : [NSURL URLWithString:(NSString *)hdObj];
+                                if (hasSD) *outSD = [sdObj isKindOfClass:[NSURL class]] ? (NSURL *)sdObj : [NSURL URLWithString:(NSString *)sdObj];
+                                if (*outHD || *outSD) {
+                                    LOG("[dl/reel] M-2a-controller: Live engine hit at depth=%d view=%s ctrl=%s item=%s HD=%d SD=%d\n",
+                                        depth,
+                                        class_getName(object_getClass(responder)),
+                                        class_getName(object_getClass(controller)),
+                                        class_getName(object_getClass(liveItem)),
+                                        *outHD != nil, *outSD != nil);
+                                    // Populate sidebar cache fallback dynamically
+                                    if (!g_urlCacheBySidebar) g_urlCacheBySidebar = [[NSMutableDictionary alloc] init];
+                                    NSMutableDictionary *sidebarEntry = [NSMutableDictionary dictionary];
+                                    sidebarEntry[@"HD"] = *outHD ?: [NSNull null];
+                                    sidebarEntry[@"SD"] = *outSD ?: [NSNull null];
+                                    if (sbKey) g_urlCacheBySidebar[sbKey] = sidebarEntry;
+                                    return YES;
+                                }
+                            }
                         }
                     }
                 }
             }
-            // M-2b-responder: Direct asset URL tags on responder backup layer
+
+            // M-2b-responder (CHEAP INSURANCE BACKUP): Direct HD/SD tag fallback
+            // Kept for the case where currentVideoPlaybackItem returns nil
+            // for a few ms during structural reconfiguration. The static tag
+            // set by hooked_setVideoItem (on the engine) and pre-warm survives.
             id hdObj = objc_getAssociatedObject(responder, "GlowReelHD");
             id sdObj = objc_getAssociatedObject(responder, "GlowReelSD");
             if ((hdObj && hdObj != [NSNull null]) || (sdObj && sdObj != [NSNull null])) {
@@ -2177,7 +2214,7 @@ static NSMutableDictionary *g_urlCacheBySidebar = nil;
             depth++;
         }
     } @catch (NSException *e) {
-        LOG("[dl/reel] M-2 responder chain exception: %s\n", e.reason.UTF8String);
+        LOG("[dl/reel] M-2 live controller exception: %s\n", e.reason.UTF8String);
     }
     return NO;
 }
@@ -2797,26 +2834,30 @@ static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
                                 LOG("[reels/main] PRE-WARM cached for sidebar: HD=%d SD=%d\n",
                                     hdURL != nil, sdURL != nil);
 
-                                // v8.2.46: Tag sidebar + overlay with item reference
-                                // The View RETAINs the item (OBJC_ASSOCIATION_RETAIN),
-                                // so the item pointer stays valid for the View's lifetime.
-                                // In onReelButtonTap:, walk superview from button
-                                // to find the tag, then use item as key in g_itemToURLDict.
+                                // v8.2.50: SELECTIVE CLEARING (defense in depth)
+                                // Only clear OLD v8.2.46 tags (GlowReelItem/HD/SD).
+                                // KEEP the new "GlowPlaybackController" tag untouched - it's
+                                // the LIVE binding set by hooked_setPlaybackController: and
+                                // must persist for the View's lifetime (M-2a-controller needs it).
                                 @try {
-                                    // Clear stale tags first (per user refinement)
-                                    clearGlowTagsOnView(sideBar);
-                                    // Tag sidebar
+                                    objc_setAssociatedObject(sideBar, "GlowReelItem", nil, OBJC_ASSOCIATION_RETAIN);
+                                    objc_setAssociatedObject(sideBar, "GlowReelHD", nil, OBJC_ASSOCIATION_RETAIN);
+                                    objc_setAssociatedObject(sideBar, "GlowReelSD", nil, OBJC_ASSOCIATION_RETAIN);
+                                    if (overlay) {
+                                        objc_setAssociatedObject(overlay, "GlowReelItem", nil, OBJC_ASSOCIATION_RETAIN);
+                                        objc_setAssociatedObject(overlay, "GlowReelHD", nil, OBJC_ASSOCIATION_RETAIN);
+                                        objc_setAssociatedObject(overlay, "GlowReelSD", nil, OBJC_ASSOCIATION_RETAIN);
+                                    }
+                                    // Re-tag with current item URLs (M-2b backup)
                                     objc_setAssociatedObject(sideBar, "GlowReelItem", item, OBJC_ASSOCIATION_RETAIN);
                                     if (hdURL) objc_setAssociatedObject(sideBar, "GlowReelHD", hdURL, OBJC_ASSOCIATION_RETAIN);
                                     if (sdURL) objc_setAssociatedObject(sideBar, "GlowReelSD", sdURL, OBJC_ASSOCIATION_RETAIN);
-                                    // Tag overlay too (in case button is added to overlay, not sidebar)
                                     if (overlay) {
-                                        clearGlowTagsOnView(overlay);
                                         objc_setAssociatedObject(overlay, "GlowReelItem", item, OBJC_ASSOCIATION_RETAIN);
                                         if (hdURL) objc_setAssociatedObject(overlay, "GlowReelHD", hdURL, OBJC_ASSOCIATION_RETAIN);
                                         if (sdURL) objc_setAssociatedObject(overlay, "GlowReelSD", sdURL, OBJC_ASSOCIATION_RETAIN);
                                     }
-                                    LOG("[reels/main] TAGGED sidebar+overlay with item=%s\n",
+                                    LOG("[reels/main] TAGGED sidebar+overlay with item=%s (selective clear, kept GlowPlaybackController)\n",
                                         class_getName(object_getClass(item)));
                                 } @catch (NSException *tagExc) {
                                     LOG("[reels/main] tag exc: %s\n", tagExc.reason.UTF8String);
@@ -3219,7 +3260,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.48 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.50 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
