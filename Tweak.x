@@ -2097,38 +2097,50 @@ static NSMutableDictionary *g_urlCacheBySidebar = nil;
 //   M-0: per-sidebar cache (g_urlCacheBySidebar)
 //   FALLBACK: Direct VC property walk (existing M1-M5)
 //   GLOBAL CACHE (g_cachedHDURL/SD): REMOVED in v8.2.46 (was the bug source)
+//
+// v8.2.48: M-2 walk upgraded from `v.superview` to `responder.nextResponder`.
+//   Reason: superview is a UIView-only chain and CANNOT reach UIViewController,
+//   so the VC tag set in hooked_setVideoItem was unreachable. UIResponder chain
+//   covers BOTH UIView and UIViewController, so the VC tag is now reachable.
 - (BOOL)findReelURLViaViewTag:(UIView *)btnView
                           hdOut:(NSURL **)outHD
                           sdOut:(NSURL **)outSD
                           sbKey:(NSValue *)sbKey {
     if (!btnView || !outHD || !outSD) return NO;
     @try {
-        UIView *v = btnView;
+        // v8.2.48: UIResponder chain navigation to bridge the View-VC gap smoothly
+        // Background: in v8.2.46 we tagged VC with "GlowReelItem/HD/SD" in
+        // hooked_setVideoItem, but the finder used `v.superview` which is a
+        // UIView-only chain and CANNOT reach UIViewController. Result: the
+        // VC tag was unreachable. Now we walk `responder.nextResponder` which
+        // traverses BOTH UIView and UIViewController, so the VC tag is hit-able.
+        UIResponder *responder = btnView;
         int depth = 0;
-        while (v && depth < 15) {
-            // 2a: Check for "GlowReelItem" tag (item-keyed lookup)
-            id taggedItem = objc_getAssociatedObject(v, "GlowReelItem");
+
+        while (responder && depth < 20) {
+            // M-2a-responder: Check for retained item reference
+            id taggedItem = objc_getAssociatedObject(responder, "GlowReelItem");
             if (taggedItem && g_itemToURLDict) {
                 NSValue *itemKey = [NSValue valueWithNonretainedObject:taggedItem];
                 NSDictionary *itemEntry = g_itemToURLDict[itemKey];
+
                 if (itemEntry) {
-                    id hdObj = itemEntry[@"HD"];
-                    id sdObj = itemEntry[@"SD"];
-                    // v8.2.46: Support both NSURL and NSString (per user refinement)
-                    BOOL hasHD = (hdObj && hdObj != [NSNull null] &&
-                                  ([hdObj isKindOfClass:[NSURL class]] || [hdObj isKindOfClass:[NSString class]]));
-                    BOOL hasSD = (sdObj && sdObj != [NSNull null] &&
-                                  ([sdObj isKindOfClass:[NSURL class]] || [sdObj isKindOfClass:[NSString class]]));
-                    if (hasHD) *outHD = [hdObj isKindOfClass:[NSURL class]] ? (NSURL *)hdObj : [NSURL URLWithString:(NSString *)hdObj];
-                    if (hasSD) *outSD = [sdObj isKindOfClass:[NSURL class]] ? (NSURL *)sdObj : [NSURL URLWithString:(NSString *)sdObj];
-                    if (*outHD || *outSD) {
-                        // Safe validation: check item is FBVideoPlaybackItem
-                        // (avoids using dangling pointer if item was dealloced)
-                        Class fbiCls = NSClassFromString(@"FBVideoPlaybackItem");
-                        if (fbiCls && [taggedItem isKindOfClass:fbiCls]) {
-                            LOG("[dl/reel] M-2a: View-tagged ITEM at depth=%d class=%s HD=%d SD=%d\n",
-                                depth, class_getName(object_getClass(v)), *outHD != nil, *outSD != nil);
-                            // Cache to per-sidebar for next tap
+                    // v8.2.48: Safe validation FIRST - reject dangling/foreign items
+                    Class fbiCls = NSClassFromString(@"FBVideoPlaybackItem");
+                    if (fbiCls && [taggedItem isKindOfClass:fbiCls]) {
+                        id hdObj = itemEntry[@"HD"];
+                        id sdObj = itemEntry[@"SD"];
+                        // v8.2.46: Support both NSURL and NSString (per user refinement)
+                        BOOL hasHD = (hdObj && hdObj != [NSNull null] &&
+                                      ([hdObj isKindOfClass:[NSURL class]] || [hdObj isKindOfClass:[NSString class]]));
+                        BOOL hasSD = (sdObj && sdObj != [NSNull null] &&
+                                      ([sdObj isKindOfClass:[NSURL class]] || [sdObj isKindOfClass:[NSString class]]));
+                        if (hasHD) *outHD = [hdObj isKindOfClass:[NSURL class]] ? (NSURL *)hdObj : [NSURL URLWithString:(NSString *)hdObj];
+                        if (hasSD) *outSD = [sdObj isKindOfClass:[NSURL class]] ? (NSURL *)sdObj : [NSURL URLWithString:(NSString *)sdObj];
+                        if (*outHD || *outSD) {
+                            LOG("[dl/reel] M-2a-responder: Hit via responder chain at depth=%d class=%s HD=%d SD=%d\n",
+                                depth, class_getName(object_getClass(responder)), *outHD != nil, *outSD != nil);
+                            // Populate sidebar cache fallback dynamically
                             if (!g_urlCacheBySidebar) g_urlCacheBySidebar = [[NSMutableDictionary alloc] init];
                             NSMutableDictionary *sidebarEntry = [NSMutableDictionary dictionary];
                             sidebarEntry[@"HD"] = *outHD ?: [NSNull null];
@@ -2139,9 +2151,9 @@ static NSMutableDictionary *g_urlCacheBySidebar = nil;
                     }
                 }
             }
-            // 2b: Check for direct HD/SD tag on view (fallback if item-keyed fails)
-            id hdObj = objc_getAssociatedObject(v, "GlowReelHD");
-            id sdObj = objc_getAssociatedObject(v, "GlowReelSD");
+            // M-2b-responder: Direct asset URL tags on responder backup layer
+            id hdObj = objc_getAssociatedObject(responder, "GlowReelHD");
+            id sdObj = objc_getAssociatedObject(responder, "GlowReelSD");
             if ((hdObj && hdObj != [NSNull null]) || (sdObj && sdObj != [NSNull null])) {
                 BOOL hasHD = (hdObj && hdObj != [NSNull null] &&
                               ([hdObj isKindOfClass:[NSURL class]] || [hdObj isKindOfClass:[NSString class]]));
@@ -2150,8 +2162,8 @@ static NSMutableDictionary *g_urlCacheBySidebar = nil;
                 if (hasHD) *outHD = [hdObj isKindOfClass:[NSURL class]] ? (NSURL *)hdObj : [NSURL URLWithString:(NSString *)hdObj];
                 if (hasSD) *outSD = [sdObj isKindOfClass:[NSURL class]] ? (NSURL *)sdObj : [NSURL URLWithString:(NSString *)sdObj];
                 if (*outHD || *outSD) {
-                    LOG("[dl/reel] M-2b: View-tagged URL at depth=%d class=%s\n",
-                        depth, class_getName(object_getClass(v)));
+                    LOG("[dl/reel] M-2b-responder: Direct URL tag via responder chain at depth=%d class=%s\n",
+                        depth, class_getName(object_getClass(responder)));
                     if (!g_urlCacheBySidebar) g_urlCacheBySidebar = [[NSMutableDictionary alloc] init];
                     NSMutableDictionary *sidebarEntry = [NSMutableDictionary dictionary];
                     sidebarEntry[@"HD"] = *outHD ?: [NSNull null];
@@ -2160,11 +2172,12 @@ static NSMutableDictionary *g_urlCacheBySidebar = nil;
                     return YES;
                 }
             }
-            v = v.superview;
+            // Cross the bridge from UIView to UIViewController safely
+            responder = responder.nextResponder;
             depth++;
         }
     } @catch (NSException *e) {
-        LOG("[dl/reel] M-2 exc: %s\n", e.reason.UTF8String);
+        LOG("[dl/reel] M-2 responder chain exception: %s\n", e.reason.UTF8String);
     }
     return NO;
 }
@@ -3206,7 +3219,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.46 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.48 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
