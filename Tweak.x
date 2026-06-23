@@ -1830,6 +1830,22 @@ static NSMutableDictionary *g_vcToURLDict = nil;
 // non-retained pointer in the dict stays valid for the View's lifetime.
 static NSMutableDictionary *g_itemToURLDict = nil;
 
+// v8.2.60: ACTIVE PLAYBACK-STATE TRACKING
+// Background: when FB starts actually playing a video (visible to user),
+// the engine MUST set playing=YES on FBVideoPlaybackController. We hook
+// this setter to capture the LIVE item. Pre-buffered items are NOT being
+// played yet, so they don't trigger the setter.
+// This gives us an absolute reference to the video currently shown on
+// screen, immune to pre-buffer races.
+//
+// Lifecycle: g_currentPlayingItem is weak - when the item is deallocated
+// (Reel scrolled away), the global auto-clears. No manual cleanup needed.
+static __weak id g_currentPlayingItem = nil;
+
+// Alias for g_itemToURLDict (semantic naming per user v8.2.60 spec)
+// The existing g_itemToURLDict already serves the role of "vault".
+#define g_itemToURLVault g_itemToURLDict
+
 // v8.2.46: Clear stale Glow tags on a view (used when view is recycled
 // to a new Reel). Per user refinement to prevent stale data leaks.
 static void clearGlowTagsOnView(UIView *v) {
@@ -1959,6 +1975,34 @@ static void hooked_configureWithModel(id self, SEL _cmd, id model) {
         model ? class_getName(object_getClass(model)) : "nil");
     if (s_downloadVideo) {
         injectLongPressForObject(self, "configureWithModel:");
+    }
+}
+
+// v8.2.60: ACTIVE PLAYBACK-STATE TRACKING
+// Hook FBVideoPlaybackController.setPlaying: to capture the item that
+// is ACTUALLY being played on screen. Pre-buffered items do NOT call
+// setPlaying:YES yet, so they don't pollute the global.
+// This is the absolute reference for the visible video.
+static IMP orig_setPlaying = NULL;
+
+static void hooked_setPlaying(id self, SEL _cmd, BOOL playing) {
+    if (orig_setPlaying) {
+        typedef void (*FnType)(id, SEL, BOOL);
+        ((FnType)orig_setPlaying)(self, _cmd, playing);
+    }
+    if (playing && self) {
+        // Query the live item from the engine itself
+        SEL itemSel = sel_registerName("currentVideoPlaybackItem");
+        if ([self respondsToSelector:itemSel]) {
+            id liveItem = [self performSelector:itemSel];
+            if (liveItem) {
+                g_currentPlayingItem = liveItem;
+                const char *ctrlCls = class_getName(object_getClass(self));
+                const char *itemCls = class_getName(object_getClass(liveItem));
+                LOG("[Glow/Engine] Screen focus shifted. ctrl=%s item=%s ptr=%p\n",
+                    ctrlCls, itemCls, liveItem);
+            }
+        }
     }
 }
 static void hooked_setVideoItem(id self, SEL _cmd, id newItem) {
@@ -2214,6 +2258,18 @@ void installGlowStyleReelsHook(void) {
                     method_setImplementation(m, (IMP)hooked_configureWithModel);
                     cfgModelHooked++;
                     LOG("[dl/reel] hooked configureWithModel: on %s\n", name);
+                }
+            }
+            // v8.2.60: setPlaying: (BOOL) - track ACTIVE playback state
+            SEL setPlayingSel = sel_registerName("setPlaying:");
+            if (class_respondsToSelector(cls, setPlayingSel)) {
+                Method m = class_getInstanceMethod(cls, setPlayingSel);
+                if (m) {
+                    if (!orig_setPlaying) {
+                        orig_setPlaying = method_getImplementation(m);
+                    }
+                    method_setImplementation(m, (IMP)hooked_setPlaying);
+                    LOG("[dl/reel] hooked setPlaying: on %s\n", name);
                 }
             }
             // v8.2.38: per-class catch - skip bad class, continue loop
@@ -2704,6 +2760,40 @@ static NSMutableDictionary *g_urlCacheBySidebar = nil;
         UIView *thisSideBar = btnView.superview;
         NSValue *sbKey = [NSValue valueWithNonretainedObject:thisSideBar];
         NSURL *hd = nil, *sd = nil;
+
+        // v8.2.60: M-3 (HIGHEST PRIORITY) - ACTIVE PLAYBACK STATE
+        // Read g_currentPlayingItem directly. This is the item that
+        // FBVideoPlaybackController is currently PLAYING on screen.
+        // Pre-buffered items never set playing=YES, so they cannot
+        // pollute this global. The button doesn't need to know where
+        // it lives in the view tree.
+        @try {
+            id active = g_currentPlayingItem;
+            if (active && g_itemToURLDict) {
+                NSValue *itemKey = [NSValue valueWithNonretainedObject:active];
+                NSDictionary *itemEntry = g_itemToURLDict[itemKey];
+                if (itemEntry) {
+                    id hdObj = itemEntry[@"HD"];
+                    id sdObj = itemEntry[@"SD"];
+                    BOOL hasHD = (hdObj && hdObj != [NSNull null] &&
+                                  ([hdObj isKindOfClass:[NSURL class]] || [hdObj isKindOfClass:[NSString class]]));
+                    BOOL hasSD = (sdObj && sdObj != [NSNull null] &&
+                                  ([sdObj isKindOfClass:[NSURL class]] || [sdObj isKindOfClass:[NSString class]]));
+                    if (hasHD) hd = [hdObj isKindOfClass:[NSURL class]] ? (NSURL *)hdObj : [NSURL URLWithString:(NSString *)hdObj];
+                    if (hasSD) sd = [sdObj isKindOfClass:[NSURL class]] ? (NSURL *)sdObj : [NSURL URLWithString:(NSString *)sdObj];
+                    if (hd || sd) {
+                        const char *itemCls = class_getName(object_getClass(active));
+                        LOG("[Glow/UI] M-3: Active playback item hit class=%s HD=%d SD=%d\n",
+                            itemCls, hd != nil, sd != nil);
+                        if (!g_videoHandler) g_videoHandler = [[GlowVideoDownloadHandler alloc] init];
+                        [g_videoHandler presentQualityActionSheetHD:hd sd:sd sourceView:btnView];
+                        return;
+                    }
+                }
+            }
+        } @catch (NSException *m3e) {
+            LOG("[Glow/UI] M-3 exc: %s\n", m3e.reason.UTF8String);
+        }
 
         // v8.2.46: M-2 (HIGHEST PRIORITY) - walk superview from button,
         // look for "GlowReelItem" tag. This is the most accurate method
@@ -3748,7 +3838,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.58 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.60 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
