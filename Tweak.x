@@ -1133,6 +1133,7 @@ static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *w
 // Walk view hierarchy to find VideoContainerView, get current playback item.
 @interface GlowVideoDownloadHandler : NSObject <UIGestureRecognizerDelegate>
 - (void)showToast:(NSString *)msg;
+- (void)downloadDirectURL:(NSURL *)url;
 @end
 
 // v8.2.44: STANDALONE safe toast function (doesn't depend on self method)
@@ -1193,6 +1194,86 @@ static void showSafeToast(NSString *message) {
 }
 
 @implementation GlowVideoDownloadHandler
+
+// v8.2.52: Direct download from a known URL (no quality sheet).
+// Used by hooked_getActionsForVideoItem: UIAction handler. The user
+// has already chosen quality (HD/SD) by tapping the menu item, so
+// we skip the action sheet and go straight to PHPhotoLibrary save.
+- (void)downloadDirectURL:(NSURL *)url {
+    if (!url) {
+        showSafeToast(@"❌ URL rỗng");
+        return;
+    }
+    @try {
+        // Haptic feedback
+        UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+        [gen impactOccurred];
+
+        // Check Photos authorization first
+        PHAuthorizationStatus status = [PHPhotoLibrary authorizationStatus];
+        if (status == PHAuthorizationStatusDenied || status == PHAuthorizationStatusRestricted) {
+            showSafeToast(@"❌ Cấp quyền Photos trong Cài đặt");
+            return;
+        }
+        if (status == PHAuthorizationStatusNotDetermined) {
+            [PHPhotoLibrary requestAuthorization:^(PHAuthorizationStatus newStatus) {
+                if (newStatus == PHAuthorizationStatusAuthorized) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [self downloadDirectURL:url];
+                    });
+                } else {
+                    showSafeToast(@"❌ Đã từ chối quyền Photos");
+                }
+            }];
+            return;
+        }
+
+        showSafeToast(@"⬇ Đang tải...");
+
+        // Download on background queue
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            @try {
+                NSData *data = [NSData dataWithContentsOfURL:url];
+                if (!data || data.length == 0) {
+                    showSafeToast(@"❌ Tải thất bại - URL không hợp lệ");
+                    return;
+                }
+                NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                                     [NSString stringWithFormat:@"glow_v852_%@.mp4", [[NSUUID UUID] UUIDString]]];
+                NSError *writeErr = nil;
+                BOOL wrote = [data writeToFile:tmpPath
+                                       options:NSDataWritingAtomic
+                                         error:&writeErr];
+                if (!wrote) {
+                    showSafeToast([NSString stringWithFormat:@"❌ Ghi file lỗi: %@",
+                                   writeErr.localizedDescription ?: @"unknown"]);
+                    return;
+                }
+                // Save to Photos
+                [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+                    [PHAssetChangeRequest creationRequestForAssetFromVideoAtFileURL:
+                        [NSURL fileURLWithPath:tmpPath]];
+                } completionHandler:^(BOOL success, NSError *error) {
+                    // Cleanup tmp file
+                    [[NSFileManager defaultManager] removeItemAtPath:tmpPath error:nil];
+                    if (success) {
+                        showSafeToast(@"✅ Đã lưu vào Photos");
+                        LOG("[dl/v8.52] downloadDirectURL: saved to Photos, size=%lu\n",
+                            (unsigned long)data.length);
+                    } else {
+                        showSafeToast([NSString stringWithFormat:@"❌ Lỗi Photos: %@",
+                                       error.localizedDescription ?: @"unknown"]);
+                    }
+                }];
+            } @catch (NSException *e) {
+                showSafeToast([NSString stringWithFormat:@"❌ Lỗi tải: %@", e.reason]);
+                LOG("[dl/v8.52] downloadDirectURL exc: %s\n", e.reason.UTF8String);
+            }
+        });
+    } @catch (NSException *e) {
+        showSafeToast([NSString stringWithFormat:@"❌ Exception: %@", e.reason]);
+    }
+}
 
 // v8.2.34: Helper - present MODAL alert (not action sheet) for quality choice.
 // UIAlertControllerStyleAlert is more reliable than action sheet in Reels
@@ -1543,6 +1624,185 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
 static NSDate *g_cachedAt = nil;
 static IMP orig_HDPlaybackURL = NULL;
 static IMP orig_SDPlaybackURL = NULL;
+
+// v8.2.52: NATIVE MENU HOOK (aligned with original Glow 1.3.1 approach).
+// Background: original Glow's xref analysis revealed the primary hook is
+// `getActionsForVideoItem:` - FB's official extension point for adding
+// actions to a video item. FB calls this method when it builds the native
+// context menu for a video, and the returned NSArray of UIAction/UIMenu
+// items are rendered by FB's own UI (no custom button needed).
+//
+// This is a Phase 1 ADDITIVE change - all v8.2.50 code is kept as fallback.
+static Class g_getActionsHostClass = NULL;
+static SEL g_getActionsSel = NULL;
+static IMP orig_getActionsForVideoItem = NULL;
+
+// Find the class that implements getActionsForVideoItem:
+// Strategy: probe known candidates first (fast), then runtime scan FB* classes.
+static void findVideoItemActionClass(void) {
+    g_getActionsSel = sel_registerName("getActionsForVideoItem:");
+    if (!g_getActionsSel) {
+        LOG("[dl/v8.52] FATAL: sel_registerName failed\n");
+        return;
+    }
+    // 1. Probe known candidates
+    const char *candidates[] = {
+        "FBVideoPlaybackItem", "FBVideoPlayerViewModel", "FBFeedUnitVideoItem",
+        "FBVideoPlayerViewController", "FBReelsVideoItem", "FBWatchVideoItem",
+        "FBVideoFeedUnit", "FBReelsFeedItem", NULL
+    };
+    for (int i = 0; candidates[i]; i++) {
+        Class c = objc_getClass(candidates[i]);
+        if (c && class_getInstanceMethod(c, g_getActionsSel)) {
+            g_getActionsHostClass = c;
+            LOG("[dl/v8.52] Probe hit: %s implements getActionsForVideoItem:\n", candidates[i]);
+            return;
+        }
+    }
+    // 2. Runtime scan all FB classes
+    int numClasses = objc_getClassList(NULL, 0);
+    if (numClasses <= 0) {
+        LOG("[dl/v8.52] objc_getClassList returned 0\n");
+        return;
+    }
+    Class *classes = (Class *)calloc((size_t)numClasses, sizeof(Class));
+    if (!classes) return;
+    objc_getClassList(classes, numClasses);
+    for (int i = 0; i < numClasses; i++) {
+        @try {
+            const char *name = class_getName(classes[i]);
+            if (name && strncmp(name, "FB", 2) == 0 &&
+                class_getInstanceMethod(classes[i], g_getActionsSel)) {
+                g_getActionsHostClass = classes[i];
+                LOG("[dl/v8.52] Runtime found: %s implements getActionsForVideoItem:\n", name);
+                break;
+            }
+        } @catch (...) {}
+    }
+    free(classes);
+}
+
+// v8.2.52: hook implementation. Returns originalActions + Glow UIMenu.
+// The Glow menu contains "Tải HD (Glow)" and "Tải SD (Glow)" UIAction items.
+static NSArray *hooked_getActionsForVideoItem(id self, SEL _cmd) {
+    NSArray *originalActions = nil;
+    if (orig_getActionsForVideoItem) {
+        typedef NSArray *(*FnType)(id, SEL);
+        originalActions = ((FnType)orig_getActionsForVideoItem)(self, _cmd);
+    }
+    // Only add Glow actions if user has the feature on
+    if (!s_downloadVideo) return originalActions;
+
+    @try {
+        // Read HD/SD URLs from the item
+        NSURL *hd = nil, *sd = nil;
+        SEL hdSel = sel_registerName("HDPlaybackURL");
+        SEL sdSel = sel_registerName("SDPlaybackURL");
+        if ([self respondsToSelector:hdSel]) hd = [self performSelector:hdSel];
+        if ([self respondsToSelector:sdSel]) sd = [self performSelector:sdSel];
+        if (!hd && !sd) {
+            // No URLs - probably not a downloadable item
+            return originalActions;
+        }
+        const char *clsName = class_getName(object_getClass(self));
+        LOG("[dl/v8.52] getActionsForVideoItem: item=%s HD=%d SD=%d\n",
+            clsName, hd != nil, sd != nil);
+
+        if (@available(iOS 13.0, *)) {
+            // Strong-capture URLs to prevent use-after-free if FB releases item
+            __strong NSURL *hdStrong = hd;
+            __strong NSURL *sdStrong = sd;
+            NSMutableArray<UIAction *> *glowActions = [NSMutableArray array];
+
+            if (hdStrong) {
+                UIAction *hdAction = [UIAction actionWithTitle:@"⬇ Tải HD (Glow)"
+                                                         image:[UIImage systemImageNamed:@"arrow.down.circle.fill"]
+                                                    identifier:@"glow.download.hd"
+                                                       handler:^(__kindof UIAction *a) {
+                    @try {
+                        LOG("[dl/v8.52] Native HD tap\n");
+                        if (!g_videoHandler) {
+                            Class handlerCls = NSClassFromString(@"GlowVideoDownloadHandler");
+                            if (handlerCls) g_videoHandler = [[handlerCls alloc] init];
+                        }
+                        if (g_videoHandler) {
+                            [g_videoHandler downloadDirectURL:hdStrong];
+                        } else {
+                            showSafeToast(@"❌ Handler chưa sẵn sàng");
+                        }
+                    } @catch (NSException *e) {
+                        showSafeToast([NSString stringWithFormat:@"❌ Lỗi: %@", e.reason]);
+                    }
+                }];
+                [glowActions addObject:hdAction];
+            }
+            if (sdStrong) {
+                UIAction *sdAction = [UIAction actionWithTitle:@"⬇ Tải SD (Glow)"
+                                                         image:[UIImage systemImageNamed:@"arrow.down.circle"]
+                                                    identifier:@"glow.download.sd"
+                                                       handler:^(__kindof UIAction *a) {
+                    @try {
+                        LOG("[dl/v8.52] Native SD tap\n");
+                        if (!g_videoHandler) {
+                            Class handlerCls = NSClassFromString(@"GlowVideoDownloadHandler");
+                            if (handlerCls) g_videoHandler = [[handlerCls alloc] init];
+                        }
+                        if (g_videoHandler) {
+                            [g_videoHandler downloadDirectURL:sdStrong];
+                        } else {
+                            showSafeToast(@"❌ Handler chưa sẵn sàng");
+                        }
+                    } @catch (NSException *e) {
+                        showSafeToast([NSString stringWithFormat:@"❌ Lỗi: %@", e.reason]);
+                    }
+                }];
+                [glowActions addObject:sdAction];
+            }
+
+            if (glowActions.count > 0) {
+                NSMutableArray *combined = originalActions ? [originalActions mutableCopy] : [NSMutableArray array];
+                UIMenu *glowMenu = [UIMenu menuWithTitle:@"Glow Downloader"
+                                                   image:nil
+                                              identifier:@"glow.menu.group"
+                                                 options:UIMenuOptionsDisplayInline
+                                                children:glowActions];
+                [combined addObject:glowMenu];
+                return [combined copy];
+            }
+        }
+    } @catch (NSException *e) {
+        LOG("[dl/v8.52] hooked_getActionsForVideoItem exc: %s\n", e.reason.UTF8String);
+    }
+    return originalActions;
+}
+
+// v8.2.52: Install the getActionsForVideoItem: hook.
+static int g_getActionsHooked = 0;
+static void installGetActionsHook(void) {
+    if (g_getActionsHooked) return;
+    if (!g_getActionsSel) findVideoItemActionClass();
+    if (!g_getActionsHostClass) {
+        LOG("[dl/v8.52] WARN: class with getActionsForVideoItem: NOT FOUND - falling back to v8.2.50\n");
+        return;
+    }
+    @try {
+        Method m = class_getInstanceMethod(g_getActionsHostClass, g_getActionsSel);
+        if (!m) {
+            LOG("[dl/v8.52] WARN: method_getInstanceMethod failed\n");
+            return;
+        }
+        orig_getActionsForVideoItem = method_getImplementation(m);
+        method_setImplementation(m, (IMP)hooked_getActionsForVideoItem);
+        g_getActionsHooked = 1;
+        LOG("[dl/v8.52] HOOKED getActionsForVideoItem: on %s\n",
+            class_getName(g_getActionsHostClass));
+    } @catch (NSException *e) {
+        LOG("[dl/v8.52] installGetActionsHook exc: %s\n", e.reason.UTF8String);
+    } @catch (...) {
+        LOG("[dl/v8.52] installGetActionsHook exc(c++)\n");
+    }
+}
+
 
 // v8.2.32: Glow-style class enumeration + setVideoItem: hook.
 // Cache mapping VC_instance -> {HD, SD, item, time}.
@@ -3164,6 +3424,11 @@ static void installHooks(void) {
             // because some FB versions use property KVO instead of explicit setter.
             extern void installGlowStyleReelsHook(void);
             installGlowStyleReelsHook();
+
+            // v8.2.52: Install getActionsForVideoItem: hook (FB's official API).
+            // This adds Glow download items to FB's native context menu.
+            // Phase 1 ADDITIVE - v8.2.50 code above is still the fallback.
+            installGetActionsHook();
         }
 
         LOG("=== Done ===\n");
@@ -3260,7 +3525,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.50 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.52 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
