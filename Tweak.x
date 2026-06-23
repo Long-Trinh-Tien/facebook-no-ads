@@ -2342,6 +2342,90 @@ static void runUIExplorer(UIView *targetView) {
     LOG("[Explorer] ==================== HẾT ====================\n");
 }
 
+// v8.2.56: GLOBAL ACTION INTERCEPTOR
+// Background: every UI action in iOS passes through UIApplication.sendAction:to:from:forEvent:.
+// We hook this to detect Like/React/Tap actions on FB and dump the
+// sender's full property/ivar tree. The Like button target MUST hold
+// the post/Reel data model (story_id, fbid, FBVideoPlaybackItem) since
+// it needs to send the like request to the server. By capturing the
+// data model from the Like button context, we can read the same model
+// in our download handler to get the video URL reliably.
+//
+// Filter: only deep-dump when action name contains like/react/tap.
+// All other actions get a baseline one-line log for visibility.
+static IMP orig_sendAction = NULL;
+static BOOL g_sendActionHookInstalled = NO;
+static BOOL g_sendActionExcludedShown = NO;  // throttle baseline log
+
+static BOOL hooked_sendAction_to_from_forEvent_(id self, SEL _cmd, SEL action, id target, id sender, UIEvent *event) {
+    BOOL result = YES;
+    if (orig_sendAction) {
+        typedef BOOL (*FnType)(id, SEL, SEL, id, id, UIEvent *);
+        result = ((FnType)orig_sendAction)(self, _cmd, action, target, sender, event);
+    }
+    if (!sender) return result;
+    @try {
+        // Only log sender that is a UIView
+        if (![sender isKindOfClass:[UIView class]]) return result;
+        UIView *sv = (UIView *)sender;
+        NSString *actionName = NSStringFromSelector(action);
+        const char *targetCls = target ? class_getName(object_getClass(target)) : "nil";
+        const char *senderCls = class_getName(object_getClass(sv));
+
+        // Filter for Like/React/Tap actions to deep-dump
+        BOOL shouldDeepDump = NO;
+        if (actionName) {
+            if ([actionName rangeOfString:@"like" options:NSCaseInsensitiveSearch].location != NSNotFound) shouldDeepDump = YES;
+            else if ([actionName rangeOfString:@"react" options:NSCaseInsensitiveSearch].location != NSNotFound) shouldDeepDump = YES;
+            else if ([actionName rangeOfString:@"tap" options:NSCaseInsensitiveSearch].location != NSNotFound) shouldDeepDump = YES;
+            else if ([actionName rangeOfString:@"Toggle" options:NSCaseInsensitiveSearch].location != NSNotFound) shouldDeepDump = YES;
+        }
+
+        if (shouldDeepDump) {
+            LOG("[Explorer/Tap] HIT action=%@ target=%s sender=%s\n",
+                actionName, targetCls, senderCls);
+            // Deep dump the sender's responder chain
+            runUIExplorer(sv);
+        } else {
+            // Baseline visibility log (throttled to avoid log spam)
+            if (!g_sendActionExcludedShown) {
+                LOG("[Explorer/Tap] baseline action=%@ target=%s sender=%s (filtered)\n",
+                    actionName, targetCls, senderCls);
+                g_sendActionExcludedShown = YES;  // one-shot log to confirm hook works
+            }
+        }
+    } @catch (NSException *e) {
+        LOG("[Explorer/Tap] exc: %s\n", e.reason.UTF8String);
+    }
+    return result;
+}
+
+static void installSendActionHook(void) {
+    if (g_sendActionHookInstalled) return;
+    @try {
+        Class appCls = objc_getClass("UIApplication");
+        if (!appCls) {
+            LOG("[Explorer] UIApplication class not found\n");
+            return;
+        }
+        SEL sel = @selector(sendAction:to:from:forEvent:);
+        Method m = class_getInstanceMethod(appCls, sel);
+        if (!m) {
+            LOG("[Explorer] UIApplication.sendAction:to:from:forEvent: method not found\n");
+            return;
+        }
+        orig_sendAction = method_getImplementation(m);
+        // Use method_setImplementation to swizzle
+        method_setImplementation(m, (IMP)hooked_sendAction_to_from_forEvent_);
+        g_sendActionHookInstalled = YES;
+        LOG("[Explorer] HOOKED UIApplication.sendAction:to:from:forEvent:\n");
+    } @catch (NSException *e) {
+        LOG("[Explorer] installSendActionHook exc: %s\n", e.reason.UTF8String);
+    } @catch (...) {
+        LOG("[Explorer] installSendActionHook exc(c++)\n");
+    }
+}
+
 // v8.2.29: Per-sidebar URL cache. Key = sidebar instance, Value = NSDictionary
 // with HD/SD URLs. Solves:
 // - "download next Reel": URL was global, didn't change when user scrolled
@@ -3331,6 +3415,12 @@ static void installHooks(void) {
     LOG("\n=== Installing v8.0 hooks ===\n");
 
     @try {
+        // v8.2.56: Install GLOBAL UIApplication.sendAction:to:from:forEvent: hook
+        // This intercepts every button tap in the app. We filter for like/react/tap
+        // actions to deep-dump the sender view's responder chain. The Like button
+        // target MUST hold the data model (story_id, fbid, FBVideoPlaybackItem).
+        installSendActionHook();
+
         // Hook 0: FBMemNewsFeedEdge.node - return nil for SPONSORED
         if (s_removeAds) {
             Class memEdgeCls = objc_getClass("FBMemNewsFeedEdge");
@@ -3634,7 +3724,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.54 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.56 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
