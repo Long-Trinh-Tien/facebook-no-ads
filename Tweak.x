@@ -2342,20 +2342,21 @@ static void runUIExplorer(UIView *targetView) {
     LOG("[Explorer] ==================== HẾT ====================\n");
 }
 
-// v8.2.56: GLOBAL ACTION INTERCEPTOR
-// Background: every UI action in iOS passes through UIApplication.sendAction:to:from:forEvent:.
-// We hook this to detect Like/React/Tap actions on FB and dump the
-// sender's full property/ivar tree. The Like button target MUST hold
-// the post/Reel data model (story_id, fbid, FBVideoPlaybackItem) since
-// it needs to send the like request to the server. By capturing the
-// data model from the Like button context, we can read the same model
-// in our download handler to get the video URL reliably.
+// v8.2.58: AGGRESSIVE ACTION INTERCEPTOR
+// Background: v8.2.56 found that FB wraps Like button taps in
+// CKComponentActionControlForwarder which obfuscates the action name
+// (becomes "@") and scrambles the target class. Our like/react/tap
+// string filter was completely bypassed.
 //
-// Filter: only deep-dump when action name contains like/react/tap.
-// All other actions get a baseline one-line log for visibility.
+// v8.2.58 Strategy: WIDEN THE NET. Catch any action involving
+// ComponentKit classes (CKComponent, Forwarder) or the "@" action,
+// regardless of action name. Fall back to keyWindow root if both
+// sender and target are abstract.
+//
+// Every action also gets a baseline log (unthrottled) for full triage.
 static IMP orig_sendAction = NULL;
 static BOOL g_sendActionHookInstalled = NO;
-static BOOL g_sendActionExcludedShown = NO;  // throttle baseline log
+static int g_baselineCounter = 0;  // count baseline logs for visibility
 
 static BOOL hooked_sendAction_to_from_forEvent_(id self, SEL _cmd, SEL action, id target, id sender, UIEvent *event) {
     BOOL result = YES;
@@ -2365,34 +2366,57 @@ static BOOL hooked_sendAction_to_from_forEvent_(id self, SEL _cmd, SEL action, i
     }
     if (!sender) return result;
     @try {
-        // Only log sender that is a UIView
-        if (![sender isKindOfClass:[UIView class]]) return result;
-        UIView *sv = (UIView *)sender;
         NSString *actionName = NSStringFromSelector(action);
-        const char *targetCls = target ? class_getName(object_getClass(target)) : "nil";
-        const char *senderCls = class_getName(object_getClass(sv));
+        NSString *targetName = target ? NSStringFromClass([target class]) : @"nil";
+        NSString *senderName = NSStringFromClass([sender class]);
 
-        // Filter for Like/React/Tap actions to deep-dump
-        BOOL shouldDeepDump = NO;
-        if (actionName) {
-            if ([actionName rangeOfString:@"like" options:NSCaseInsensitiveSearch].location != NSNotFound) shouldDeepDump = YES;
-            else if ([actionName rangeOfString:@"react" options:NSCaseInsensitiveSearch].location != NSNotFound) shouldDeepDump = YES;
-            else if ([actionName rangeOfString:@"tap" options:NSCaseInsensitiveSearch].location != NSNotFound) shouldDeepDump = YES;
-            else if ([actionName rangeOfString:@"Toggle" options:NSCaseInsensitiveSearch].location != NSNotFound) shouldDeepDump = YES;
+        // Baseline visibility for ALL actions (unthrottled for triage)
+        g_baselineCounter++;
+        if (g_baselineCounter <= 50) {  // cap to avoid log flood
+            LOG("[Explorer/Trace] #%d action=%@ target=%@ sender=%@\n",
+                g_baselineCounter, actionName, targetName, senderName);
         }
 
-        if (shouldDeepDump) {
-            LOG("[Explorer/Tap] HIT action=%@ target=%s sender=%s\n",
-                actionName, targetCls, senderCls);
-            // Deep dump the sender's responder chain
-            runUIExplorer(sv);
-        } else {
-            // Baseline visibility log (throttled to avoid log spam)
-            if (!g_sendActionExcludedShown) {
-                LOG("[Explorer/Tap] baseline action=%@ target=%s sender=%s (filtered)\n",
-                    actionName, targetCls, senderCls);
-                g_sendActionExcludedShown = YES;  // one-shot log to confirm hook works
+        // v8.2.58: Catch ComponentKit boundary + obfuscated action "@"
+        BOOL isCKBoundary = NO;
+        if (senderName) {
+            if ([senderName rangeOfString:@"CKComponent"].location != NSNotFound) isCKBoundary = YES;
+            else if ([senderName rangeOfString:@"Forwarder"].location != NSNotFound) isCKBoundary = YES;
+        }
+        if (!isCKBoundary && targetName) {
+            if ([targetName rangeOfString:@"CKComponent"].location != NSNotFound) isCKBoundary = YES;
+            else if ([targetName rangeOfString:@"Forwarder"].location != NSNotFound) isCKBoundary = YES;
+        }
+        if (!isCKBoundary && actionName) {
+            if ([actionName isEqualToString:@"@"]) isCKBoundary = YES;
+        }
+
+        if (isCKBoundary) {
+            LOG("[Explorer/HIT] ComponentKit boundary detected! action=%@ target=%@ sender=%@\n",
+                actionName, targetName, senderName);
+            // Resolve the physical view context safely
+            UIView *dumpTarget = nil;
+            if ([sender isKindOfClass:[UIView class]]) {
+                dumpTarget = (UIView *)sender;
+            } else if ([target isKindOfClass:[UIView class]]) {
+                dumpTarget = (UIView *)target;
+            } else {
+                // Fallback: dump from keyWindow root
+                UIWindow *keyWindow = nil;
+                if (@available(iOS 13.0, *)) {
+                    for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                        if (scene.activationState == UISceneActivationStateForegroundActive) {
+                            for (UIWindow *window in scene.windows) {
+                                if (window.isKeyWindow) { keyWindow = window; break; }
+                            }
+                        }
+                        if (keyWindow) break;
+                    }
+                }
+                if (!keyWindow) keyWindow = [UIApplication sharedApplication].keyWindow;
+                dumpTarget = keyWindow;
             }
+            if (dumpTarget) runUIExplorer(dumpTarget);
         }
     } @catch (NSException *e) {
         LOG("[Explorer/Tap] exc: %s\n", e.reason.UTF8String);
@@ -3724,7 +3748,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.56 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.58 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
