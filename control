@@ -1,8 +1,8 @@
 Package: com.tommy.glowv3
 Name: GlowV3
-Version: 1.2.52
+Version: 1.2.54
 Architecture: iphoneos-arm
-Description: Facebook ad blocker + Reels v8.2.52 (getActionsForVideoItem: native menu hook - Phase 1 parallel to v8.2.50)
+Description: Facebook ad blocker + Reels v8.2.54 (UI Explorer diagnostic build - dumps properties/ivars of tap targets)
 Maintainer: tommy
 Author: tommy
 Section: Tweaks

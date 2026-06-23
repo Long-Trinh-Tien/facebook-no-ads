@@ -1580,6 +1580,9 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
     return NO;
 }
 
+// v8.2.54: Forward declare UI Explorer (defined later in file)
+static void runUIExplorer(UIView *targetView);
+
 // v8.2.40: Newsfeed cell long press handler.
 // Uses GLOBAL URL cache (g_cachedHDURL/SD) set by hooked_HDPlaybackURL/SDPlaybackURL
 // since FB uses ComponentKit to render newsfeed videos and we can't easily
@@ -1590,6 +1593,8 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
     UIView *v = gr.view;
     if (!v) return;
     LOG("[dl/news] CELL long press on %s\n", class_getName(object_getClass(v)));
+    // v8.2.54: UI EXPLORER - dump entire view/responder tree on long press
+    runUIExplorer(v);
     // Haptic on press
     UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [gen impactOccurred];
@@ -2237,6 +2242,106 @@ void installGlowStyleReelsHook(void) {
     }
 }
 
+// v8.2.54: UI EXPLORER - dump all properties of a UIView/UIResponder
+// chain so we can SEE what classes hold the video data in FB 560.x.
+// This is a SURGICAL LOGGING tool - replaces the old URL-finding
+// heuristic with a one-time diagnostic dump. We use the output to
+// identify which class/ivar holds FBVideoPlaybackItem (or its data).
+static void dumpPropertiesOfObject(id obj, int depth) {
+    if (!obj || depth > 3) return;
+    Class cls = object_getClass(obj);
+    const char *clsName = class_getName(cls);
+    LOG("[Explorer] === depth=%d class=%s (ptr=%p) ===\n", depth, clsName, obj);
+
+    // 1. Dump all properties of this class
+    unsigned int propCount = 0;
+    objc_property_t *props = class_copyPropertyList(cls, &propCount);
+    for (unsigned int i = 0; i < propCount; i++) {
+        const char *propName = property_getName(props[i]);
+        // Skip system noise
+        if (strncmp(propName, "accessibility", 13) == 0) continue;
+        if (strncmp(propName, "trait", 5) == 0) continue;
+        if (strncmp(propName, "hash", 4) == 0) continue;
+        if (strncmp(propName, "superclass", 10) == 0) continue;
+        if (strncmp(propName, "description", 11) == 0) continue;
+        if (strncmp(propName, "debugDescription", 17) == 0) continue;
+        @try {
+            id value = [obj valueForKey:[NSString stringWithUTF8String:propName]];
+            if (value) {
+                const char *valCls = class_getName(object_getClass(value));
+                // Log if it's a non-UIView object (probably model data)
+                BOOL isInteresting = NO;
+                if (strstr(valCls, "FB") != NULL) isInteresting = YES;
+                if (strstr(valCls, "Video") != NULL) isInteresting = YES;
+                if (strstr(valCls, "Item") != NULL) isInteresting = YES;
+                if (strstr(valCls, "Model") != NULL) isInteresting = YES;
+                if (strstr(valCls, "Player") != NULL) isInteresting = YES;
+                if (strstr(valCls, "Playback") != NULL) isInteresting = YES;
+                if (strstr(valCls, "Feed") != NULL) isInteresting = YES;
+                if (strstr(valCls, "URL") != NULL) isInteresting = YES;
+                if (strstr(valCls, "NSURL") != NULL) isInteresting = YES;
+                if (strstr(valCls, "NSString") != NULL) isInteresting = YES;
+
+                if (isInteresting) {
+                    LOG("[Explorer]   prop: %s = <%s: %p> [INTERESTING]\n",
+                        propName, valCls, value);
+                    // Recurse 1 level for obvious model classes
+                    if (depth < 1 && (strstr(valCls, "FB") != NULL)) {
+                        dumpPropertiesOfObject(value, depth + 1);
+                    }
+                }
+            }
+        } @catch (...) {}
+    }
+    free(props);
+
+    // 2. Dump ivars (instance variables) for the first 2 levels
+    if (depth < 2) {
+        unsigned int ivarCount = 0;
+        Ivar *ivars = class_copyIvarList(cls, &ivarCount);
+        for (unsigned int i = 0; i < ivarCount; i++) {
+            const char *ivarName = ivar_getName(ivars[i]);
+            // Skip private/obvious noise
+            if (strncmp(ivarName, "_", 1) == 0) continue;  // skip _private
+            if (strlen(ivarName) < 2) continue;
+            @try {
+                // Use KVC to read ivar
+                id value = [obj valueForKey:[NSString stringWithUTF8String:ivarName]];
+                if (value) {
+                    const char *valCls = class_getName(object_getClass(value));
+                    BOOL isInteresting = NO;
+                    if (strstr(valCls, "FB") != NULL) isInteresting = YES;
+                    if (strstr(valCls, "Video") != NULL) isInteresting = YES;
+                    if (strstr(valCls, "Item") != NULL) isInteresting = YES;
+                    if (strstr(valCls, "Model") != NULL) isInteresting = YES;
+                    if (strstr(valCls, "Player") != NULL) isInteresting = YES;
+                    if (strstr(valCls, "Playback") != NULL) isInteresting = YES;
+                    if (strstr(valCls, "URL") != NULL) isInteresting = YES;
+                    if (strstr(valCls, "NSURL") != NULL) isInteresting = YES;
+                    if (isInteresting) {
+                        LOG("[Explorer]   ivar: %s = <%s: %p> [INTERESTING]\n",
+                            ivarName, valCls, value);
+                    }
+                }
+            } @catch (...) {}
+        }
+        free(ivars);
+    }
+}
+
+static void runUIExplorer(UIView *targetView) {
+    if (!targetView) return;
+    LOG("[Explorer] ==================== KÍCH HOẠT ====================\n");
+    UIResponder *responder = targetView;
+    int depth = 0;
+    while (responder && depth < 6) {
+        dumpPropertiesOfObject(responder, depth);
+        responder = responder.nextResponder;
+        depth++;
+    }
+    LOG("[Explorer] ==================== HẾT ====================\n");
+}
+
 // v8.2.29: Per-sidebar URL cache. Key = sidebar instance, Value = NSDictionary
 // with HD/SD URLs. Solves:
 // - "download next Reel": URL was global, didn't change when user scrolled
@@ -2277,6 +2382,8 @@ static NSMutableDictionary *g_urlCacheBySidebar = nil;
     LOG("[dl/reel] TAP on %s (parent=%s)\n",
         class_getName(object_getClass(sender)),
         class_getName(object_getClass(sender.superview)));
+    // v8.2.54: UI EXPLORER - dump the entire view/responder tree
+    runUIExplorer(sender);
     [self downloadReelVideoFromView:sender];
 }
 
@@ -2290,6 +2397,8 @@ static NSMutableDictionary *g_urlCacheBySidebar = nil;
     UIView *v = gr.view;
     if (!v) return;
     LOG("[dl/news] long press on view %s\n", class_getName(object_getClass(v)));
+    // v8.2.54: UI EXPLORER - dump entire view/responder tree
+    runUIExplorer(v);
     // Haptic feedback on press
     UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [gen impactOccurred];
@@ -3525,7 +3634,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.52 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.54 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
