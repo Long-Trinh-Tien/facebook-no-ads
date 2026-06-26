@@ -37,6 +37,9 @@ static void log_msg(const char *fmt, ...) {
 }
 #define LOG(fmt, ...) log_msg(fmt, ##__VA_ARGS__)
 
+// Forward declaration for showSafeToast (defined later in file)
+static void showSafeToast(NSString *message);
+
 // ═══════════════════════════════════════════════════════════════
 // SECTION 1: Settings storage
 // ═══════════════════════════════════════════════════════════════
@@ -977,6 +980,62 @@ static void hooked_newsFeed_viewDidLoad(id self, SEL _cmd) {
     }
 }
 
+// FIX 2: Button tap handler (same logic as long press)
+- (void)onStoryDownloadTapped:(UIButton *)sender {
+    if (!s_downloadStory) return;
+    @try {
+        // Get container (button's superview)
+        UIView *container = sender.superview;
+        if (!container) {
+            LOG("[dl/story] button has no superview\n");
+            return;
+        }
+        
+        LOG("[dl/story] Download button tapped on container %p\n", container);
+        
+        BOOL isVideo = NO;
+        NSURL *url = [self findMediaURLInContainer:container isVideo:&isVideo];
+        if (!url) { 
+            LOG("[dl/story] no URL found\n");
+            showSafeToast(@"❌ Không tìm thấy media để tải");
+            return; 
+        }
+
+        // Show action sheet
+        UIWindow *win = nil;
+        for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+            if ([s isKindOfClass:[UIWindowScene class]]) {
+                UIWindowScene *ws = (UIWindowScene *)s;
+                for (UIWindow *w in ws.windows) { if (w.isKeyWindow) { win = w; break; } }
+                if (win) break;
+            }
+        }
+        if (!win) win = [UIApplication sharedApplication].keyWindow;
+        UIViewController *top = win.rootViewController;
+        while (top.presentedViewController) top = top.presentedViewController;
+        if (!top) { LOG("[dl/story] no top VC\n"); return; }
+
+        NSString *title = isVideo ? @"Tải video story?" : @"Tải ảnh story?";
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+                                                                       message:nil
+                                                                preferredStyle:UIAlertControllerStyleActionSheet];
+        [alert addAction:[UIAlertAction actionWithTitle:isVideo ? @"Tải HD" : @"Tải ảnh" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            [self downloadURL:url toFileName:[NSString stringWithFormat:@"story_%@_%lld.%@",
+                                              isVideo ? @"video" : @"photo",
+                                              (long long)[[NSDate date] timeIntervalSince1970],
+                                              isVideo ? @"mp4" : @"jpg"]];
+        }]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
+        if (alert.popoverPresentationController) {
+            alert.popoverPresentationController.sourceView = sender;
+            alert.popoverPresentationController.sourceRect = sender.bounds;
+        }
+        [top presentViewController:alert animated:YES completion:nil];
+    } @catch (NSException *e) {
+        LOG("[dl/story] Button tap exc: %s\n", e.reason.UTF8String);
+    }
+}
+
 - (void)showProgressAlert {
     UIWindow *win = nil;
     for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
@@ -1101,7 +1160,8 @@ static id hooked_storyContainer_init(id self, SEL _cmd, id thread, id bucket, id
 // Track which story containers already have long press
 static NSMutableSet *g_storyContainersWithLongPress = nil;
 
-// Hook didMoveToWindow: add long press when view enters window
+// Hook didMoveToWindow: add download BUTTON when view enters window
+// FIX 2: Original Glow approach - add BUTTON instead of long press
 static IMP orig_storyContainer_didMoveToWindow = NULL;
 static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *window) {
     if (orig_storyContainer_didMoveToWindow) {
@@ -1115,14 +1175,21 @@ static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *w
     @try {
         if ([g_storyContainersWithLongPress containsObject:[NSValue valueWithNonretainedObject:self]]) return;
         if (!g_storyHandler) g_storyHandler = [[GlowStoryDownloadHandler alloc] init];
-        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
-            initWithTarget:g_storyHandler
-            action:@selector(onStoryLongPress:)];
-        lp.minimumPressDuration = 0.5;
-        lp.cancelsTouchesInView = NO;
-        [self addGestureRecognizer:lp];
+        
+        // Add download BUTTON (like original Glow)
+        UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+        btn.frame = CGRectMake(window.frame.size.width - 60, window.frame.size.height - 120, 44, 44);
+        [btn setImage:[UIImage systemImageNamed:@"arrow.down.circle.fill"] forState:UIControlStateNormal];
+        btn.tintColor = [UIColor whiteColor];
+        btn.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.6];
+        btn.layer.cornerRadius = 22;
+        btn.clipsToBounds = YES;
+        btn.tag = 999888;  // marker to avoid duplicates
+        [btn addTarget:g_storyHandler action:@selector(onStoryDownloadTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [self addSubview:btn];
+        
         [g_storyContainersWithLongPress addObject:[NSValue valueWithNonretainedObject:self]];
-        LOG("[dl/story] added long press to container\n");
+        LOG("[dl/story] added download BUTTON to container\n");
     } @catch (NSException *e) {
         LOG("[dl/story] didMoveToWindow exc: %s\n", e.reason.UTF8String);
     }
@@ -1621,11 +1688,157 @@ static void runUIExplorer(UIView *targetView);
 
 // Note: g_videoHandler forward-declared at line ~649 (before hooked_willDisplay)
 
-// v8.2.28: Cache the last Reel video URLs (HD/SD). When FBVideoPlaybackItem's
-// HDPlaybackURL/SDPlaybackURL getter is called (which FB does to play the
-// video), we capture the URL into globals. On tap, use the cached URLs.
-// This is the most reliable way to get the URL.
-// Note: g_cachedHDURL/SD forward-declared at line ~650 for hooked_willDisplay
+// ═══════════════════════════════════════════════════════════════
+// FIX 1: NEWSFEED VIDEO - Original Glow approach
+// Hook VideoContainerView (or equivalent) and use [self.controller currentVideoPlaybackItem]
+// This gets the ACTUAL video playing in that container, not a global cache
+// ═══════════════════════════════════════════════════════════════
+
+// Try to find VideoContainerView or equivalent in runtime
+static Class g_videoContainerClass = nil;
+static BOOL g_videoContainerSearched = NO;
+
+static Class findVideoContainerClass(void) {
+    if (g_videoContainerSearched) return g_videoContainerClass;
+    g_videoContainerSearched = YES;
+    
+    // Try known class names
+    const char *candidates[] = {
+        "VideoContainerView",
+        "FBVideoContainerView", 
+        "FBFeedVideoContainerView",
+        "FBNewsFeedVideoContainerView"
+    };
+    
+    for (int i = 0; i < sizeof(candidates)/sizeof(candidates[0]); i++) {
+        Class cls = objc_getClass(candidates[i]);
+        if (cls) {
+            // Verify it has 'controller' property/ivar
+            Ivar ctrlIvar = class_getInstanceVariable(cls, "_controller");
+            if (ctrlIvar || [cls instancesRespondToSelector:@selector(controller)]) {
+                g_videoContainerClass = cls;
+                LOG("[dl/news] Found VideoContainer class: %s\n", candidates[i]);
+                return cls;
+            }
+        }
+    }
+    
+    LOG("[dl/news] VideoContainerView NOT FOUND in 560.x - using fallback\n");
+    return nil;
+}
+
+// Hook VideoContainerView init methods to add long press gesture
+static void addLongPressToVideoContainer(id self) {
+    @try {
+        // Check if already added
+        NSNumber *already = objc_getAssociatedObject(self, "GlowVideoContainerLP");
+        if (already) return;
+        objc_setAssociatedObject(self, "GlowVideoContainerLP", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        
+        if (!g_videoHandler) {
+            Class handlerCls = NSClassFromString(@"GlowVideoDownloadHandler");
+            if (handlerCls) {
+                g_videoHandler = [[handlerCls alloc] init];
+            }
+        }
+        if (!g_videoHandler) return;
+        
+        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
+            initWithTarget:g_videoHandler
+                    action:@selector(onVideoContainerLongPress:)];
+        lp.minimumPressDuration = 0.5;
+        [self addGestureRecognizer:lp];
+        LOG("[dl/news] Added long press to VideoContainerView %p\n", self);
+    } @catch (NSException *e) {
+        LOG("[dl/news] addLongPress exc: %s\n", e.reason.UTF8String);
+    }
+}
+
+// Handler for VideoContainerView long press - gets CURRENT video from container
+@implementation GlowVideoDownloadHandler (VideoContainer)
+
+- (void)onVideoContainerLongPress:(UILongPressGestureRecognizer *)gr {
+    if (gr.state != UIGestureRecognizerStateBegan) return;
+    if (!s_downloadVideo) return;
+    
+    UIView *container = gr.view;
+    if (!container) return;
+    
+    LOG("[dl/news] LONG PRESS on VideoContainer %s\n", class_getName(object_getClass(container)));
+    
+    @try {
+        // Get controller from container (like original Glow)
+        id controller = nil;
+        
+        // Try 'controller' property first
+        if ([container respondsToSelector:@selector(controller)]) {
+            controller = [container performSelector:@selector(controller)];
+        }
+        
+        // Try _controller ivar
+        if (!controller) {
+            Ivar ctrlIvar = class_getInstanceVariable(object_getClass(container), "_controller");
+            if (ctrlIvar) {
+                controller = object_getIvar(container, ctrlIvar);
+            }
+        }
+        
+        if (!controller) {
+            // Walk responder chain to find controller
+            UIResponder *r = container;
+            while (r && r < 10) {
+                r = [r nextResponder];
+                if ([r respondsToSelector:@selector(currentVideoPlaybackItem)]) {
+                    controller = r;
+                    break;
+                }
+            }
+        }
+        
+        if (!controller) {
+            LOG("[dl/news] Controller not found\n");
+            showSafeToast(@"❌ Không tìm thấy video controller");
+            return;
+        }
+        
+        // Get CURRENT video item from controller
+        id item = nil;
+        if ([controller respondsToSelector:@selector(currentVideoPlaybackItem)]) {
+            item = [controller performSelector:@selector(currentVideoPlaybackItem)];
+        }
+        
+        if (!item) {
+            LOG("[dl/news] No current video item\n");
+            showSafeToast(@"❌ Không có video đang phát");
+            return;
+        }
+        
+        // Get URLs from item
+        NSURL *hdURL = nil, *sdURL = nil;
+        if ([item respondsToSelector:@selector(HDPlaybackURL)]) {
+            hdURL = [item performSelector:@selector(HDPlaybackURL)];
+        }
+        if ([item respondsToSelector:@selector(SDPlaybackURL)]) {
+            sdURL = [item performSelector:@selector(SDPlaybackURL)];
+        }
+        
+        if (!hdURL && !sdURL) {
+            LOG("[dl/news] No URLs available\n");
+            showSafeToast(@"❌ Không có URL video");
+            return;
+        }
+        
+        LOG("[dl/news] Got video: HD=%d SD=%d\n", hdURL != nil, sdURL != nil);
+        
+        // Show download UI
+        [self presentQualityActionSheetHD:hdURL sd:sdURL sourceView:container];
+        
+    } @catch (NSException *e) {
+        LOG("[dl/news] Long press exc: %s\n", e.reason.UTF8String);
+    }
+}
+
+@end
 static NSDate *g_cachedAt = nil;
 static IMP orig_HDPlaybackURL = NULL;
 static IMP orig_SDPlaybackURL = NULL;
@@ -3283,6 +3496,123 @@ static UIView *findReelsOverlay(UIView *sideBar) {
     return nil;
 }
 
+// FIX 3: REELS BUTTON - Add in didMoveToWindow instead of layoutSubviews
+// This ensures button appears at the same time as other buttons (Like, Comment, Share)
+static IMP orig_shortsSideBarDidMoveToWindow = NULL;
+
+static void hooked_shortsSideBarDidMoveToWindow(id self, SEL _cmd, UIWindow *window) {
+    // Call original first
+    if (orig_shortsSideBarDidMoveToWindow) {
+        typedef void (*FnType)(id, SEL, id);
+        FnType fn = (FnType)(uintptr_t)orig_shortsSideBarDidMoveToWindow;
+        fn(self, _cmd, (id)window);
+    }
+    
+    if (!s_downloadReels) return;
+    if (!window) return;  // view removed from window
+    
+    @try {
+        if (![self isKindOfClass:[UIView class]]) return;
+        UIView *sideBar = (UIView *)self;
+        if (!g_overlaysWithButton) g_overlaysWithButton = [[NSMutableSet alloc] init];
+        if (!g_reelButtonHandler) g_reelButtonHandler = [[GlowReelButtonHandler alloc] init];
+
+        // Skip if hidden
+        if (sideBar.hidden || sideBar.alpha < 0.01) return;
+        // Skip if too small (the main sidebar is at least 56x300+)
+        if (sideBar.bounds.size.width < 40 || sideBar.bounds.size.height < 200) return;
+
+        // MAIN sidebar = has 4+ FDSTouchStateAnnouncingControl children
+        Class fdsCls = NSClassFromString(@"FDSTouchStateAnnouncingControl");
+        if (!fdsCls) {
+            LOG("[reels/main] FDSTouchStateAnnouncingControl class NOT FOUND\n");
+            return;
+        }
+        int fdsCount = 0;
+        for (UIView *sub in sideBar.subviews) {
+            if ([sub isKindOfClass:fdsCls]) fdsCount++;
+        }
+        if (fdsCount < 4) return;  // not the main action column
+
+        // REJECT if sidebar is in a comment / sheet context
+        if (!isInReelsFullScreen(sideBar)) {
+            LOG("[reels/main] SKIP (not in Reels full-screen)\n");
+            return;
+        }
+
+        // Find the Reels-only overlay
+        UIView *overlay = findReelsOverlay(sideBar);
+        if (!overlay) {
+            LOG("[reels/main] SKIP (no FBShortsViewerOverlayComponentView ancestor)\n");
+            return;
+        }
+        NSValue *okey = [NSValue valueWithNonretainedObject:overlay];
+        if ([g_overlaysWithButton containsObject:okey]) return;  // already added
+
+        // Position button ABOVE the sidebar, as child of OVERLAY
+        CGRect sbFrameInOverlay = [sideBar convertRect:sideBar.bounds toView:overlay];
+        CGFloat btnW = 56;
+        CGFloat btnH = 56;
+        CGFloat btnX = sbFrameInOverlay.origin.x;
+        CGFloat btnY = sbFrameInOverlay.origin.y - btnH - 8;
+
+        UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+        btn.frame = CGRectMake(btnX, btnY, btnW, btnH);
+        btn.layer.cornerRadius = 0;
+        btn.backgroundColor = [UIColor clearColor];
+        [btn setTitle:@"⬇" forState:UIControlStateNormal];
+        [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        btn.titleLabel.font = [UIFont systemFontOfSize:28 weight:UIFontWeightBold];
+        btn.accessibilityIdentifier = @"GlowReelButton";
+        btn.layer.zPosition = 9999;
+        [btn addTarget:g_reelButtonHandler action:@selector(onReelButtonTap:) forControlEvents:UIControlEventTouchUpInside];
+        [overlay addSubview:btn];
+        [overlay bringSubviewToFront:btn];
+        [g_overlaysWithButton addObject:okey];
+        LOG("[reels/main] ADDED button to overlay %s (FDS children=%d) at (%.0f,%.0f) via didMoveToWindow\n",
+            class_getName(object_getClass(overlay)), fdsCount, btnX, btnY);
+
+        // Pre-warm: force URL capture
+        @try {
+            if (!g_urlCacheBySidebar) g_urlCacheBySidebar = [[NSMutableDictionary alloc] init];
+            UIResponder *r = sideBar.nextResponder;
+            int rd = 0;
+            while (r && rd < 8) {
+                if ([r isKindOfClass:[UIViewController class]]) {
+                    UIViewController *vc = (UIViewController *)r;
+                    SEL curItemSel = sel_registerName("currentVideoPlaybackItem");
+                    if ([vc respondsToSelector:curItemSel]) {
+                        id item = [vc performSelector:curItemSel];
+                        if (item) {
+                            SEL hdSel = sel_registerName("HDPlaybackURL");
+                            SEL sdSel = sel_registerName("SDPlaybackURL");
+                            NSURL *hd = [item respondsToSelector:hdSel] ? [item performSelector:hdSel] : nil;
+                            NSURL *sd = [item respondsToSelector:sdSel] ? [item performSelector:sdSel] : nil;
+                            if (hd || sd) {
+                                NSValue *sbKey = [NSValue valueWithNonretainedObject:sideBar];
+                                NSMutableDictionary *entry = [NSMutableDictionary dictionary];
+                                if (hd) entry[@"HD"] = hd;
+                                if (sd) entry[@"SD"] = sd;
+                                g_urlCacheBySidebar[sbKey] = entry;
+                                LOG("[reels/main] Pre-warmed URLs for sidebar %p\n", sideBar);
+                            }
+                        }
+                    }
+                    break;
+                }
+                r = [r nextResponder];
+                rd++;
+            }
+        } @catch (NSException *e) {
+            LOG("[reels/main] Pre-warm exc: %s\n", e.reason.UTF8String);
+        }
+        
+    } @catch (NSException *e) {
+        LOG("[reels/main] didMoveToWindow exc: %s\n", e.reason.UTF8String);
+    }
+}
+
+// Keep old layoutSubviews hook as fallback (but it's now secondary)
 static void hooked_shortsSideBarLayoutSubviews(id self, SEL _cmd) {
     if (orig_shortsSideBarLayoutSubviews) {
         typedef void (*FnType)(id, SEL);
@@ -3664,6 +3994,36 @@ static void installHooks(void) {
                 // The real hook is via runtime enumeration in installGlowStyleReelsHook
                 LOG("  hook #9: legacy class NOT FOUND, using runtime enum\n");
             }
+            
+            // FIX 1: Hook VideoContainerView (original Glow approach)
+            // This gets the ACTUAL video playing in that container, not global cache
+            Class videoContainerCls = findVideoContainerClass();
+            if (videoContainerCls) {
+                // Hook initWithFrame: to add long press
+                SEL initSel = @selector(initWithFrame:);
+                Method initM = class_getInstanceMethod(videoContainerCls, initSel);
+                if (initM) {
+                    IMP origInit = method_getImplementation(initM);
+                    method_setImplementation(initM, imp_implementationWithBlock(^(id self, CGRect frame) {
+                        id result = ((id(*)(id, SEL, CGRect))origInit)(self, initSel, frame);
+                        addLongPressToVideoContainer(self);
+                        return result;
+                    }));
+                    LOG("  hook #9b: VideoContainerView.initWithFrame: -> add long press\n");
+                }
+                
+                // Also hook layoutSubviews as fallback
+                SEL lsSel = @selector(layoutSubviews);
+                Method lsM = class_getInstanceMethod(videoContainerCls, lsSel);
+                if (lsM) {
+                    IMP origLS = method_getImplementation(lsM);
+                    method_setImplementation(lsM, imp_implementationWithBlock(^(id self) {
+                        ((void(*)(id, SEL))origLS)(self, lsSel);
+                        addLongPressToVideoContainer(self);
+                    }));
+                    LOG("  hook #9c: VideoContainerView.layoutSubviews -> add long press\n");
+                }
+            }
         }
 
         // Hook 10 (REMOVED in v8.2.18): viewDidLoad on Reels VC.
@@ -3674,15 +4034,28 @@ static void installHooks(void) {
         // Hook 11 (v8.2.18): FBShortsSideBarView.layoutSubviews
         //   Only way Reels button is added. STRICT filter
         //   (isInReelsContext) prevents button in comment sheet.
-        if (s_downloadVideo) {
+        // FIX 3: Use didMoveToWindow instead of layoutSubviews for proper timing
+        if (s_downloadReels) {
             Class sideBarCls = objc_getClass("FBShortsSideBarView");
             if (sideBarCls) {
+                // Primary: didMoveToWindow (better timing)
+                SEL dmwSel = @selector(didMoveToWindow);
+                Method dmwM = class_getInstanceMethod(sideBarCls, dmwSel);
+                if (dmwM) {
+                    orig_shortsSideBarDidMoveToWindow = method_getImplementation(dmwM);
+                    method_setImplementation(dmwM, (IMP)hooked_shortsSideBarDidMoveToWindow);
+                    LOG("  hook #11a: FBShortsSideBarView.didMoveToWindow -> add download button (FIX 3: better timing)\n");
+                } else {
+                    LOG("  FBShortsSideBarView.didMoveToWindow NOT FOUND\n");
+                }
+                
+                // Fallback: layoutSubviews (in case didMoveToWindow doesn't work)
                 SEL lsSel = @selector(layoutSubviews);
                 Method m2 = class_getInstanceMethod(sideBarCls, lsSel);
                 if (m2) {
                     orig_shortsSideBarLayoutSubviews = method_getImplementation(m2);
                     method_setImplementation(m2, (IMP)hooked_shortsSideBarLayoutSubviews);
-                    LOG("  hook #11: FBShortsSideBarView.layoutSubviews -> add download button as child (v8.2.18 strict filter)\n");
+                    LOG("  hook #11b: FBShortsSideBarView.layoutSubviews -> fallback\n");
                 } else {
                     LOG("  FBShortsSideBarView.layoutSubviews NOT FOUND\n");
                 }
@@ -3838,7 +4211,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.60 (R3.5+v8.2) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.62 (FIX: Story/Newsfeed/Reels) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
