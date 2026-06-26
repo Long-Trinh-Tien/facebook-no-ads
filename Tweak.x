@@ -82,7 +82,7 @@ static void glow_init(void) {
         snprintf(logPath, sizeof(logPath), "%s/Documents/glow.txt", home);
         // Log path is now in GlowLogManager
     }
-    LOG("\n=== Glow v8.3.5 (RESTORE: Story download from v8.2.64) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.3.6 (RESTORE: GlowStoryDownloadHandler inline) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load settings on startup
     [[GlowSettingsManager shared] loadSettings];
