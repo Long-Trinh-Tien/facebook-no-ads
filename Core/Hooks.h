@@ -20,7 +20,7 @@ void initAdBlockHooks(void);
 void initStorySeenHooks(void);
 
 // Story download hooks
-// void initStoryDownloadHooks(void);  // DISABLED in v8.3.4 (crash)
+void initStoryDownloadHooks(void);
 
 // Newsfeed video hooks
 void initNewsfeedVideoHooks(void);

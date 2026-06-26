@@ -36,10 +36,10 @@ static void installHooks(void) {
         initStorySeenHooks();
     }
 
-    // Story download DISABLED in v8.3.4 (was causing crash)
-    // if (settings.downloadStory) {
-    //     initStoryDownloadHooks();
-    // }
+    // Story download (button on FBSnacksMediaContainerView)
+    if (settings.downloadStory) {
+        initStoryDownloadHooks();
+    }
 
     // Newsfeed video download (long press)
     if (settings.downloadVideo) {
@@ -82,7 +82,7 @@ static void glow_init(void) {
         snprintf(logPath, sizeof(logPath), "%s/Documents/glow.txt", home);
         // Log path is now in GlowLogManager
     }
-    LOG("\n=== Glow v8.3.4 (SAFE: StoryDownloadHooks disabled) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.3.5 (RESTORE: Story download from v8.2.64) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load settings on startup
     [[GlowSettingsManager shared] loadSettings];
