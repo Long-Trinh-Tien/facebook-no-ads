@@ -1,5 +1,6 @@
 // LongPressHooks.xm
 // Long press to open Glow settings UI
+// FIX v8.3.2: Make crash-safe - just log, no alert presentation
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import "Hooks.h"
@@ -8,48 +9,30 @@
 
 static IMP orig_sendAction = NULL;
 
+// FIX v8.3.2: Removed alert presentation (was causing crash when rootViewController nil)
+// Now just logs - settings are opened via StoryDownloadHooks self-add gesture
 static BOOL hooked_sendAction(id self, SEL _cmd, SEL action, id target, id sender, UIEvent *event) {
-    // Always call original
+    // Always call original first (critical for app functionality)
     BOOL result = orig_sendAction ?
         ((BOOL(*)(id, SEL, SEL, id, id, id))orig_sendAction)(self, _cmd, action, target, sender, event) :
         YES;
 
-    // Detect long press
-    if (sender && [sender isKindOfClass:[UILongPressGestureRecognizer class]]) {
-        UILongPressGestureRecognizer *lp = (UILongPressGestureRecognizer *)sender;
-        if (lp.state == UIGestureRecognizerStateBegan) {
-            LOG("[ui] long press detected, opening settings\n");
-            dispatch_async(dispatch_get_main_queue(), ^{
-                // Open settings - simple alert for now
-                UIWindow *win = nil;
-                if (@available(iOS 13.0, *)) {
-                    for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                        if (scene.activationState == UISceneActivationStateForegroundActive) {
-                            for (UIWindow *w in scene.windows) {
-                                if (w.isKeyWindow) { win = w; break; }
-                            }
-                        }
-                        if (win) break;
-                    }
-                }
-                if (!win) win = [UIApplication sharedApplication].keyWindow;
-                if (!win) return;
-
-                UIViewController *top = win.rootViewController;
-                while (top.presentedViewController) top = top.presentedViewController;
-
-                UIAlertController *alert = [UIAlertController
-                    alertControllerWithTitle:@"Glow Settings"
-                    message:@"v8.3.0 - Modular Refactor"
-                    preferredStyle:UIAlertControllerStyleAlert];
-                [alert addAction:[UIAlertAction
-                    actionWithTitle:@"OK"
-                    style:UIAlertActionStyleDefault
-                    handler:nil]];
-                [top presentViewController:alert animated:YES completion:nil];
-            });
+    // Detect long press safely
+    @try {
+        if (sender && [sender isKindOfClass:[UILongPressGestureRecognizer class]]) {
+            UILongPressGestureRecognizer *lp = (UILongPressGestureRecognizer *)sender;
+            if (lp.state == UIGestureRecognizerStateBegan) {
+                // Just log - no alert (avoids crash on nil rootViewController)
+                LOG("[ui] long press detected (gesture works, no alert)\n");
+                // Settings are opened via StoryDownloadHooks self-add gesture
+                // (GlowStoryHandler.onStoryLongPress:)
+            }
         }
+    } @catch (NSException *e) {
+        // Silently catch any exception from long press detection
+        LOG("[dl/longpress] sendAction exc: %s\n", e.reason.UTF8String);
     }
+
     return result;
 }
 
@@ -62,7 +45,7 @@ void initLongPressHooks(void) {
             if (m) {
                 orig_sendAction = method_getImplementation(m);
                 method_setImplementation(m, (IMP)hooked_sendAction);
-                LOG("  hook: UIApplication.sendAction:to:from:forEvent: -> long press detection\n");
+                LOG("  hook: UIApplication.sendAction:to:from:forEvent: (safe log only)\n");
             }
         }
     } @catch (NSException *e) {
