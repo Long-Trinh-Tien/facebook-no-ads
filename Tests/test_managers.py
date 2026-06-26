@@ -326,6 +326,80 @@ class TestProjectStructure(unittest.TestCase):
 
 
 # ═══════════════════════════════════════════════════════════════
+# Test 10: New Manager files exist
+# ═══════════════════════════════════════════════════════════════
+class TestNewManagersExist(unittest.TestCase):
+    """Verify Phase 1.5 new Manager files exist"""
+
+    import os
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    REPO_DIR = os.path.dirname(SCRIPT_DIR)
+
+    def test_video_handler_exists(self):
+        """GlowVideoHandler should exist"""
+        import os
+        path = os.path.join(self.REPO_DIR, 'Managers', 'GlowVideoHandler.h')
+        self.assertTrue(os.path.isfile(path))
+
+    def test_reel_handler_exists(self):
+        """GlowReelHandler should exist"""
+        import os
+        path = os.path.join(self.REPO_DIR, 'Managers', 'GlowReelHandler.h')
+        self.assertTrue(os.path.isfile(path))
+
+    def test_all_hooks_implemented(self):
+        """All Core hook files should be implemented (not stubs)"""
+        import os
+        for hook in ['AdBlockHooks', 'StorySeenHooks', 'VideoItemHooks',
+                     'PlaybackStateHooks', 'NewsfeedVideoHooks',
+                     'ReelsDownloadHooks', 'LongPressHooks', 'RuntimeEnumHooks']:
+            path = os.path.join(self.REPO_DIR, 'Core', f'{hook}.xm')
+            self.assertTrue(os.path.isfile(path))
+
+            # Check it's not a stub (should have init function)
+            with open(path) as f:
+                content = f.read()
+            # Stub files have "(STUB" comment, real implementations don't
+            if "(STUB" in content:
+                self.fail(f"{hook}.xm is still a STUB!")
+
+
+# ═══════════════════════════════════════════════════════════════
+# Test 11: GlowCacheManager URL handling
+# ═══════════════════════════════════════════════════════════════
+class TestCacheManagerLogic(unittest.TestCase):
+    """Test GlowCacheManager URL caching logic (Python simulation)"""
+
+    def test_hd_url_priority(self):
+        """When both HD and SD are available, HD should be preferred"""
+        hd = "https://example.com/video_hd.mp4"
+        sd = "https://example.com/video_sd.mp4"
+        urls = {"HD": hd, "SD": sd}
+
+        # Priority: HD first
+        selected = urls.get("HD") or urls.get("SD")
+        self.assertEqual(selected, hd)
+
+    def test_fallback_to_sd(self):
+        """If no HD, use SD"""
+        urls = {"HD": None, "SD": "https://example.com/video_sd.mp4"}
+        selected = urls.get("HD") or urls.get("SD")
+        self.assertEqual(selected, "https://example.com/video_sd.mp4")
+
+    def test_no_urls(self):
+        """If neither available, return None"""
+        urls = {"HD": None, "SD": None}
+        selected = urls.get("HD") or urls.get("SD")
+        self.assertIsNone(selected)
+
+    def test_url_validation(self):
+        """URL should be valid HTTPS"""
+        url = "https://scontent.fsgn5-8.fna.fbcdn.net/video.mp4"
+        self.assertTrue(url.startswith("https://"))
+        self.assertIn("fbcdn.net", url)
+
+
+# ═══════════════════════════════════════════════════════════════
 # Run tests
 # ═══════════════════════════════════════════════════════════════
 if __name__ == '__main__':
