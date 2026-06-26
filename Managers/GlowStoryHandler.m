@@ -23,17 +23,64 @@
     if (outIsVideo) *outIsVideo = NO;
     if (!container) return nil;
     @try {
-        Ivar mvIvar = class_getInstanceVariable(object_getClass(container), "_mediaView");
-        id mediaView = mvIvar ? object_getIvar(container, mvIvar) : nil;
-        if (!mediaView) {
-            @try {
-                mediaView = [container valueForKey:@"mediaView"];
-            } @catch (NSException *e) {
-                LOG("[dl/story] mediaView not found via ivar or KVC\n");
+        // FIX v8.3.1: Try multiple ivar/property names for mediaView
+        // FB 560.x may have renamed the ivar
+        const char *ivarNames[] = {
+            "_mediaView",        // Original
+            "mediaView",          // KVC variant
+            "_player",            // Alternative
+            "_videoView",         // Alternative
+            "_contentView",       // Alternative
+            NULL
+        };
+
+        id mediaView = nil;
+        NSString *foundIvar = nil;
+
+        // Try each ivar name
+        for (int i = 0; ivarNames[i] != NULL; i++) {
+            Ivar ivar = class_getInstanceVariable(object_getClass(container), ivarNames[i]);
+            if (ivar) {
+                mediaView = object_getIvar(container, ivar);
+                if (mediaView) {
+                    foundIvar = [NSString stringWithUTF8String:ivarNames[i]];
+                    break;
+                }
             }
         }
 
-        if (!mediaView) return nil;
+        // Try KVC as fallback
+        if (!mediaView) {
+            for (int i = 0; ivarNames[i] != NULL; i++) {
+                @try {
+                    NSString *key = [NSString stringWithUTF8String:ivarNames[i]];
+                    if ([container respondsToSelector:@selector(valueForKey:)]) {
+                        id val = [container valueForKey:key];
+                        if (val && [val isKindOfClass:[UIView class]]) {
+                            mediaView = val;
+                            foundIvar = [NSString stringWithFormat:@"KVC:%@", key];
+                            break;
+                        }
+                    }
+                } @catch (NSException *e) {}
+            }
+        }
+
+        if (!mediaView) {
+            // Log all ivars to help debug
+            unsigned int ivarCount = 0;
+            Ivar *ivars = class_copyIvarList(object_getClass(container), &ivarCount);
+            LOG("[dl/story] FAILED to find mediaView. Container class=%s, %u ivars:\n",
+                class_getName(object_getClass(container)), ivarCount);
+            for (unsigned int i = 0; i < ivarCount && i < 20; i++) {
+                LOG("[dl/story]   ivar[%d]: %s\n", i, ivar_getName(ivars[i]));
+            }
+            if (ivars) free(ivars);
+            return nil;
+        }
+
+        LOG("[dl/story] Found mediaView via %@, class=%s\n",
+            foundIvar, class_getName(object_getClass(mediaView)));
 
         // Try FBSnacksNewVideoView
         Class videoCls = NSClassFromString(@"FBSnacksNewVideoView");
@@ -58,12 +105,24 @@
         // Try FBSnacksPhotoView
         Class photoCls = NSClassFromString(@"FBSnacksPhotoView");
         if (photoCls && [mediaView isKindOfClass:photoCls]) {
-            Ivar swpvIvar = class_getInstanceVariable(object_getClass(mediaView), "_photoView");
-            id swpv = swpvIvar ? object_getIvar(mediaView, swpvIvar) : nil;
+            // Try multiple ivar names for photoView
+            const char *photoIvars[] = {"_photoView", "photoView", NULL};
+            id swpv = nil;
+            for (int i = 0; photoIvars[i]; i++) {
+                Ivar iv = class_getInstanceVariable(object_getClass(mediaView), photoIvars[i]);
+                if (iv) swpv = object_getIvar(mediaView, iv);
+                if (swpv) break;
+            }
             if (!swpv) return nil;
-            Ivar wpvIvar = class_getInstanceVariable(object_getClass(swpv), "_photoView");
-            id wpv = wpvIvar ? object_getIvar(swpv, wpvIvar) : nil;
+
+            id wpv = nil;
+            for (int i = 0; photoIvars[i]; i++) {
+                Ivar iv = class_getInstanceVariable(object_getClass(swpv), photoIvars[i]);
+                if (iv) wpv = object_getIvar(swpv, iv);
+                if (wpv) break;
+            }
             if (!wpv) return nil;
+
             SEL photoSel = sel_registerName("photo");
             id photo = [wpv respondsToSelector:photoSel] ? [wpv performSelector:photoSel] : nil;
             if (!photo) return nil;
@@ -85,6 +144,10 @@
                 LOG("[dl/story] photo exc: %s\n", e.reason.UTF8String);
             }
         }
+
+        // Unknown media type - log it
+        LOG("[dl/story] Unknown mediaView class: %s (not video or photo)\n",
+            class_getName(object_getClass(mediaView)));
     } @catch (NSException *e) {
         LOG("[dl/story] exc: %s\n", e.reason.UTF8String);
     }

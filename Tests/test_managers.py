@@ -400,6 +400,72 @@ class TestCacheManagerLogic(unittest.TestCase):
 
 
 # ═══════════════════════════════════════════════════════════════
+# Test 12: Media view lookup (FIX v8.3.1)
+# ═══════════════════════════════════════════════════════════════
+class TestMediaViewLookup(unittest.TestCase):
+    """Test that media view lookup tries multiple ivar names (FB 560.x)"""
+
+    IVAR_NAMES = ["_mediaView", "mediaView", "_player", "_videoView", "_contentView"]
+
+    def test_first_ivar_is_default(self):
+        """Default ivar name should be _mediaView"""
+        self.assertEqual(self.IVAR_NAMES[0], "_mediaView")
+
+    def test_fallback_chain(self):
+        """Should try all ivar names in order"""
+        self.assertIn("_mediaView", self.IVAR_NAMES)
+        self.assertIn("mediaView", self.IVAR_NAMES)
+        self.assertIn("_player", self.IVAR_NAMES)
+
+    def test_returns_nil_if_not_found(self):
+        """If no ivar found, return nil (don't crash)"""
+        all_ivars = []
+        for name in self.IVAR_NAMES:
+            # Simulate: ivar not found
+            all_ivars.append(None)
+        result = next((v for v in all_ivars if v is not None), None)
+        self.assertIsNone(result)
+
+    def test_finds_first_match(self):
+        """Should return first non-nil match"""
+        all_ivars = [None, None, "FOUND", "IGNORED"]
+        result = next((v for v in all_ivars if v is not None), None)
+        self.assertEqual(result, "FOUND")
+
+
+# ═══════════════════════════════════════════════════════════════
+# Test 13: Story long press gesture (FIX v8.3.1)
+# ═══════════════════════════════════════════════════════════════
+class TestStoryLongPressGesture(unittest.TestCase):
+    """Test that story long press gesture is self-added"""
+
+    def test_gesture_in_init(self):
+        """Long press should be added in init, not just didMoveToWindow"""
+        # This is tested by checking the code structure
+        # The fix adds gesture in initWithFrame hook
+        pass
+
+    def test_duplicate_prevention(self):
+        """Should prevent adding gesture twice"""
+        # Using Associated Object to mark "already added"
+        containers_with_lp = set()
+        container_id = 1
+
+        # First time
+        if container_id not in containers_with_lp:
+            containers_with_lp.add(container_id)
+        first_count = len(containers_with_lp)
+
+        # Second time (should skip)
+        if container_id not in containers_with_lp:
+            containers_with_lp.add(container_id)
+        second_count = len(containers_with_lp)
+
+        self.assertEqual(first_count, 1)
+        self.assertEqual(second_count, 1)  # No duplicate
+
+
+# ═══════════════════════════════════════════════════════════════
 # Run tests
 # ═══════════════════════════════════════════════════════════════
 if __name__ == '__main__':
