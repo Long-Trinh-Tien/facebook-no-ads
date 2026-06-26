@@ -2231,17 +2231,26 @@ static void hooked_configureWithModel(id self, SEL _cmd, id model) {
     }
 }
 
-// v8.2.60: ACTIVE PLAYBACK-STATE TRACKING
-// Hook FBVideoPlaybackController.setPlaying: to capture the item that
-// is ACTUALLY being played on screen. Pre-buffered items do NOT call
-// setPlaying:YES yet, so they don't pollute the global.
-// This is the absolute reference for the visible video.
-static IMP orig_setPlaying = NULL;
+// v8.2.66: ACTIVE PLAYBACK-STATE TRACKING (CRITICAL FIX)
+// Static analysis (rabin2 + radare2) revealed that setPlaying: does NOT
+// exist on FBVideoPlaybackController in FB 560.x!
+// Found selectors:
+//   - setPlayingVideo:       (BOOL param) - exists, use this
+//   - setPlayingRequested:   (BOOL param) - exists, alternative
+//   - pictureInPictureController:setPlaying: (delegate method, different)
+//
+// We hook BOTH setPlayingVideo: and setPlayingRequested: on
+// FBVideoPlaybackController to capture the item that is ACTUALLY
+// being played on screen. Pre-buffered items do NOT call either yet,
+// so they don't pollute the global. This is the absolute reference
+// for the visible video.
+static IMP orig_setPlayingVideo = NULL;
+static IMP orig_setPlayingRequested = NULL;
 
-static void hooked_setPlaying(id self, SEL _cmd, BOOL playing) {
-    if (orig_setPlaying) {
+static void hooked_setPlayingVideo(id self, SEL _cmd, BOOL playing) {
+    if (orig_setPlayingVideo) {
         typedef void (*FnType)(id, SEL, BOOL);
-        ((FnType)orig_setPlaying)(self, _cmd, playing);
+        ((FnType)orig_setPlayingVideo)(self, _cmd, playing);
     }
     if (playing && self) {
         // Query the live item from the engine itself
@@ -2252,8 +2261,29 @@ static void hooked_setPlaying(id self, SEL _cmd, BOOL playing) {
                 g_currentPlayingItem = liveItem;
                 const char *ctrlCls = class_getName(object_getClass(self));
                 const char *itemCls = class_getName(object_getClass(liveItem));
-                LOG("[Glow/Engine] Screen focus shifted. ctrl=%s item=%s ptr=%p\n",
+                LOG("[Glow/Engine] Screen focus shifted (setPlayingVideo:). ctrl=%s item=%s ptr=%p\n",
                     ctrlCls, itemCls, liveItem);
+            }
+        }
+    }
+}
+
+// v8.2.66: Alternative hook for setPlayingRequested:
+// Some Reels code paths may use setPlayingRequested: instead of
+// setPlayingVideo:. Hook both to maximize coverage.
+static void hooked_setPlayingRequested(id self, SEL _cmd, BOOL playing) {
+    if (orig_setPlayingRequested) {
+        typedef void (*FnType)(id, SEL, BOOL);
+        ((FnType)orig_setPlayingRequested)(self, _cmd, playing);
+    }
+    if (playing && self) {
+        SEL itemSel = sel_registerName("currentVideoPlaybackItem");
+        if ([self respondsToSelector:itemSel]) {
+            id liveItem = [self performSelector:itemSel];
+            if (liveItem) {
+                g_currentPlayingItem = liveItem;
+                LOG("[Glow/Engine] Screen focus shifted (setPlayingRequested:). item=%s ptr=%p\n",
+                    class_getName(object_getClass(liveItem)), liveItem);
             }
         }
     }
@@ -2513,20 +2543,39 @@ void installGlowStyleReelsHook(void) {
                     LOG("[dl/reel] hooked configureWithModel: on %s\n", name);
                 }
             }
-            // v8.2.60: setPlaying: (BOOL) - track ACTIVE playback state
-            // Only hook on FBVideoPlaybackController to avoid hooking wrong classes
-            SEL setPlayingSel = sel_registerName("setPlaying:");
-            if (class_respondsToSelector(cls, setPlayingSel)) {
-                // Filter: only hook FBVideoPlaybackController
+            // v8.2.66: CRITICAL FIX - hook setPlayingVideo: and setPlayingRequested:
+            // Static analysis (rabin2 + radare2) proved that setPlaying: does NOT
+            // exist on FBVideoPlaybackController. Use the methods that DO exist.
+            // Only hook on FBVideoPlaybackController to avoid hooking wrong classes.
+
+            // Hook 1: setPlayingVideo: (BOOL) - primary method
+            SEL setPlayingVideoSel = sel_registerName("setPlayingVideo:");
+            if (class_respondsToSelector(cls, setPlayingVideoSel)) {
                 BOOL isPlaybackController = (strstr(name, "FBVideoPlaybackController") != NULL);
                 if (isPlaybackController) {
-                    Method m = class_getInstanceMethod(cls, setPlayingSel);
+                    Method m = class_getInstanceMethod(cls, setPlayingVideoSel);
                     if (m) {
-                        if (!orig_setPlaying) {
-                            orig_setPlaying = method_getImplementation(m);
+                        if (!orig_setPlayingVideo) {
+                            orig_setPlayingVideo = method_getImplementation(m);
                         }
-                        method_setImplementation(m, (IMP)hooked_setPlaying);
-                        LOG("[dl/reel] hooked setPlaying: on %s\n", name);
+                        method_setImplementation(m, (IMP)hooked_setPlayingVideo);
+                        LOG("[dl/reel] hooked setPlayingVideo: on %s\n", name);
+                    }
+                }
+            }
+
+            // Hook 2: setPlayingRequested: (BOOL) - alternative method
+            SEL setPlayingRequestedSel = sel_registerName("setPlayingRequested:");
+            if (class_respondsToSelector(cls, setPlayingRequestedSel)) {
+                BOOL isPlaybackController = (strstr(name, "FBVideoPlaybackController") != NULL);
+                if (isPlaybackController) {
+                    Method m = class_getInstanceMethod(cls, setPlayingRequestedSel);
+                    if (m) {
+                        if (!orig_setPlayingRequested) {
+                            orig_setPlayingRequested = method_getImplementation(m);
+                        }
+                        method_setImplementation(m, (IMP)hooked_setPlayingRequested);
+                        LOG("[dl/reel] hooked setPlayingRequested: on %s\n", name);
                     }
                 }
             }
@@ -4256,7 +4305,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.64 (FIX: Story/Newsfeed/Reels via static analysis) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.66 (CRITICAL FIX: setPlaying:→setPlayingVideo:) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
