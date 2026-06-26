@@ -1,6 +1,7 @@
 // StoryDownloadHooks.xm
 // Hooks for story download (FBSnacksMediaContainerView)
-// FIX v8.3.1: Add long press gesture directly + improve media view lookup
+// FIX v8.3.3: REMOVED gesture addition from init (was causing crash)
+// Only add gesture in didMoveToWindow (main thread, view is ready)
 #import "GlowCommon.h"
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -13,41 +14,18 @@
 
 static IMP orig_storyContainer_init = NULL;
 
+// FIX v8.3.3: SIMPLIFIED - just call original, no UI modifications
+// Crash was caused by addGestureRecognizer: in init (view not ready, not main thread)
 static id hooked_storyContainer_init(id self, SEL _cmd, id thread, id bucket,
                                      id mediaViewDelegate, id mediaViewGenerator,
                                      id toolbox, BOOL shouldBlurMedia) {
-    id result = nil;
     if (orig_storyContainer_init) {
         typedef id (*FnType)(id, SEL, id, id, id, id, id, BOOL);
-        result = ((FnType)orig_storyContainer_init)(self, _cmd, thread, bucket,
-                                                   mediaViewDelegate, mediaViewGenerator,
-                                                   toolbox, shouldBlurMedia);
+        return ((FnType)orig_storyContainer_init)(self, _cmd, thread, bucket,
+                                                 mediaViewDelegate, mediaViewGenerator,
+                                                 toolbox, shouldBlurMedia);
     }
-
-    // FIX v8.3.1: Add long press gesture directly in init (self-add approach)
-    if (result && [GlowSettingsManager shared].downloadStory) {
-        @try {
-            // Check if already added (avoid duplicate)
-            NSNumber *already = objc_getAssociatedObject(result, "GlowStoryLP");
-            if (!already) {
-                objc_setAssociatedObject(result, "GlowStoryLP", @YES,
-                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-                UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
-                    initWithTarget:[GlowStoryHandler shared]
-                            action:@selector(onStoryLongPress:)];
-                lp.minimumPressDuration = 0.5;
-                lp.cancelsTouchesInView = NO;
-                [(UIView *)result addGestureRecognizer:lp];
-
-                LOG("[dl/story] Added long press to container %p\n", result);
-            }
-        } @catch (NSException *e) {
-            LOG("[dl/story] init addLP exc: %s\n", e.reason.UTF8String);
-        }
-    }
-
-    return result;
+    return nil;
 }
 
 static IMP orig_storyContainer_didMoveToWindow = NULL;
@@ -65,7 +43,7 @@ static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *w
     if ([cache.storyContainersWithLongPress containsObject:key]) return;
 
     @try {
-        // Use keyWindow for positioning (window param can be unreliable)
+        // didMoveToWindow runs on main thread - safe to add gesture
         UIWindow *keyWindow = nil;
         if (@available(iOS 13.0, *)) {
             for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
@@ -80,18 +58,13 @@ static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *w
         if (!keyWindow) keyWindow = [UIApplication sharedApplication].keyWindow;
         if (!keyWindow) return;
 
-        // Also add long press as backup (in case init didn't add it)
-        NSNumber *hasLP = objc_getAssociatedObject(self, "GlowStoryLP");
-        if (!hasLP) {
-            objc_setAssociatedObject(self, "GlowStoryLP", @YES,
-                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
-                initWithTarget:[GlowStoryHandler shared]
-                        action:@selector(onStoryLongPress:)];
-            lp.minimumPressDuration = 0.5;
-            lp.cancelsTouchesInView = NO;
-            [(UIView *)self addGestureRecognizer:lp];
-        }
+        // Add long press gesture (safe here - main thread, view ready)
+        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
+            initWithTarget:[GlowStoryHandler shared]
+                    action:@selector(onStoryLongPress:)];
+        lp.minimumPressDuration = 0.5;
+        lp.cancelsTouchesInView = NO;
+        [(UIView *)self addGestureRecognizer:lp];
 
         // Add download button
         UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -106,7 +79,7 @@ static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *w
         [self addSubview:btn];
 
         [cache.storyContainersWithLongPress addObject:key];
-        LOG("[dl/story] added download BUTTON to container %p\n", self);
+        LOG("[dl/story] added gesture+button to container %p\n", self);
     } @catch (NSException *e) {
         LOG("[dl/story] didMoveToWindow exc: %s\n", e.reason.UTF8String);
     }
@@ -117,22 +90,24 @@ void initStoryDownloadHooks(void) {
     @try {
         Class cls = objc_getClass("FBSnacksMediaContainerView");
         if (cls) {
+            // Init hook: just call original, don't modify UI
             SEL sel = sel_registerName("initWithThread:bucket:mediaViewDelegate:mediaViewGenerator:toolbox:shouldBlurMedia:");
             Method m = class_getInstanceMethod(cls, sel);
             if (m) {
                 orig_storyContainer_init = method_getImplementation(m);
                 method_setImplementation(m, (IMP)hooked_storyContainer_init);
-                LOG("  hook #8: FBSnacksMediaContainerView init -> add long press\n");
+                LOG("  hook #8: FBSnacksMediaContainerView init (passive)\n");
             } else {
                 LOG("  FBSnacksMediaContainerView init NOT FOUND\n");
             }
 
+            // didMoveToWindow hook: add gesture + button (safe, main thread)
             SEL dmwSel = @selector(didMoveToWindow);
             Method dmwM = class_getInstanceMethod(cls, dmwSel);
             if (dmwM) {
                 orig_storyContainer_didMoveToWindow = method_getImplementation(dmwM);
                 method_setImplementation(dmwM, (IMP)hooked_storyContainer_didMoveToWindow);
-                LOG("  hook #8b: FBSnacksMediaContainerView didMoveToWindow -> add button\n");
+                LOG("  hook #8b: FBSnacksMediaContainerView didMoveToWindow -> add gesture+button\n");
             } else {
                 LOG("  didMoveToWindow NOT FOUND\n");
             }
