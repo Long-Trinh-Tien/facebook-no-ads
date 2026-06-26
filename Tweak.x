@@ -1177,8 +1177,29 @@ static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *w
         if (!g_storyHandler) g_storyHandler = [[GlowStoryDownloadHandler alloc] init];
         
         // Add download BUTTON (like original Glow)
+        // Use keyWindow for positioning (window parameter can be unreliable)
+        UIWindow *keyWindow = nil;
+        if (@available(iOS 13.0, *)) {
+            for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if (scene.activationState == UISceneActivationStateForegroundActive) {
+                    for (UIWindow *w in scene.windows) {
+                        if (w.isKeyWindow) {
+                            keyWindow = w;
+                            break;
+                        }
+                    }
+                }
+                if (keyWindow) break;
+            }
+        }
+        if (!keyWindow) keyWindow = [UIApplication sharedApplication].keyWindow;
+        if (!keyWindow) {
+            LOG("[dl/story] keyWindow is nil, cannot add button\n");
+            return;
+        }
+        
         UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-        btn.frame = CGRectMake(window.frame.size.width - 60, window.frame.size.height - 120, 44, 44);
+        btn.frame = CGRectMake(keyWindow.frame.size.width - 60, keyWindow.frame.size.height - 120, 44, 44);
         [btn setImage:[UIImage systemImageNamed:@"arrow.down.circle.fill"] forState:UIControlStateNormal];
         btn.tintColor = [UIColor whiteColor];
         btn.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.6];
@@ -1189,7 +1210,8 @@ static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *w
         [self addSubview:btn];
         
         [g_storyContainersWithLongPress addObject:[NSValue valueWithNonretainedObject:self]];
-        LOG("[dl/story] added download BUTTON to container\n");
+        LOG("[dl/story] added download BUTTON to container at (%.0f, %.0f)\n", 
+            keyWindow.frame.size.width - 60, keyWindow.frame.size.height - 120);
     } @catch (NSException *e) {
         LOG("[dl/story] didMoveToWindow exc: %s\n", e.reason.UTF8String);
     }
@@ -1702,9 +1724,10 @@ static Class findVideoContainerClass(void) {
     if (g_videoContainerSearched) return g_videoContainerClass;
     g_videoContainerSearched = YES;
     
-    // Try known class names
+    // Try known class names (FB 560.x uses FBVideoPlaybackContainerView)
     const char *candidates[] = {
-        "VideoContainerView",
+        "FBVideoPlaybackContainerView",  // FB 560.x
+        "VideoContainerView",            // Original Glow (FB 260-307)
         "FBVideoContainerView", 
         "FBFeedVideoContainerView",
         "FBNewsFeedVideoContainerView"
@@ -1713,12 +1736,15 @@ static Class findVideoContainerClass(void) {
     for (int i = 0; i < sizeof(candidates)/sizeof(candidates[0]); i++) {
         Class cls = objc_getClass(candidates[i]);
         if (cls) {
-            // Verify it has 'controller' property/ivar
+            // Verify it has 'controller' property/ivar or _videoPlaybackController
             Ivar ctrlIvar = class_getInstanceVariable(cls, "_controller");
-            if (ctrlIvar || [cls instancesRespondToSelector:@selector(controller)]) {
+            Ivar vpcIvar = class_getInstanceVariable(cls, "_videoPlaybackController");
+            if (ctrlIvar || vpcIvar || [cls instancesRespondToSelector:@selector(controller)]) {
                 g_videoContainerClass = cls;
-                LOG("[dl/news] Found VideoContainer class: %s\n", candidates[i]);
+                LOG("[dl/news] Found VideoContainer class: %s (has controller/videoPlaybackController)\n", candidates[i]);
                 return cls;
+            } else {
+                LOG("[dl/news] Found class %s but no controller ivar\n", candidates[i]);
             }
         }
     }
@@ -1773,6 +1799,7 @@ static void addLongPressToVideoContainer(id self) {
         // Try 'controller' property first
         if ([container respondsToSelector:@selector(controller)]) {
             controller = [container performSelector:@selector(controller)];
+            LOG("[dl/news] Got controller via 'controller' property\n");
         }
         
         // Try _controller ivar
@@ -1780,23 +1807,36 @@ static void addLongPressToVideoContainer(id self) {
             Ivar ctrlIvar = class_getInstanceVariable(object_getClass(container), "_controller");
             if (ctrlIvar) {
                 controller = object_getIvar(container, ctrlIvar);
+                LOG("[dl/news] Got controller via _controller ivar\n");
+            }
+        }
+        
+        // Try _videoPlaybackController ivar (FB 560.x)
+        if (!controller) {
+            Ivar vpcIvar = class_getInstanceVariable(object_getClass(container), "_videoPlaybackController");
+            if (vpcIvar) {
+                controller = object_getIvar(container, vpcIvar);
+                LOG("[dl/news] Got controller via _videoPlaybackController ivar\n");
             }
         }
         
         if (!controller) {
             // Walk responder chain to find controller
             UIResponder *r = container;
-            while (r && r < 10) {
+            int depth = 0;
+            while (r && depth < 20) {
                 r = [r nextResponder];
                 if ([r respondsToSelector:@selector(currentVideoPlaybackItem)]) {
                     controller = r;
+                    LOG("[dl/news] Got controller via responder chain at depth %d\n", depth);
                     break;
                 }
+                depth++;
             }
         }
         
         if (!controller) {
-            LOG("[dl/news] Controller not found\n");
+            LOG("[dl/news] Controller not found in %s\n", class_getName(object_getClass(container)));
             showSafeToast(@"❌ Không tìm thấy video controller");
             return;
         }
@@ -2474,15 +2514,20 @@ void installGlowStyleReelsHook(void) {
                 }
             }
             // v8.2.60: setPlaying: (BOOL) - track ACTIVE playback state
+            // Only hook on FBVideoPlaybackController to avoid hooking wrong classes
             SEL setPlayingSel = sel_registerName("setPlaying:");
             if (class_respondsToSelector(cls, setPlayingSel)) {
-                Method m = class_getInstanceMethod(cls, setPlayingSel);
-                if (m) {
-                    if (!orig_setPlaying) {
-                        orig_setPlaying = method_getImplementation(m);
+                // Filter: only hook FBVideoPlaybackController
+                BOOL isPlaybackController = (strstr(name, "FBVideoPlaybackController") != NULL);
+                if (isPlaybackController) {
+                    Method m = class_getInstanceMethod(cls, setPlayingSel);
+                    if (m) {
+                        if (!orig_setPlaying) {
+                            orig_setPlaying = method_getImplementation(m);
+                        }
+                        method_setImplementation(m, (IMP)hooked_setPlaying);
+                        LOG("[dl/reel] hooked setPlaying: on %s\n", name);
                     }
-                    method_setImplementation(m, (IMP)hooked_setPlaying);
-                    LOG("[dl/reel] hooked setPlaying: on %s\n", name);
                 }
             }
             // v8.2.38: per-class catch - skip bad class, continue loop
@@ -4211,7 +4256,7 @@ __attribute__((constructor))
 static void glow_init(void) {
     const char *home = getenv("HOME");
     if (home) snprintf(g_log_path, sizeof(g_log_path), "%s/Documents/glow.txt", home);
-    LOG("\n=== Glow v8.2.62 (FIX: Story/Newsfeed/Reels) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.2.64 (FIX: Story/Newsfeed/Reels via static analysis) — %s ===\n", __DATE__ " " __TIME__);
 
     // Load preferences
     reloadPrefs();
