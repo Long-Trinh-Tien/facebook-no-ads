@@ -177,47 +177,50 @@ void initRuntimeEnumHooks(void) {
                     }
                 }
 
-                // Hook setVideoPlayer:, setPlaybackController:
-                if (class_respondsToSelector(cls, setPlayerSel)) {
-                    Method m = class_getInstanceMethod(cls, setPlayerSel);
-                    if (m) {
-                        if (!orig_setVideoPlayer) {
-                            orig_setVideoPlayer = method_getImplementation(m);
+                // Hook setVideoPlayer:, setPlaybackController:, configureWithVideo:, configureWithModel:
+                // ONLY on FBVideoPlaybackController classes — NOT on ALL FB classes
+                // (Broad hook on all FB classes causes crash: storing ONE orig_* IMP from Class A
+                //  and using it for Class B's method — see AGENTS.md for full root cause analysis)
+                if (strstr(name, "FBVideoPlaybackController") != NULL) {
+                    if (class_respondsToSelector(cls, setPlayerSel)) {
+                        Method m = class_getInstanceMethod(cls, setPlayerSel);
+                        if (m) {
+                            if (!orig_setVideoPlayer) {
+                                orig_setVideoPlayer = method_getImplementation(m);
+                            }
+                            method_setImplementation(m, (IMP)hooked_setVideoPlayer);
+                            setPlayerHooked++;
                         }
-                        method_setImplementation(m, (IMP)hooked_setVideoPlayer);
-                        setPlayerHooked++;
                     }
-                }
-                if (class_respondsToSelector(cls, setPlayCtrlSel)) {
-                    Method m = class_getInstanceMethod(cls, setPlayCtrlSel);
-                    if (m) {
-                        if (!orig_setPlaybackController) {
-                            orig_setPlaybackController = method_getImplementation(m);
+                    if (class_respondsToSelector(cls, setPlayCtrlSel)) {
+                        Method m = class_getInstanceMethod(cls, setPlayCtrlSel);
+                        if (m) {
+                            if (!orig_setPlaybackController) {
+                                orig_setPlaybackController = method_getImplementation(m);
+                            }
+                            method_setImplementation(m, (IMP)hooked_setPlaybackController);
+                            setPlayCtrlHooked++;
                         }
-                        method_setImplementation(m, (IMP)hooked_setPlaybackController);
-                        setPlayCtrlHooked++;
                     }
-                }
-
-                // Hook configureWithVideo:, configureWithModel:
-                if (class_respondsToSelector(cls, cfgVideoSel)) {
-                    Method m = class_getInstanceMethod(cls, cfgVideoSel);
-                    if (m) {
-                        if (!orig_configureWithVideo) {
-                            orig_configureWithVideo = method_getImplementation(m);
+                    if (class_respondsToSelector(cls, cfgVideoSel)) {
+                        Method m = class_getInstanceMethod(cls, cfgVideoSel);
+                        if (m) {
+                            if (!orig_configureWithVideo) {
+                                orig_configureWithVideo = method_getImplementation(m);
+                            }
+                            method_setImplementation(m, (IMP)hooked_configureWithVideo);
+                            cfgVideoHooked++;
                         }
-                        method_setImplementation(m, (IMP)hooked_configureWithVideo);
-                        cfgVideoHooked++;
                     }
-                }
-                if (class_respondsToSelector(cls, cfgModelSel)) {
-                    Method m = class_getInstanceMethod(cls, cfgModelSel);
-                    if (m) {
-                        if (!orig_configureWithModel) {
-                            orig_configureWithModel = method_getImplementation(m);
+                    if (class_respondsToSelector(cls, cfgModelSel)) {
+                        Method m = class_getInstanceMethod(cls, cfgModelSel);
+                        if (m) {
+                            if (!orig_configureWithModel) {
+                                orig_configureWithModel = method_getImplementation(m);
+                            }
+                            method_setImplementation(m, (IMP)hooked_configureWithModel);
+                            cfgModelHooked++;
                         }
-                        method_setImplementation(m, (IMP)hooked_configureWithModel);
-                        cfgModelHooked++;
                     }
                 }
             } @catch (NSException *ex) {

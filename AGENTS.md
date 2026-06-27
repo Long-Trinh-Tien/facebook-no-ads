@@ -1,126 +1,142 @@
 # Glow Clone — Session Context (Compacted)
 
+otool on this machine is 'llvm-otool-18'
 ## Current Stage
-**STAGE R3.5/v7 — WORKING** ✅ (built glow_v7.ipa)
-- Ad blocking: WORKS (no gap)
-- Story seen: BLOCKED via 3 hooks
-- Build: glow_v7.ipa (186MB)
+**STAGE R3.6/v8.3.6 — CRASH ROOT CAUSE FOUND** 🔍
+- Ad blocking: WORKS (no gap) ✅
+- Story seen: BLOCKED via 3 hooks ✅
+- **Story download crash: ROOT CAUSE IDENTIFIED in RuntimeEnumHooks.xm**
+- **EVIDENCE RULE: NO code without log evidence from device**
 
-## TL;DR (1-minute summary)
+## 🚨 CRITICAL RULE: NO CODE WITHOUT LOG EVIDENCE
 
-After 3.5 stages of investigation, we built a working Facebook ad blocker by:
-1. Reading open-source `haoict/facebook-no-ads` (which forked from Glow)
-2. Runtime-verifying which classes/methods still exist in 560.x
-3. Adapting the original `FBMemNewsFeedEdge.initWithFBTree:` approach to `FBMemNewsFeedEdge.node` (the new equivalent)
+**NEVER implement a feature without first verifying with ONLY logging.**
 
-**Key hook:** `FBMemNewsFeedEdge.node` returns nil for SPONSORED category → no layout, no gap.
+This mistake cost us 6 releases (v8.3.0→v8.3.6):
 
-**Why this works:** Hooks at model layer (analog to original Glow's approach), not at cell layer (which causes gaps due to ComponentKit's precomputed layout).
+| Version | What we did | What we SHOULD have done |
+|---------|-------------|--------------------------|
+| v8.3.0 | Implemented ALL 5 modules at once | Add logging-only hooks first, test each one |
+| v8.3.1 | Added gesture + ivar fallbacks to StoryDownload | Check crash logs BEFORE guessing |
+| v8.3.2→6 | Kept "fixing" StoryDownloadHooks | Binary-search disable ONE module at a time |
+
+**NEW WORKFLOW for any feature:**
+
+```
+1. Write a DEBUG build with ONLY logging (no IMP replacement)
+   → Install on device → Read /var/mobile/Documents/glow.txt
+2. Verify classes/methods exist and timing is correct
+3. Only THEN write the real implementation
+4. Test incrementally (1 module at a time)
+```
+
+## 🔍 Root Cause: Story Crash Since v8.3.0
+
+### What We Thought
+Crash was in StoryDownloadHooks because:
+- v8.3.1 added gesture in `init` + ivar fallbacks → CRASH appeared
+- We "fixed" by removing gesture (v8.3.3), disabling StoryDownloadHooks (v8.3.4), restoring v8.2.64 code (v8.3.5), inlining class (v8.3.6)
+- **ALL STILL CRASHED** because we were fixing the WRONG thing
+
+### The REAL Bug (RuntimeEnumHooks.xm:180-222)
+
+File: `Core/RuntimeEnumHooks.xm` at lines 180-222
+
+```objc
+// BUG: hooks setVideoPlayer: on ALL FB classes, uses ONE orig_* IMP
+for (int i = 0; i < count; i++) {
+    Class cls = classes[i];
+    if (strncmp(name, "FB", 2) != 0) continue;
+
+    if (!orig_setVideoPlayer) {
+        orig_setVideoPlayer = method_getImplementation(m); // Class A's IMP
+    }
+    method_setImplementation(m, (IMP)hooked_setVideoPlayer); // overwrite Class B too
+}
+```
+
+**Problem:** For `setVideoPlayer:`, `setPlaybackController:`, `configureWithVideo:`, `configureWithModel:` — the code hooks these on **ALL FB-prefixed classes** but stores only ONE `orig_*` pointer from the FIRST class found. 
+
+When Class B's method is called → goes through `hooked_setVideoPlayer` → calls `orig_setVideoPlayer` (Class A's IMP) → **CRASH** because `self` is Class B, not Class A.
+
+### Why It Crashes on Story Tap
+When user taps a Story, FB initializes Story video infrastructure:
+1. Story calls `setVideoPlayer:`, `setPlaybackController:`, etc. on Story-specific classes
+2. These go through our broken hooks
+3. Wrong IMP called → EXC_BAD_ACCESS
+
+### Why v8.2.68 Worked (before v8.3.0)
+v8.2.68 only had: AdBlock, StorySeen, StoryDownload. NO RuntimeEnumHooks, NO ReelsDownloadHooks, NO LongPressHooks.
+
+### Fix Strategy
+**TWO options:**
+
+**Option A — Per-class orig_* storage (proper fix):**
+```objc
+// Before hooking, check if the method is INHERITED vs OWN
+// Only hook if superclass also has the same IMP → safe
+// Otherwise, store per-class orig_*
+```
+
+**Option B — Target only specific classes (conservative fix):**
+```objc
+// Only hook on FBVideoPlaybackController (not all FB classes)
+if (strstr(name, "FBVideoPlaybackController") != NULL) {
+    // hook only here
+}
+```
+
+**Option B is the right fix.** The original intent was to hook these on `FBVideoPlaybackController` for Reels playback tracking, not on every FB class. The overly broad filter caused the bug.
 
 ---
 
 ## Detailed Investigation Journey
 
 ### Phase 0: Initial attempts (R0 - R1)
+...
+(history preserved from earlier phases — see git log for full detail)
 
-**Stage R0 — UIWindow/UIView hooks**
-- Approach: Hook `viewDidLoad`, `addSubview:`, strstr pattern matching
-- Result: **CRASH on iOS 16+**
-- Lesson: UIKit hooks don't survive modern iOS lifecycle
+### Phase 0.5: Modular Refactor (v8.2.68)
+- **v8.2.68**: Tweak.x 4294→100 lines, 7 Core modules, 4 Managers, 2 Utils
+- Tests: 49 unit tests
 
-**Stage R1 — Brute-force class enumeration**
-- Approach: `objc_getClassList(NULL, 0)` in `%ctor`, dump all classes
-- Result: **CRASH** — 5000+ classes enumeration too aggressive
-- Lesson: Defer heavy operations to main queue after app init
+### Phase 6b: The "Wrong Fix" Rabbit Hole (v8.3.0 - v8.3.6)
 
-### Phase 1: Static RE (R1.5)
+This is the cautionary tale of fixing without evidence.
 
-**Stage R1.5 — C function search**
-- Approach: Static analysis with `strings`, `radare2` on FBSharedFramework
-- Found: `_FBFeedUnitIsSponsored` at offset `0x00910d04` in FBSharedFramework
-- GOT entry at `0x100accd08` in main binary
-- Result: Can resolve function but calling it throws exception on wrong types
+| Version | Change | Result | Lesson |
+|---------|--------|--------|--------|
+| v8.3.0 | Added ALL 5 stub modules (NewsfeedVideo, Reels, LongPress, Explorer, RuntimeEnum) | **Story CRASH introduced** | Never add 5 modules at once |
+| v8.3.1 | Added gesture to StoryDownload `init` + ivar fallbacks | STILL CRASHED | Guessed wrong cause |
+| v8.3.2 | Removed alert from LongPressHooks | STILL CRASHED | Fixing wrong file |
+| v8.3.3 | Removed gesture from `init` hook | STILL CRASHED | Still wrong |
+| v8.3.4 | DISABLED StoryDownloadHooks entirely | STILL CRASHED | **BIG CLUE IGNORED**: crash not in StoryDownload! |
+| v8.3.5 | Restored v8.2.64 code exactly | STILL CRASHED | Crash confirmed NOT in StoryDownload |
+| v8.3.6 | Inlined class (no singleton) | **ROOT CAUSE FOUND** by reading code, not by testing |
 
-### Phase 2: Runtime walk (R2.x)
+**Key missed clue:** v8.3.4 disabled StoryDownloadHooks entirely → **still crashed**. This proved crash was NOT in StoryDownload. But we ignored it and kept "fixing" StoryDownload.
 
-**Stages R2.0 - R2.7 — Cell-based approach**
-- Approach: Hook `cellForItemAtIndexPath:`, walk chain `CKDataSourceItem._model → FBSectionComponentDataSourceModel._model → FBFeedFetchedEdge._edge → FBMemNewsFeedEdge`, call `_FBFeedUnitIsSponsored`
-- Result: Hooks fire correctly, but C function expects `FBFeedUnit` type. `CKDataSourceItem` is wrong type → exception
-- Pivot: Inspect what FBMemNewsFeedEdge actually contains (only 3 methods in 560.x)
+### What Should Have Happened
 
-### Phase 3: Runtime introspection (R3.0-verify)
+```
+v8.3.0 added 5 modules → crash
+  ↓
+Disable ALL 5 → test→ still works?
+  ↓
+Enable ONE → test→ still works?
+  ↓
+Enable ANOTHER → test→ crash!
+  ↓
+→ Found culprit module in 5 tests
+  ↓
+Read culprit module code → found bug immediately
+  ↓
+Fixed in 1 commit instead of 6
+```
 
-**Stage R3.0-verify — Class & method verification**
-- Built custom verifier using `objc_getClassList`, `class_copyMethodList`, `class_copyIvarList`
-- Output: `/var/mobile/Documents/glow_verify.txt`
-- **KEY DISCOVERIES:**
-  - `FBMemNewsFeedEdge` STILL EXISTS, but only 3 methods: `node`, `deduplicationKey`, `category`
-  - `initWithFBTree:` is GONE
-  - `FBMemFeedStory` is REMOVED
-  - `FBVideoChannelPlaylistItem` is REMOVED
-  - `FBSnacksBucketsSeenStateManager._sendSeenThreadIDsWithBucket:session:` is INTACT
-  - `FBSnacksMediaContainerView` exists with NEW init signature
-  - `FBVideoOverlayPluginComponentBackgroundView` has `didLongPress:`
-  - `FBVideoPlaybackItem` has `HDPlaybackURL`, `isSponsored`
-  - Categories seen: `ORGANIC`, `SPONSORED`, `FB_SHORTS`, `ENGAGEMENT`, `MULTI_FB_STORIES_TRAY`
-
-### Phase 4: Read open-source reference
-
-**Stage R3.0 — Pivot to known approach**
-- Read `haoict/facebook-no-ads/Tweak.xm` (fork from original Glow)
-- Found approach: hook `FBMemNewsFeedEdge.initWithFBTree:` to return nil
-- Discovered selector `asFBFeedUnitIsSponsoredGraphQL` from exception messages
-- Found `FBMemNewsFeedEdge.category` returns `"SPONSORED"` for ads
-
-### Phase 5: Production hooks (R3.0 - R3.4)
-
-**Stage R3.0 — Verified hooks**
-- Hook `FBComponentCollectionViewDataSource.collectionView:cellForItemAtIndexPath:`
-- Walk chain, check `category == "SPONSORED"`, hide cell
-- Result: Hooks fire, but ALL items hidden (over-aggressive)
-
-**Stage R3.1 — Conservative detection**
-- Whitelist: ORGANIC, ENGAGEMENT (not ad)
-- Blacklist: SPONSORED, AD, IN_STREAM_AD
-- Result: Feed displays, ads hidden, BUT GAPS remain (precomputed layout)
-
-**Stage R3.2 — Add size hooks**
-- Hook `sizeForItemAtIndexPath:` + `collectionView:layout:sizeForItemAtIndexPath:`
-- Return 0.01 x 0.01 for ads
-- Result: GAPS STILL VISIBLE — ComponentKit uses `_rootLayout` C++ struct, not these methods
-
-**Stage R3.3 — Category trace + size zero**
-- Skip sections 0, 1 (story tray, composer)
-- Log unique categories
-- Result: Identified new categories (FB_SHORTS, ENGAGEMENT). Gaps persist.
-
-**Stage R3.4 — C++ struct modification**
-- Try to modify `_rootLayout.size` field via direct memory write
-- Result: Risky, possibly didn't work (not tested)
-
-### Phase 6: Final working approach (R3.5/v7)
-
-**Stage R3.5/v7 — Hook `node` method (analog of old `initWithFBTree:`)**
-- Approach: Hook `FBMemNewsFeedEdge.node` to return nil for SPONSORED
-- Keep cell hiding as backup
-- Block 3 story seen paths
-- **Result: WORKS** — no gaps, no breakage
-
-**Why this works:** The `node` method is called during layout computation. Returning nil for SPONSORED edges means ComponentKit never computes a layout for those cells, so no space is allocated.
+**Binary search would have found RuntimeEnumHooks in ~3 test cycles instead of 6 wasted builds.**
 
 ---
-
-## Architecture (from ARCHITECTURE.md)
-
-Original Glow: 3-layer anti-versioning
-- Layer 1: UIKit entry points (viewDidLoad, addSubview:) — always stable
-- Layer 2: strstr pattern matching on real instances — version-tolerant
-- Layer 3: respondsToSelector: checks — silent degradation
-
-Our implementation: Model-layer filter
-- Hook `FBMemNewsFeedEdge.node` to return nil for ads (analog to original `initWithFBTree:`)
-- Conservative category whitelist: ORGANIC, ENGAGEMENT = not ad
-- Skip sections 0, 1 (story tray, composer)
 
 ## Crash History
 
@@ -137,52 +153,63 @@ Our implementation: Model-layer filter
 | R2 | predicate expects FBFeedUnit, got CKDataSourceItem | Switched to model-layer hook | ✅ |
 | R3.1 | All items hidden (over-aggressive) | Conservative category check | ✅ |
 | R3.2-3.4 | Gaps remain (precomputed layout) | Hook `node` instead | ✅ |
+| v8.3.0 | **RuntimeEnumHooks hooks ALL FB classes with ONE orig_* IMP** → crash on Story tap | Limit to specific class only (FBVideoPlaybackController) | **PENDING** |
+
+---
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `/home/tommy/test/glow/glow_v7.ipa` | **CURRENT** R3.5 build — working |
-| `/home/tommy/test/glow/glow-from-source/Tweak.x` | R3.5 source code |
-| `/home/tommy/test/glow/glow-from-source/INVESTIGATION_GUIDE.md` | Teaching file (methods, reasoning) |
-| `/home/tommy/test/glow/glow-from-source/BUILD_GUIDE.md` | How to build and test |
-| `/home/tommy/test/glow/glow-from-source/AGENTS.md` | This file — session context |
-| `/home/tommy/test/glow/glow-v3/Tweak.x` | Alternative build dir |
+| `Core/StoryDownloadHooks.xm` | **INNOCENT** — crash was not here |
+| `Core/RuntimeEnumHooks.xm` | **GUILTY** — lines 180-222: broad hook on ALL FB classes |
+| `Core/AdBlockHooks.xm` | Working |
+| `Core/StorySeenHooks.xm` | Working |
+| `Core/ReelsDownloadHooks.xm` | Probably OK |
+| `Core/LongPressHooks.xm` | Probably OK (just logs) |
+| `Core/NewsfeedVideoHooks.xm` | Safe (skipped, no class found) |
+| `Core/PlaybackStateHooks.xm` | Maybe safe (only hooks FBVideoPlaybackController) |
+| `Core/VideoItemHooks.xm` | ? |
+| `Core/ExplorerHooks.xm` | Stub (empty) |
 
-## Build Pipeline
+---
 
-```
-/home/tommy/test/glow/glow-from-source/Tweak.x
-   ↓ THEOS=/home/tommy/theos make package FINALPACKAGE=1
-   ↓ com.tommy.glowv3_1.0.0_iphoneos-arm.deb
-   ↓ cyan inject into facebook.ipa
-glow_v7.ipa (186MB)
-   ↓ TrollStore install on device
-   ↓ App opens → hooks install → ads blocked
-```
-
-## What's Working (R3.5/v7)
+## What's Working
 
 ✅ Ad blocking: FBMemNewsFeedEdge.node returns nil for SPONSORED
 ✅ Story seen: 3 paths blocked
-✅ No layout gaps (no cell, no gap)
+✅ No layout gaps
 ✅ Feed scroll smooth
 
-## What's TODO
+## What's TODO (with EVIDENCE LOGS FIRST)
 
-❌ Download story (hook FBSnacksMediaContainerView - infrastructure ready)
-❌ Download video (hook didLongPress: - infrastructure ready)
-❌ Hide Reels carousel
-❌ Hide "People You May Know"
-❌ Hide "Suggested for you"
+1. **Fix Story crash**: Limit RuntimeEnumHooks to `FBVideoPlaybackController` only (not ALL FB classes)
+2. **Verify Story download**: After crash fix, test if v8.3.6 button works
+3. **Add Reels button**: Need log evidence that FBShortsSideBarView exists
+4. **Add video download**: Need log evidence that FBVideoPlaybackContainerView exists
+5. **Implement new features**: ALWAYS deploy logging-only build first
 
-## Next Steps
+---
 
-1. Confirm glow_v7.ipa works fully (user testing)
-2. Add download features for story + video
-3. Add other Glow features (composer hide, people you may know hide, etc.)
-4. Polish + add settings UI
-5. Test on multiple Facebook versions (561, 562, 563...)
+## Golden Rule
+
+### 🔴 NO CODE WITHOUT LOG EVIDENCE 🔴
+
+**Before implementing ANY feature:**
+1. Write a logging-only build (observe, don't modify)
+2. Deploy to device
+3. Read `/var/mobile/Documents/glow.txt`
+4. Confirm the classes, methods, and timing exist
+5. Only then write the real implementation
+
+**When debugging a crash:**
+1. Do NOT guess the cause
+2. Get crash log from device (`/var/mobile/Library/Logs/CrashReporter/`)
+3. Binary-search by disabling modules
+4. Read the crashing module's code carefully
+5. Fix with confidence
+
+---
 
 ## Critical Environment
 
@@ -192,3 +219,4 @@ glow_v7.ipa (186MB)
 - Build system: Theos
 - Log file: `/var/mobile/Documents/glow.txt`
 - Bundle IDs: `com.facebook.Facebook`, `com.facebook.Facebook6`
+- GitHub: `https://github.com/Long-Trinh-Tien/facebook-no-ads` branch `v8-glow-framework`
