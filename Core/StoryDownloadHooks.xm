@@ -10,7 +10,7 @@
 
 static IMP orig_storyContainer_init = NULL;
 static IMP orig_storyContainer_didMoveToWindow = NULL;
-static NSMutableSet *g_storyContainersWithButton = nil;
+static const void *kGlowStoryContainerLPKey = &kGlowStoryContainerLPKey;
 
 static id hooked_storyContainer_init(id self, SEL _cmd, id thread, id bucket, id mediaViewDelegate, id mediaViewGenerator, id toolbox, BOOL shouldBlurMedia) {
     if (orig_storyContainer_init) {
@@ -30,37 +30,22 @@ static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *w
     if (![GlowSettingsManager shared].downloadStory) return;
     if (!window) return;
 
-    if (!g_storyContainersWithButton) {
-        g_storyContainersWithButton = [[NSMutableSet alloc] init];
-    }
-
     @try {
-        NSValue *key = [NSValue valueWithNonretainedObject:self];
-        if ([g_storyContainersWithButton containsObject:key]) return;
-
-        UIWindow *keyWindow = [GlowViewUtils keyWindow];
-        if (!keyWindow) {
-            LOG("[dl/story] keyWindow is nil, cannot add button\n");
+        UIView *container = (UIView *)self;
+        // Check if gesture already added using static key
+        NSNumber *already = objc_getAssociatedObject(container, kGlowStoryContainerLPKey);
+        if (already && [already boolValue]) {
             return;
         }
 
-        UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-        btn.frame = CGRectMake(keyWindow.frame.size.width - 60, keyWindow.frame.size.height - 120, 44, 44);
-        [btn setImage:[UIImage systemImageNamed:@"arrow.down.circle.fill"] forState:UIControlStateNormal];
-        btn.tintColor = [UIColor whiteColor];
-        btn.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.6];
-        btn.layer.cornerRadius = 22;
-        btn.clipsToBounds = YES;
-        btn.layer.zPosition = 9999;
-        [btn addTarget:[GlowStoryHandler shared] action:@selector(onStoryDownloadTapped:) forControlEvents:UIControlEventTouchUpInside];
-        
-        UIView *container = (UIView *)self;
-        [container addSubview:btn];
-        [container bringSubviewToFront:btn];
+        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
+            initWithTarget:[GlowStoryHandler shared]
+            action:@selector(onStoryLongPress:)];
+        lp.minimumPressDuration = 0.5;
+        [container addGestureRecognizer:lp];
 
-        [g_storyContainersWithButton addObject:key];
-        LOG("[dl/story] added download BUTTON to container %p at (%.0f, %.0f)\n",
-            self, keyWindow.frame.size.width - 60, keyWindow.frame.size.height - 120);
+        objc_setAssociatedObject(container, kGlowStoryContainerLPKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        LOG("[dl/story] added long press gesture to story container %p\n", container);
     } @catch (NSException *e) {
         LOG("[dl/story] didMoveToWindow exc: %s\n", e.reason.UTF8String);
     }
@@ -84,7 +69,7 @@ void initStoryDownloadHooks(void) {
             if (dmwM) {
                 orig_storyContainer_didMoveToWindow = method_getImplementation(dmwM);
                 method_setImplementation(dmwM, (IMP)hooked_storyContainer_didMoveToWindow);
-                LOG("  hook #8b: FBSnacksMediaContainerView didMoveToWindow -> add button\n");
+                LOG("  hook #8b: FBSnacksMediaContainerView didMoveToWindow -> add long press\n");
             }
         }
     } @catch (NSException *e) {
