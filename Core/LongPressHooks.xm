@@ -7,7 +7,7 @@
 #import "Utils/GlowViewUtils.h"
 #import "Utils/GlowCommon.h"
 
-static IMP orig_feed_viewDidAppear = NULL;
+static IMP orig_tabbar_didMoveToWindow = NULL;
 
 static void openGlowSettings(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -35,7 +35,7 @@ static void openGlowSettings(void) {
 @implementation GlowSettingsLongPressHandler
 - (void)handleLongPress:(UILongPressGestureRecognizer *)gr {
     if (gr.state == UIGestureRecognizerStateBegan) {
-        LOG("[ui] long press triggered, opening settings\n");
+        LOG("[ui] tab bar long press triggered, opening settings\n");
         openGlowSettings();
     }
 }
@@ -43,51 +43,49 @@ static void openGlowSettings(void) {
 
 static GlowSettingsLongPressHandler *g_lpHandler = nil;
 
-static void hooked_feed_viewDidAppear(id self, SEL _cmd, BOOL animated) {
-    if (orig_feed_viewDidAppear) {
-        typedef void (*Fn)(id, SEL, BOOL);
-        ((Fn)orig_feed_viewDidAppear)(self, _cmd, animated);
+static void hooked_tabbar_didMoveToWindow(id self, SEL _cmd, UIWindow *window) {
+    if (orig_tabbar_didMoveToWindow) {
+        typedef void (*Fn)(id, SEL, id);
+        ((Fn)orig_tabbar_didMoveToWindow)(self, _cmd, (id)window);
     }
+    if (!window) return;
 
     @try {
-        UIViewController *vc = (UIViewController *)self;
-        UIView *view = vc.view;
-        if (view) {
-            // Check if gesture already added using Associated Object
-            NSNumber *already = objc_getAssociatedObject(view, "GlowSettingsLP");
-            if (already && [already boolValue]) {
-                return;
-            }
-
-            if (!g_lpHandler) {
-                g_lpHandler = [[GlowSettingsLongPressHandler alloc] init];
-            }
-
-            UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
-                initWithTarget:g_lpHandler
-                action:@selector(handleLongPress:)];
-            lp.minimumPressDuration = 0.8;
-            lp.cancelsTouchesInView = NO;
-            [view addGestureRecognizer:lp];
-            
-            objc_setAssociatedObject(view, "GlowSettingsLP", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            LOG("[ui] added long press gesture to FBNewsFeedViewController.view\n");
+        UIView *tabBar = (UIView *)self;
+        // Check if gesture already added using Associated Object
+        NSNumber *already = objc_getAssociatedObject(tabBar, "GlowSettingsLP");
+        if (already && [already boolValue]) {
+            return;
         }
+
+        if (!g_lpHandler) {
+            g_lpHandler = [[GlowSettingsLongPressHandler alloc] init];
+        }
+
+        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
+            initWithTarget:g_lpHandler
+            action:@selector(handleLongPress:)];
+        lp.minimumPressDuration = 0.8;
+        lp.cancelsTouchesInView = NO;
+        [tabBar addGestureRecognizer:lp];
+        
+        objc_setAssociatedObject(tabBar, "GlowSettingsLP", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        LOG("[ui] added settings long press gesture to UITabBar\n");
     } @catch (NSException *e) {
-        LOG("[ui] failed to add long press: %s\n", e.reason.UTF8String);
+        LOG("[ui] failed to add long press to UITabBar: %s\n", e.reason.UTF8String);
     }
 }
 
 void initLongPressHooks(void) {
     @try {
-        Class cls = objc_getClass("FBNewsFeedViewController");
+        Class cls = objc_getClass("UITabBar");
         if (cls) {
-            SEL sel = @selector(viewDidAppear:);
+            SEL sel = @selector(didMoveToWindow);
             Method m = class_getInstanceMethod(cls, sel);
             if (m) {
-                orig_feed_viewDidAppear = method_getImplementation(m);
-                method_setImplementation(m, (IMP)hooked_feed_viewDidAppear);
-                LOG("  hook: FBNewsFeedViewController.viewDidAppear: -> add settings long press\n");
+                orig_tabbar_didMoveToWindow = method_getImplementation(m);
+                method_setImplementation(m, (IMP)hooked_tabbar_didMoveToWindow);
+                LOG("  hook: UITabBar.didMoveToWindow -> add settings long press\n");
             }
         }
     } @catch (NSException *e) {

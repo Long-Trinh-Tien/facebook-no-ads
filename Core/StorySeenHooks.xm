@@ -15,19 +15,30 @@ static void noop_seen_1(id self, SEL _cmd, id a, id b) {
     if (seen_count <= 5 || (seen_count % 50) == 0) {
         LOG("[seen] blocked _sendSeenThreadIDsWithBucket (count=%d)\n", seen_count);
     }
+    // Block network seen request - DO NOT call original IMP
 }
 
 static void noop_seen_2(id self, SEL _cmd, id a) {
     seen_count++;
     if (seen_count <= 5 || (seen_count % 50) == 0) {
-        LOG("[seen] blocked _sendThreadIDsAsSeenInViewerSession (count=%d)\n", seen_count);
+        LOG("[seen] local seen _sendThreadIDsAsSeenInViewerSession (count=%d)\n", seen_count);
+    }
+    // Call original to update local UI/state
+    if (orig_seen2) {
+        typedef void (*Fn)(id, SEL, id);
+        ((Fn)orig_seen2)(self, _cmd, a);
     }
 }
 
 static void noop_seen_3(id self, SEL _cmd, id a, id b, id c, BOOL d, id e, id f) {
     seen_count++;
     if (seen_count <= 5 || (seen_count % 50) == 0) {
-        LOG("[seen] blocked markThreadsViewReceiptsAndLightweightReactionsAsSeen (count=%d)\n", seen_count);
+        LOG("[seen] local seen markThreadsViewReceiptsAndLightweightReactionsAsSeen (count=%d)\n", seen_count);
+    }
+    // Call original to update local UI/state
+    if (orig_seen3) {
+        typedef void (*Fn)(id, SEL, id, id, id, BOOL, id, id);
+        ((Fn)orig_seen3)(self, _cmd, a, b, c, d, e, f);
     }
 }
 

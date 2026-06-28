@@ -49,11 +49,14 @@
 
 + (UIWindow *)keyWindow {
     if (@available(iOS 13.0, *)) {
-        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if (scene.activationState == UISceneActivationStateForegroundActive) {
-                for (UIWindow *window in scene.windows) {
-                    if (window.isKeyWindow) {
-                        return window;
+        for (id scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:NSClassFromString(@"UIWindowScene")]) {
+                UIWindowScene *ws = (UIWindowScene *)scene;
+                if (ws.activationState == UISceneActivationStateForegroundActive) {
+                    for (UIWindow *window in ws.windows) {
+                        if (window.isKeyWindow) {
+                            return window;
+                        }
                     }
                 }
             }
