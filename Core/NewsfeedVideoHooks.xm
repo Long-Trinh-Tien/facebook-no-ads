@@ -10,14 +10,15 @@
 
 static Class g_videoContainerClass = nil;
 static BOOL g_videoContainerSearched = NO;
+static const void *kGlowVideoContainerLPKey = &kGlowVideoContainerLPKey;
 
 static Class findVideoContainerClass(void) {
     if (g_videoContainerSearched) return g_videoContainerClass;
     g_videoContainerSearched = YES;
 
+    // Do NOT include generic "VideoContainerView" which subclasses UITabBarItem views
     const char *candidates[] = {
         "FBVideoPlaybackContainerView",  // FB 560.x
-        "VideoContainerView",            // Original Glow
         "FBVideoContainerView",
         "FBFeedVideoContainerView",
         "FBNewsFeedVideoContainerView"
@@ -26,14 +27,9 @@ static Class findVideoContainerClass(void) {
     for (int i = 0; i < sizeof(candidates)/sizeof(candidates[0]); i++) {
         Class cls = objc_getClass(candidates[i]);
         if (cls) {
-            // Verify it has 'controller' property/ivar or _videoPlaybackController
-            Ivar ctrlIvar = class_getInstanceVariable(cls, "_controller");
-            Ivar vpcIvar = class_getInstanceVariable(cls, "_videoPlaybackController");
-            if (ctrlIvar || vpcIvar || [cls instancesRespondToSelector:@selector(controller)]) {
-                g_videoContainerClass = cls;
-                LOG("[dl/news] Found VideoContainer class: %s (has controller/videoPlaybackController)\n", candidates[i]);
-                return cls;
-            }
+            g_videoContainerClass = cls;
+            LOG("[dl/news] Found VideoContainer class: %s\n", candidates[i]);
+            return cls;
         }
     }
     LOG("[dl/news] VideoContainerView NOT FOUND in 560.x\n");
@@ -52,10 +48,10 @@ void initNewsfeedVideoHooks(void) {
                 method_setImplementation(initM, imp_implementationWithBlock(^(id self, CGRect frame) {
                     id result = ((id(*)(id, SEL, CGRect))origInit)(self, initSel, frame);
 
-                    // Add long press gesture
-                    NSNumber *already = objc_getAssociatedObject(self, "GlowVideoContainerLP");
+                    // Add long press gesture using static key
+                    NSNumber *already = objc_getAssociatedObject(self, kGlowVideoContainerLPKey);
                     if (!already) {
-                        objc_setAssociatedObject(self, "GlowVideoContainerLP", @YES,
+                        objc_setAssociatedObject(self, kGlowVideoContainerLPKey, @YES,
                                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                         UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
                             initWithTarget:[GlowVideoHandler shared]

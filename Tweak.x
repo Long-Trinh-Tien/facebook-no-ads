@@ -15,7 +15,7 @@ static int setupDone = 0;
 static void installHooks(void) {
     if (setupDone) return;
     setupDone = 1;
-    LOG("\n=== Installing Glow v8.3.9 hooks ===\n");
+    LOG("\n=== Installing Glow v8.4.0 hooks ===\n");
 
     GlowSettingsManager *settings = [GlowSettingsManager shared];
 
@@ -62,7 +62,7 @@ static void hooked_viewDidAppear(id self, SEL _cmd, BOOL animated) {
 
 __attribute__((constructor))
 static void glow_init(void) {
-    LOG("\n=== Glow v8.3.9 (Modular Build — Settings & Seen Fixed) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.4.0 (Modular Build — Settings & Seen Stable) — %s ===\n", __DATE__ " " __TIME__);
 
     [[GlowSettingsManager shared] loadSettings];
 

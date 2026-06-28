@@ -8,6 +8,7 @@
 #import "Utils/GlowCommon.h"
 
 static IMP orig_tabbar_didMoveToWindow = NULL;
+static const void *kGlowSettingsLPKey = &kGlowSettingsLPKey;
 
 static void openGlowSettings(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -35,7 +36,8 @@ static void openGlowSettings(void) {
 @implementation GlowSettingsLongPressHandler
 - (void)handleLongPress:(UILongPressGestureRecognizer *)gr {
     if (gr.state == UIGestureRecognizerStateBegan) {
-        LOG("[ui] tab bar long press triggered, opening settings\n");
+        LOG("[ui] tab bar long press triggered on %s %p, opening settings\n", 
+            class_getName(object_getClass(gr.view)), gr.view);
         openGlowSettings();
     }
 }
@@ -52,8 +54,8 @@ static void hooked_tabbar_didMoveToWindow(id self, SEL _cmd, UIWindow *window) {
 
     @try {
         UIView *tabBar = (UIView *)self;
-        // Check if gesture already added using Associated Object
-        NSNumber *already = objc_getAssociatedObject(tabBar, "GlowSettingsLP");
+        // Check if gesture already added using static key
+        NSNumber *already = objc_getAssociatedObject(tabBar, kGlowSettingsLPKey);
         if (already && [already boolValue]) {
             return;
         }
@@ -69,8 +71,9 @@ static void hooked_tabbar_didMoveToWindow(id self, SEL _cmd, UIWindow *window) {
         lp.cancelsTouchesInView = NO;
         [tabBar addGestureRecognizer:lp];
         
-        objc_setAssociatedObject(tabBar, "GlowSettingsLP", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        LOG("[ui] added settings long press gesture to UITabBar\n");
+        objc_setAssociatedObject(tabBar, kGlowSettingsLPKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        LOG("[ui] added settings long press gesture to %s %p\n", 
+            class_getName(object_getClass(tabBar)), tabBar);
     } @catch (NSException *e) {
         LOG("[ui] failed to add long press to UITabBar: %s\n", e.reason.UTF8String);
     }
