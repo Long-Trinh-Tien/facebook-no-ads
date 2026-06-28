@@ -1,0 +1,8 @@
+{
+    Filter = {
+        Bundles = (
+            "com.facebook.Facebook",
+            "com.facebook.Facebook6"
+        );
+    };
+}
