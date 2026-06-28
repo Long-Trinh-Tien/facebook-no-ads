@@ -8,7 +8,6 @@
 #import "GlowVideoHandler.h"
 #import "GlowCommon.h"
 
-// Find VideoContainerView or equivalent
 static Class g_videoContainerClass = nil;
 static BOOL g_videoContainerSearched = NO;
 
@@ -27,11 +26,12 @@ static Class findVideoContainerClass(void) {
     for (int i = 0; i < sizeof(candidates)/sizeof(candidates[0]); i++) {
         Class cls = objc_getClass(candidates[i]);
         if (cls) {
-            // Check for _videoPlaybackController ivar
+            // Verify it has 'controller' property/ivar or _videoPlaybackController
+            Ivar ctrlIvar = class_getInstanceVariable(cls, "_controller");
             Ivar vpcIvar = class_getInstanceVariable(cls, "_videoPlaybackController");
-            if (vpcIvar) {
+            if (ctrlIvar || vpcIvar || [cls instancesRespondToSelector:@selector(controller)]) {
                 g_videoContainerClass = cls;
-                LOG("[dl/news] Found VideoContainer class: %s\n", candidates[i]);
+                LOG("[dl/news] Found VideoContainer class: %s (has controller/videoPlaybackController)\n", candidates[i]);
                 return cls;
             }
         }

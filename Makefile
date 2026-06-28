@@ -27,6 +27,7 @@ GlowV3_FILES = Tweak.x \
     Managers/GlowStoryHandler.m \
     Managers/GlowVideoHandler.m \
     Managers/GlowReelHandler.m \
+    UI/GlowSettingsViewController.m \
     Utils/GlowViewUtils.m
 GlowV3_FRAMEWORKS = UIKit Photos
 GlowV3_PRIVATE_FRAMEWORKS = Photos

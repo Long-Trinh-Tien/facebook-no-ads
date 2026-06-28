@@ -1,51 +1,93 @@
-// LongPressHooks.xm
-// Long press to open Glow settings UI
-// FIX v8.3.2: Make crash-safe - just log, no alert presentation
+// Core/LongPressHooks.xm
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import "Hooks.h"
 #import "GlowSettingsManager.h"
-#import "GlowCommon.h"
+#import "UI/GlowSettingsViewController.h"
+#import "Utils/GlowViewUtils.h"
+#import "Utils/GlowCommon.h"
 
-static IMP orig_sendAction = NULL;
+static IMP orig_feed_viewDidAppear = NULL;
 
-// FIX v8.3.2: Removed alert presentation (was causing crash when rootViewController nil)
-// Now just logs - settings are opened via StoryDownloadHooks self-add gesture
-static BOOL hooked_sendAction(id self, SEL _cmd, SEL action, id target, id sender, UIEvent *event) {
-    // Always call original first (critical for app functionality)
-    BOOL result = orig_sendAction ?
-        ((BOOL(*)(id, SEL, SEL, id, id, id))orig_sendAction)(self, _cmd, action, target, sender, event) :
-        YES;
-
-    // Detect long press safely
-    @try {
-        if (sender && [sender isKindOfClass:[UILongPressGestureRecognizer class]]) {
-            UILongPressGestureRecognizer *lp = (UILongPressGestureRecognizer *)sender;
-            if (lp.state == UIGestureRecognizerStateBegan) {
-                // Just log - no alert (avoids crash on nil rootViewController)
-                LOG("[ui] long press detected (gesture works, no alert)\n");
-                // Settings are opened via StoryDownloadHooks self-add gesture
-                // (GlowStoryHandler.onStoryLongPress:)
+static void openGlowSettings(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            GlowSettingsViewController *vc = [[GlowSettingsViewController alloc] init];
+            UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+            
+            UIViewController *top = [GlowViewUtils topViewController];
+            if (top) {
+                [top presentViewController:nav animated:YES completion:^{
+                    LOG("[ui] settings presented successfully\n");
+                }];
+            } else {
+                LOG("[ui] failed to find top view controller to present settings\n");
             }
+        } @catch (NSException *e) {
+            LOG("[ui] settings presentation exc: %s\n", e.reason.UTF8String);
         }
-    } @catch (NSException *e) {
-        // Silently catch any exception from long press detection
-        LOG("[dl/longpress] sendAction exc: %s\n", e.reason.UTF8String);
+    });
+}
+
+@interface GlowSettingsLongPressHandler : NSObject
+@end
+
+@implementation GlowSettingsLongPressHandler
+- (void)handleLongPress:(UILongPressGestureRecognizer *)gr {
+    if (gr.state == UIGestureRecognizerStateBegan) {
+        LOG("[ui] long press triggered, opening settings\n");
+        openGlowSettings();
+    }
+}
+@end
+
+static GlowSettingsLongPressHandler *g_lpHandler = nil;
+
+static void hooked_feed_viewDidAppear(id self, SEL _cmd, BOOL animated) {
+    if (orig_feed_viewDidAppear) {
+        typedef void (*Fn)(id, SEL, BOOL);
+        ((Fn)orig_feed_viewDidAppear)(self, _cmd, animated);
     }
 
-    return result;
+    @try {
+        UIViewController *vc = (UIViewController *)self;
+        UIView *view = vc.view;
+        if (view) {
+            // Check if gesture already added using Associated Object
+            NSNumber *already = objc_getAssociatedObject(view, "GlowSettingsLP");
+            if (already && [already boolValue]) {
+                return;
+            }
+
+            if (!g_lpHandler) {
+                g_lpHandler = [[GlowSettingsLongPressHandler alloc] init];
+            }
+
+            UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
+                initWithTarget:g_lpHandler
+                action:@selector(handleLongPress:)];
+            lp.minimumPressDuration = 0.8;
+            lp.cancelsTouchesInView = NO;
+            [view addGestureRecognizer:lp];
+            
+            objc_setAssociatedObject(view, "GlowSettingsLP", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            LOG("[ui] added long press gesture to FBNewsFeedViewController.view\n");
+        }
+    } @catch (NSException *e) {
+        LOG("[ui] failed to add long press: %s\n", e.reason.UTF8String);
+    }
 }
 
 void initLongPressHooks(void) {
     @try {
-        Class appCls = objc_getClass("UIApplication");
-        if (appCls) {
-            SEL sel = sel_registerName("sendAction:to:from:forEvent:");
-            Method m = class_getInstanceMethod(appCls, sel);
+        Class cls = objc_getClass("FBNewsFeedViewController");
+        if (cls) {
+            SEL sel = @selector(viewDidAppear:);
+            Method m = class_getInstanceMethod(cls, sel);
             if (m) {
-                orig_sendAction = method_getImplementation(m);
-                method_setImplementation(m, (IMP)hooked_sendAction);
-                LOG("  hook: UIApplication.sendAction:to:from:forEvent: (safe log only)\n");
+                orig_feed_viewDidAppear = method_getImplementation(m);
+                method_setImplementation(m, (IMP)hooked_feed_viewDidAppear);
+                LOG("  hook: FBNewsFeedViewController.viewDidAppear: -> add settings long press\n");
             }
         }
     } @catch (NSException *e) {

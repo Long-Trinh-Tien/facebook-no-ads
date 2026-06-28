@@ -130,6 +130,7 @@
                 id imageSpecifier = [photo valueForKey:@"imageSpecifier"];
                 if (!imageSpecifier) return nil;
                 Class netSpecCls = NSClassFromString(@"FBWebImageNetworkSpecifier");
+                Class memSpecCls = NSClassFromString(@"FBWebImageMemorySpecifier");
                 if (netSpecCls && [imageSpecifier isKindOfClass:netSpecCls]) {
                     SEL urlsSel = sel_registerName("allInfoURLsSortedByDescImageFlag");
                     NSArray *urls = [imageSpecifier respondsToSelector:urlsSel] ? [imageSpecifier performSelector:urlsSel] : nil;
@@ -138,6 +139,15 @@
                         if ([firstUrl isKindOfClass:[NSURL class]]) {
                             return (NSURL *)firstUrl;
                         }
+                    }
+                } else if (memSpecCls && [imageSpecifier isKindOfClass:memSpecCls]) {
+                    SEL imgSel = sel_registerName("image");
+                    UIImage *img = [imageSpecifier respondsToSelector:imgSel] ? [imageSpecifier performSelector:imgSel] : nil;
+                    if (img) {
+                        LOG("[dl/story] photo is in-memory, saving directly\n");
+                        UIImageWriteToSavedPhotosAlbum(img, nil, nil, nil);
+                        [GlowViewUtils showSafeToast:@"✅ Đã lưu ảnh (từ bộ nhớ)"];
+                        return nil;
                     }
                 }
             } @catch (NSException *e) {

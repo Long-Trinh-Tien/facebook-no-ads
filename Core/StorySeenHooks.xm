@@ -27,7 +27,7 @@ static void noop_seen_2(id self, SEL _cmd, id a) {
 static void noop_seen_3(id self, SEL _cmd, id a, id b, id c, BOOL d, id e, id f) {
     seen_count++;
     if (seen_count <= 5 || (seen_count % 50) == 0) {
-        LOG("[seen] blocked markThreadsView (count=%d)\n", seen_count);
+        LOG("[seen] blocked markThreadsViewReceiptsAndLightweightReactionsAsSeen (count=%d)\n", seen_count);
     }
 }
 
@@ -50,12 +50,12 @@ void initStorySeenHooks(void) {
                 method_setImplementation(m2, (IMP)noop_seen_2);
                 LOG("  hook #4: _sendThreadIDsAsSeenInViewerSession: -> no-op\n");
             }
-            SEL sel3 = sel_registerName("markThreadsView:isSeen:reason:atTime:session:");
+            SEL sel3 = sel_registerName("markThreadsViewReceiptsAndLightweightReactionsAsSeen:bucket:session:isHighlight:successBlock:noThreadsToMarkAsSeenBlock:");
             Method m3 = class_getInstanceMethod(seenCls, sel3);
             if (m3) {
                 orig_seen3 = method_getImplementation(m3);
                 method_setImplementation(m3, (IMP)noop_seen_3);
-                LOG("  hook #5: markThreadsView... -> no-op\n");
+                LOG("  hook #5: markThreadsViewReceipts...AsSeen -> no-op\n");
             }
         }
     } @catch (NSException *e) {

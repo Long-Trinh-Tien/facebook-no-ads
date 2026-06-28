@@ -1,11 +1,5 @@
 // Tweak.x - Entry point for Glow for Facebook
-// v8.2.68 - Phase 1 Refactor: Modular structure
-// 
-// This file ONLY handles initialization and dispatches to modules.
-// All hooks are in Core/*.xm
-// All business logic is in Managers/*.m
-// All UI is in UI/*.m
-// All utilities are in Utils/*.m
+// v8.3.8 - Modular Build with restored Settings UI and safe hooks
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -15,55 +9,47 @@
 #import "GlowLogManager.h"
 #import "GlowCommon.h"
 
-// Forward declaration for UIApplication hook
 static IMP orig_viewDidAppear = NULL;
 static int setupDone = 0;
 
 static void installHooks(void) {
     if (setupDone) return;
     setupDone = 1;
-    LOG("\n=== Installing v8.0 hooks ===\n");
+    LOG("\n=== Installing Glow v8.3.8 hooks ===\n");
 
     GlowSettingsManager *settings = [GlowSettingsManager shared];
 
-    // Ad block
+    // #0 Ad block
     if (settings.removeAds) {
         initAdBlockHooks();
     }
 
-    // Story seen (3 paths blocked)
+    // #1-3 Story seen (no-op block)
     if (settings.disableStorySeen) {
         initStorySeenHooks();
     }
 
-    // Story download (button on FBSnacksMediaContainerView)
+    // #8 Story download
     if (settings.downloadStory) {
         initStoryDownloadHooks();
     }
 
-    // Newsfeed video download (long press)
+    // #9 Newsfeed video download
     if (settings.downloadVideo) {
         initNewsfeedVideoHooks();
         initVideoItemHooks();
     }
 
-    // Reels download (button + playback tracking)
+    // #11 Reels download
     if (settings.downloadReels) {
         initReelsDownloadHooks();
         initPlaybackStateHooks();
     }
 
-    // Long press to open settings
+    // Long press to open settings UI
     initLongPressHooks();
 
-    // UI Explorer (debug)
-    initExplorerHooks();
-
-    // Runtime enum hooks (after a short delay to find all classes)
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC),
-                   dispatch_get_main_queue(), ^{
-        @try { initRuntimeEnumHooks(); } @catch (NSException *e) {}
-    });
+    LOG("=== Done ===\n");
 }
 
 static void hooked_viewDidAppear(id self, SEL _cmd, BOOL animated) {
@@ -76,18 +62,10 @@ static void hooked_viewDidAppear(id self, SEL _cmd, BOOL animated) {
 
 __attribute__((constructor))
 static void glow_init(void) {
-    const char *home = getenv("HOME");
-    if (home) {
-        char logPath[512];
-        snprintf(logPath, sizeof(logPath), "%s/Documents/glow.txt", home);
-        // Log path is now in GlowLogManager
-    }
-    LOG("\n=== Glow v8.3.7 (FIX: RuntimeEnumHooks only hooks FBVideoPlaybackController) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.3.8 (Modular Build — Settings Restored) — %s ===\n", __DATE__ " " __TIME__);
 
-    // Load settings on startup
     [[GlowSettingsManager shared] loadSettings];
 
-    // Listen for settings changes
     CFNotificationCenterAddObserver(
         CFNotificationCenterGetDarwinNotifyCenter(),
         NULL,
@@ -97,7 +75,6 @@ static void glow_init(void) {
         CFNotificationSuspensionBehaviorDeliverImmediately
     );
 
-    // Defer hook installation to main queue
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
             Class vcClass = objc_getClass("UIViewController");
