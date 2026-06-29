@@ -8,25 +8,18 @@
 #import "GlowStoryHandler.h"
 #import "GlowViewUtils.h"
 
-static IMP orig_storyContainer_init = NULL;
 static IMP orig_storyContainer_didMoveToWindow = NULL;
 static const void *kGlowStoryContainerLPKey = &kGlowStoryContainerLPKey;
-
-static id hooked_storyContainer_init(id self, SEL _cmd, id thread, id bucket, id mediaViewDelegate, id mediaViewGenerator, id toolbox, BOOL shouldBlurMedia) {
-    if (orig_storyContainer_init) {
-        typedef id (*FnType)(id, SEL, id, id, id, id, id, BOOL);
-        return ((FnType)orig_storyContainer_init)(self, _cmd, thread, bucket,
-                                                   mediaViewDelegate, mediaViewGenerator,
-                                                   toolbox, shouldBlurMedia);
-    }
-    return self;
-}
 
 static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *window) {
     if (orig_storyContainer_didMoveToWindow) {
         typedef void (*FnType)(id, SEL, id);
         ((FnType)orig_storyContainer_didMoveToWindow)(self, _cmd, (id)window);
     }
+    
+    // CRITICAL: Only apply to FBSnacksMediaContainerView instances to prevent generic UIView hooking
+    if (![self isKindOfClass:objc_getClass("FBSnacksMediaContainerView")]) return;
+    
     if (![GlowSettingsManager shared].downloadStory) return;
     if (!window) return;
 
@@ -56,14 +49,6 @@ void initStoryDownloadHooks(void) {
     @try {
         Class cls = objc_getClass("FBSnacksMediaContainerView");
         if (cls) {
-            SEL sel = sel_registerName("initWithThread:bucket:mediaViewDelegate:mediaViewGenerator:toolbox:shouldBlurMedia:");
-            Method m = class_getInstanceMethod(cls, sel);
-            if (m) {
-                orig_storyContainer_init = method_getImplementation(m);
-                method_setImplementation(m, (IMP)hooked_storyContainer_init);
-                LOG("  hook #8: FBSnacksMediaContainerView init (passive)\n");
-            }
-
             SEL dmwSel = @selector(didMoveToWindow);
             Method dmwM = class_getInstanceMethod(cls, dmwSel);
             if (dmwM) {

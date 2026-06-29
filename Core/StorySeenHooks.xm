@@ -22,26 +22,18 @@ static id noop_seen_1(id self, SEL _cmd, id a, id b) {
 static id noop_seen_2(id self, SEL _cmd, id a) {
     seen_count++;
     if (seen_count <= 5 || (seen_count % 50) == 0) {
-        LOG("[seen] local seen _sendThreadIDsAsSeenInViewerSession (count=%d)\n", seen_count);
+        LOG("[seen] blocked _sendThreadIDsAsSeenInViewerSession (count=%d)\n", seen_count);
     }
-    // Call original to update local UI/state
-    if (orig_seen2) {
-        typedef id (*Fn)(id, SEL, id);
-        return ((Fn)orig_seen2)(self, _cmd, a);
-    }
+    // Block - DO NOT call original IMP
     return nil;
 }
 
 static id noop_seen_3(id self, SEL _cmd, id a, id b, id c, BOOL d, id e, id f) {
     seen_count++;
     if (seen_count <= 5 || (seen_count % 50) == 0) {
-        LOG("[seen] local seen markThreadsViewReceiptsAndLightweightReactionsAsSeen (count=%d)\n", seen_count);
+        LOG("[seen] blocked markThreadsViewReceiptsAndLightweightReactionsAsSeen (count=%d)\n", seen_count);
     }
-    // Call original to update local UI/state
-    if (orig_seen3) {
-        typedef id (*Fn)(id, SEL, id, id, id, BOOL, id, id);
-        return ((Fn)orig_seen3)(self, _cmd, a, b, c, d, e, f);
-    }
+    // Block - DO NOT call original IMP
     return nil;
 }
 

@@ -41,7 +41,7 @@
         for (int i = 0; ivarNames[i] != NULL; i++) {
             Ivar ivar = class_getInstanceVariable(object_getClass(container), ivarNames[i]);
             if (ivar) {
-                mediaView = object_getIvar(container, ivar);
+                mediaView = safe_get_ivar(container, ivar);
                 if (mediaView) {
                     foundIvar = [NSString stringWithUTF8String:ivarNames[i]];
                     break;
@@ -110,7 +110,7 @@
             id swpv = nil;
             for (int i = 0; photoIvars[i]; i++) {
                 Ivar iv = class_getInstanceVariable(object_getClass(mediaView), photoIvars[i]);
-                if (iv) swpv = object_getIvar(mediaView, iv);
+                if (iv) swpv = safe_get_ivar(mediaView, iv);
                 if (swpv) break;
             }
             if (!swpv) return nil;
@@ -118,7 +118,7 @@
             id wpv = nil;
             for (int i = 0; photoIvars[i]; i++) {
                 Ivar iv = class_getInstanceVariable(object_getClass(swpv), photoIvars[i]);
-                if (iv) wpv = object_getIvar(swpv, iv);
+                if (iv) wpv = safe_get_ivar(swpv, iv);
                 if (wpv) break;
             }
             if (!wpv) return nil;
@@ -127,31 +127,84 @@
             id photo = [wpv respondsToSelector:photoSel] ? [wpv performSelector:photoSel] : nil;
             if (!photo) return nil;
             @try {
-                id imageSpecifier = [photo valueForKey:@"imageSpecifier"];
-                if (!imageSpecifier) return nil;
-                Class netSpecCls = NSClassFromString(@"FBWebImageNetworkSpecifier");
-                Class memSpecCls = NSClassFromString(@"FBWebImageMemorySpecifier");
-                if (netSpecCls && [imageSpecifier isKindOfClass:netSpecCls]) {
-                    SEL urlsSel = sel_registerName("allInfoURLsSortedByDescImageFlag");
-                    NSArray *urls = [imageSpecifier respondsToSelector:urlsSel] ? [imageSpecifier performSelector:urlsSel] : nil;
-                    if ([urls isKindOfClass:[NSArray class]] && urls.count > 0) {
-                        id firstUrl = urls[0];
-                        if ([firstUrl isKindOfClass:[NSURL class]]) {
-                            return (NSURL *)firstUrl;
+                NSURL *url = nil;
+                
+                // 1. Try playableURLString
+                SEL playableSel = sel_registerName("playableURLString");
+                id playableVal = [photo respondsToSelector:playableSel] ? [photo performSelector:playableSel] : nil;
+                if ([playableVal isKindOfClass:[NSString class]]) {
+                    url = [NSURL URLWithString:(NSString *)playableVal];
+                } else if ([playableVal isKindOfClass:[NSURL class]]) {
+                    url = (NSURL *)playableVal;
+                }
+                
+                // 2. Try image -> uri
+                if (!url) {
+                    SEL imgSel = sel_registerName("image");
+                    id imgObj = [photo respondsToSelector:imgSel] ? [photo performSelector:imgSel] : nil;
+                    if (imgObj) {
+                        SEL uriSel = sel_registerName("uri");
+                        id uriVal = [imgObj respondsToSelector:uriSel] ? [imgObj performSelector:uriSel] : nil;
+                        if ([uriVal isKindOfClass:[NSString class]]) {
+                            url = [NSURL URLWithString:(NSString *)uriVal];
+                        } else if ([uriVal isKindOfClass:[NSURL class]]) {
+                            url = (NSURL *)uriVal;
                         }
                     }
-                } else if (memSpecCls && [imageSpecifier isKindOfClass:memSpecCls]) {
-                    SEL imgSel = sel_registerName("image");
-                    UIImage *img = [imageSpecifier respondsToSelector:imgSel] ? [imageSpecifier performSelector:imgSel] : nil;
-                    if (img) {
-                        LOG("[dl/story] photo is in-memory, saving directly\n");
-                        UIImageWriteToSavedPhotosAlbum(img, nil, nil, nil);
-                        [GlowViewUtils showSafeToast:@"✅ Đã lưu ảnh (từ bộ nhớ)"];
-                        return nil;
+                }
+                
+                // 3. Try fallback resolutions like image2048, image1286, image960, etc.
+                if (!url) {
+                    const char *imgFallbackMethods[] = {"image2048", "image1286", "image960", "image720", "image600", "image480", "image320", NULL};
+                    for (int i = 0; imgFallbackMethods[i]; i++) {
+                        SEL fbSel = sel_registerName(imgFallbackMethods[i]);
+                        id fbImg = [photo respondsToSelector:fbSel] ? [photo performSelector:fbSel] : nil;
+                        if (fbImg) {
+                            SEL uriSel = sel_registerName("uri");
+                            id uriVal = [fbImg respondsToSelector:uriSel] ? [fbImg performSelector:uriSel] : nil;
+                            if ([uriVal isKindOfClass:[NSString class]]) {
+                                url = [NSURL URLWithString:(NSString *)uriVal];
+                                break;
+                            } else if ([uriVal isKindOfClass:[NSURL class]]) {
+                                url = (NSURL *)uriVal;
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                if (url) {
+                    LOG("[dl/story] resolved photo URL: %s\n", url.absoluteString.UTF8String);
+                    return url;
+                }
+                
+                // 4. Try legacy imageSpecifier as last resort
+                id imageSpecifier = [photo respondsToSelector:@selector(valueForKey:)] ? [photo valueForKey:@"imageSpecifier"] : nil;
+                if (imageSpecifier) {
+                    Class netSpecCls = NSClassFromString(@"FBWebImageNetworkSpecifier");
+                    Class memSpecCls = NSClassFromString(@"FBWebImageMemorySpecifier");
+                    if (netSpecCls && [imageSpecifier isKindOfClass:netSpecCls]) {
+                        SEL urlsSel = sel_registerName("allInfoURLsSortedByDescImageFlag");
+                        NSArray *urls = [imageSpecifier respondsToSelector:urlsSel] ? [imageSpecifier performSelector:urlsSel] : nil;
+                        if ([urls isKindOfClass:[NSArray class]] && urls.count > 0) {
+                            id firstUrl = urls[0];
+                            if ([firstUrl isKindOfClass:[NSURL class]]) {
+                                return (NSURL *)firstUrl;
+                            }
+                        }
+                    } else if (memSpecCls && [imageSpecifier isKindOfClass:memSpecCls]) {
+                        SEL imgSel = sel_registerName("image");
+                        UIImage *img = [imageSpecifier respondsToSelector:imgSel] ? [imageSpecifier performSelector:imgSel] : nil;
+                        if (img) {
+                            LOG("[dl/story] photo is in-memory, saving directly\n");
+                            UIImageWriteToSavedPhotosAlbum(img, nil, nil, nil);
+                            [GlowViewUtils showSafeToast:@"✅ Đã lưu ảnh (từ bộ nhớ)"];
+                            return nil;
+                        }
                     }
                 }
             } @catch (NSException *e) {
-                LOG("[dl/story] photo exc: %s\n", e.reason.UTF8String);
+                LOG("[dl/story] photo resolution exc: %s\n", e.reason.UTF8String);
             }
         }
 
@@ -193,36 +246,63 @@
 
 - (void)downloadStoryFromContainer:(UIView *)container {
     BOOL isVideo = NO;
-    NSURL *url = [self findMediaURLInContainer:container isVideo:&isVideo];
-    if (!url) {
+    NSURL *photoURL = [self findMediaURLInContainer:container isVideo:&isVideo];
+    
+    // Check if we have a captured video/Reel URL in cache (e.g. for video story or Reel shared in story)
+    NSURL *cachedHD = [GlowCacheManager shared].cachedHDURL;
+    NSURL *cachedSD = [GlowCacheManager shared].cachedSDURL;
+    NSURL *videoURL = cachedHD ? cachedHD : cachedSD;
+    
+    if (!photoURL && !videoURL) {
         [GlowViewUtils showSafeToast:@"❌ Không tìm thấy media"];
         return;
     }
 
-    UIViewController *top = [GlowViewUtils topViewController];
-    if (!top) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *top = [GlowViewUtils topViewController];
+        if (!top) return;
 
-    NSString *title = isVideo ? @"Tải video story?" : @"Tải ảnh story?";
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
-                                                                   message:nil
-                                                            preferredStyle:UIAlertControllerStyleActionSheet];
-    [alert addAction:[UIAlertAction actionWithTitle:isVideo ? @"Tải HD" : @"Tải ảnh"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction *a) {
-        if (isVideo) {
-            [self downloadVideoURL:url];
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Tải media từ Story?"
+                                                                       message:nil
+                                                                preferredStyle:UIAlertControllerStyleActionSheet];
+                                                                
+        if (isVideo && photoURL) {
+            // Natively resolved video story
+            [alert addAction:[UIAlertAction actionWithTitle:@"Tải Video Story"
+                                                      style:UIAlertActionStyleDefault
+                                                    handler:^(UIAlertAction *a) {
+                [self downloadVideoURL:photoURL];
+            }]];
         } else {
-            [self downloadImageURL:url];
+            // Fallback video URL from cache (for Reel shared in Story, or video story with failed KVC)
+            if (videoURL) {
+                [alert addAction:[UIAlertAction actionWithTitle:@"Tải Video Story (HD/SD)"
+                                                          style:UIAlertActionStyleDefault
+                                                        handler:^(UIAlertAction *a) {
+                    [self downloadVideoURL:videoURL];
+                }]];
+            }
+            
+            // Resolved photo URL
+            if (photoURL) {
+                [alert addAction:[UIAlertAction actionWithTitle:@"Tải Ảnh Story"
+                                                          style:UIAlertActionStyleDefault
+                                                        handler:^(UIAlertAction *a) {
+                    [self downloadImageURL:photoURL];
+                }]];
+            }
         }
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Hủy"
-                                              style:UIAlertActionStyleCancel
-                                            handler:nil]];
-    if (alert.popoverPresentationController) {
-        alert.popoverPresentationController.sourceView = container;
-        alert.popoverPresentationController.sourceRect = container.bounds;
-    }
-    [top presentViewController:alert animated:YES completion:nil];
+        
+        [alert addAction:[UIAlertAction actionWithTitle:@"Hủy"
+                                                  style:UIAlertActionStyleCancel
+                                                handler:nil]];
+                                                
+        if (alert.popoverPresentationController) {
+            alert.popoverPresentationController.sourceView = container;
+            alert.popoverPresentationController.sourceRect = container.bounds;
+        }
+        [top presentViewController:alert animated:YES completion:nil];
+    });
 }
 
 - (void)downloadImageURL:(NSURL *)url {

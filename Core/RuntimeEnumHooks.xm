@@ -132,22 +132,26 @@ void initRuntimeEnumHooks(void) {
                 if (strncmp(name, "FB", 2) != 0 && strncmp(name, "FBS", 3) != 0) continue;
 
                 // Hook setVideoItem:
-                if (!orig_setVideoItem && class_respondsToSelector(cls, setSel)) {
-                    Method m = class_getInstanceMethod(cls, setSel);
-                    if (m) {
-                        orig_setVideoItem = method_getImplementation(m);
-                        method_setImplementation(m, (IMP)hooked_setVideoItem);
-                        setVideoItemHooked++;
+                if (!orig_setVideoItem && strstr(name, "FBVideoPlaybackController") != NULL) {
+                    if (class_respondsToSelector(cls, setSel)) {
+                        Method m = class_getInstanceMethod(cls, setSel);
+                        if (m) {
+                            orig_setVideoItem = method_getImplementation(m);
+                            method_setImplementation(m, (IMP)hooked_setVideoItem);
+                            setVideoItemHooked++;
+                        }
                     }
                 }
 
                 // Hook currentVideoPlaybackItem
-                if (!orig_currentVideoPlaybackItem && class_respondsToSelector(cls, getSel)) {
-                    Method m = class_getInstanceMethod(cls, getSel);
-                    if (m) {
-                        orig_currentVideoPlaybackItem = method_getImplementation(m);
-                        method_setImplementation(m, (IMP)hooked_currentVideoPlaybackItem);
-                        cvpiHooked++;
+                if (!orig_currentVideoPlaybackItem && strstr(name, "FBVideoPlaybackController") != NULL) {
+                    if (class_respondsToSelector(cls, getSel)) {
+                        Method m = class_getInstanceMethod(cls, getSel);
+                        if (m) {
+                            orig_currentVideoPlaybackItem = method_getImplementation(m);
+                            method_setImplementation(m, (IMP)hooked_currentVideoPlaybackItem);
+                            cvpiHooked++;
+                        }
                     }
                 }
 

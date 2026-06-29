@@ -40,7 +40,7 @@ static NSURL *hooked_SDPlaybackURL(id self, SEL _cmd) {
 }
 
 void initVideoItemHooks(void) {
-    if (![GlowSettingsManager shared].downloadVideo) return;
+    if (![GlowSettingsManager shared].downloadVideo && ![GlowSettingsManager shared].downloadReels) return;
     @try {
         Class vpiCls = objc_getClass("FBVideoPlaybackItem");
         if (vpiCls) {

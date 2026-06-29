@@ -5,6 +5,7 @@
 #import "GlowViewUtils.h"
 #import "GlowCommon.h"
 #import <objc/runtime.h>
+#import <Photos/Photos.h>
 @implementation GlowVideoHandler
 
 + (instancetype)shared {
@@ -51,6 +52,25 @@
     LOG("[dl/news] LONG PRESS on VideoContainer %s\n",
         class_getName(object_getClass(container)));
 
+    // Bypass long-press inside Reels context to prevent gesture conflict crashes
+    @try {
+        UIResponder *r = container;
+        BOOL isReel = NO;
+        while (r) {
+            const char *name = class_getName(object_getClass(r));
+            if (name && (strstr(name, "Shorts") != NULL || strstr(name, "Reel") != NULL)) {
+                isReel = YES;
+                break;
+            }
+            r = [r nextResponder];
+        }
+        if (isReel) {
+            LOG("[dl/news] Ignored long press in Reels context via responder chain\n");
+            [GlowViewUtils showSafeToast:@"💡 Hãy chạm nút ⬇ bên lề phải để tải Reels"];
+            return;
+        }
+    } @catch (NSException *e) {}
+
     @try {
         // Get controller from container
         id controller = nil;
@@ -65,7 +85,7 @@
             Ivar vpcIvar = class_getInstanceVariable(object_getClass(container),
                                                      "_videoPlaybackController");
             if (vpcIvar) {
-                controller = object_getIvar(container, vpcIvar);
+                controller = safe_get_ivar(container, vpcIvar);
             }
         }
 
@@ -83,29 +103,31 @@
             }
         }
 
-        if (!controller) {
-            [GlowViewUtils showSafeToast:@"❌ Không tìm thấy video controller"];
-            return;
-        }
-
         // Get current video item
         id item = nil;
-        if ([controller respondsToSelector:@selector(currentVideoPlaybackItem)]) {
+        if (controller && [controller respondsToSelector:@selector(currentVideoPlaybackItem)]) {
             item = [controller performSelector:@selector(currentVideoPlaybackItem)];
-        }
-
-        if (!item) {
-            [GlowViewUtils showSafeToast:@"❌ Không có video đang phát"];
-            return;
         }
 
         // Get URLs
         NSURL *hdURL = nil, *sdURL = nil;
-        if ([item respondsToSelector:@selector(HDPlaybackURL)]) {
-            hdURL = [item performSelector:@selector(HDPlaybackURL)];
+        if (item) {
+            if ([item respondsToSelector:@selector(HDPlaybackURL)]) {
+                hdURL = [item performSelector:@selector(HDPlaybackURL)];
+            }
+            if ([item respondsToSelector:@selector(SDPlaybackURL)]) {
+                sdURL = [item performSelector:@selector(SDPlaybackURL)];
+            }
         }
-        if ([item respondsToSelector:@selector(SDPlaybackURL)]) {
-            sdURL = [item performSelector:@selector(SDPlaybackURL)];
+
+        // CRITICAL FALLBACK: If resolving via class hierarchy failed, load from captured cache
+        if (!hdURL && !sdURL) {
+            hdURL = [GlowCacheManager shared].cachedHDURL;
+            sdURL = [GlowCacheManager shared].cachedSDURL;
+            if (hdURL || sdURL) {
+                LOG("[dl/news] Fallback to cached URLs: HD=%s, SD=%s\n",
+                    [[hdURL absoluteString] UTF8String], [[sdURL absoluteString] UTF8String]);
+            }
         }
 
         if (!hdURL && !sdURL) {
@@ -124,43 +146,45 @@
 - (void)presentQualityActionSheetHD:(NSURL *)hd sd:(NSURL *)sd sourceView:(UIView *)sourceView {
     if (!hd && !sd) return;
 
-    UIViewController *top = [GlowViewUtils topViewController];
-    if (!top) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *top = [GlowViewUtils topViewController];
+        if (!top) return;
 
-    UIAlertController *alert = [UIAlertController
-        alertControllerWithTitle:@"Tải video?"
-        message:nil
-        preferredStyle:UIAlertControllerStyleActionSheet];
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:@"Tải video?"
+            message:nil
+            preferredStyle:UIAlertControllerStyleActionSheet];
 
-    if (hd) {
+        if (hd) {
+            [alert addAction:[UIAlertAction
+                actionWithTitle:@"Tải HD"
+                style:UIAlertActionStyleDefault
+                handler:^(UIAlertAction *a) {
+                    [self downloadURL:hd];
+                }]];
+        }
+
+        if (sd) {
+            [alert addAction:[UIAlertAction
+                actionWithTitle:@"Tải SD"
+                style:UIAlertActionStyleDefault
+                handler:^(UIAlertAction *a) {
+                    [self downloadURL:sd];
+                }]];
+        }
+
         [alert addAction:[UIAlertAction
-            actionWithTitle:@"Tải HD"
-            style:UIAlertActionStyleDefault
-            handler:^(UIAlertAction *a) {
-                [self downloadURL:hd];
-            }]];
-    }
+            actionWithTitle:@"Hủy"
+            style:UIAlertActionStyleCancel
+            handler:nil]];
 
-    if (sd) {
-        [alert addAction:[UIAlertAction
-            actionWithTitle:@"Tải SD"
-            style:UIAlertActionStyleDefault
-            handler:^(UIAlertAction *a) {
-                [self downloadURL:sd];
-            }]];
-    }
+        if (alert.popoverPresentationController) {
+            alert.popoverPresentationController.sourceView = sourceView;
+            alert.popoverPresentationController.sourceRect = sourceView.bounds;
+        }
 
-    [alert addAction:[UIAlertAction
-        actionWithTitle:@"Hủy"
-        style:UIAlertActionStyleCancel
-        handler:nil]];
-
-    if (alert.popoverPresentationController) {
-        alert.popoverPresentationController.sourceView = sourceView;
-        alert.popoverPresentationController.sourceRect = sourceView.bounds;
-    }
-
-    [top presentViewController:alert animated:YES completion:nil];
+        [top presentViewController:alert animated:YES completion:nil];
+    });
 }
 
 - (void)downloadURL:(NSURL *)url {
@@ -175,12 +199,28 @@
         completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
             if (location) {
                 [[NSFileManager defaultManager] moveItemAtURL:location toURL:destURL error:nil];
-                [GlowViewUtils showSafeToast:@"✅ Đã tải video"];
+                [self saveVideoToPhotosAtPath:[destURL path]];
             } else {
                 [GlowViewUtils showSafeToast:@"❌ Lỗi tải video"];
             }
         }];
     [task resume];
+}
+
+- (void)saveVideoToPhotosAtPath:(NSString *)path {
+    if (!path) return;
+    NSURL *fileURL = [NSURL fileURLWithPath:path];
+    [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+        [PHAssetChangeRequest creationRequestForAssetFromVideoAtFileURL:fileURL];
+    } completionHandler:^(BOOL success, NSError * _Nullable error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (success) {
+                [GlowViewUtils showSafeToast:@"✅ Đã tải và lưu video vào máy"];
+            } else {
+                [GlowViewUtils showSafeToast:@"❌ Lỗi lưu video vào Thư viện"];
+            }
+        });
+    }];
 }
 
 @end

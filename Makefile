@@ -1,3 +1,4 @@
+ARCHS = arm64
 include $(THEOS)/makefiles/common.mk
 
 # Glow for Facebook - Modular Build System (v8.2.68+)
@@ -30,14 +31,13 @@ GlowV3_FILES = Tweak.x \
     Managers/GlowReelHandler.m \
     UI/GlowSettingsViewController.m \
     Utils/GlowViewUtils.m
+
+# Compile AdBlock hooks without ARC to prevent memory management crashes on Newsfeed elements
+Core/AdBlockHooks.xm_CFLAGS = -fno-objc-arc
+
 GlowV3_FRAMEWORKS = UIKit Photos
 GlowV3_PRIVATE_FRAMEWORKS = Photos
 GlowV3_CFLAGS = -fobjc-arc -Wno-error -I. -ICore -IManagers -IUI -IUtils
 GlowV3_INSTALL_PATH = /Library/MobileSubstrate/DynamicLibraries
-
-# 00GlowLogger Target
-00GlowLogger_FILES = Logger/Logger.xm
-00GlowLogger_CFLAGS = -fobjc-arc -Wno-error -I.
-00GlowLogger_INSTALL_PATH = /Library/MobileSubstrate/DynamicLibraries
 
 include $(THEOS)/makefiles/tweak.mk

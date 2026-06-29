@@ -12,6 +12,24 @@
 static IMP orig_viewDidAppear = NULL;
 static int setupDone = 0;
 
+static BOOL reelsHooksInstalled = NO;
+static BOOL playbackHooksInstalled = NO;
+
+static void tryInstallReelsHooks(void) {
+    if (reelsHooksInstalled) return;
+    if (![GlowSettingsManager shared].downloadReels) return;
+    Class sideBarCls = objc_getClass("FBShortsSideBarView");
+    if (sideBarCls) {
+        initReelsDownloadHooks();
+        reelsHooksInstalled = YES;
+        LOG("[ctor] Dynamically installed Reels download hooks!\n");
+    }
+}
+
+static void tryInstallPlaybackHooks(void) {
+    // Disabled to prevent startup crashes caused by hook on high-frequency FBVideoPlaybackController methods
+}
+
 static void installHooks(void) {
     if (setupDone) return;
     setupDone = 1;
@@ -37,13 +55,17 @@ static void installHooks(void) {
     // #9 Newsfeed video download
     if (settings.downloadVideo) {
         initNewsfeedVideoHooks();
+    }
+
+    // Capture URLs if either Newsfeed video download OR Reels download is enabled
+    if (settings.downloadVideo || settings.downloadReels) {
         initVideoItemHooks();
     }
 
     // #11 Reels download
     if (settings.downloadReels) {
-        initReelsDownloadHooks();
-        initPlaybackStateHooks();
+        tryInstallReelsHooks();
+        tryInstallPlaybackHooks();
     }
 
     // Long press to open settings UI
@@ -58,6 +80,8 @@ static void hooked_viewDidAppear(id self, SEL _cmd, BOOL animated) {
         ((FnType)orig_viewDidAppear)(self, _cmd, animated);
     }
     installHooks();
+    tryInstallReelsHooks();      // Try dynamic registration on subsequent controller views
+    tryInstallPlaybackHooks();   // Try dynamic registration of playback controller hooks
 }
 
 __attribute__((constructor))

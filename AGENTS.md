@@ -220,3 +220,25 @@ Fixed in 1 commit instead of 6
 - Log file: `/var/mobile/Documents/glow.txt`
 - Bundle IDs: `com.facebook.Facebook`, `com.facebook.Facebook6`
 - GitHub: `https://github.com/Long-Trinh-Tien/facebook-no-ads` branch `v8-glow-framework`
+
+---
+
+## Chiến lược Chẩn đoán Không Đoán Mò (v8.4.1+)
+
+Để tránh việc phỏng đoán nguyên nhân gây lỗi giao diện hoặc sập ứng dụng, quy trình gỡ lỗi bắt buộc phải áp dụng hai công cụ sau:
+
+### 1. Dựng Diagnostic Dump cho Giao diện và Bộ nhớ
+* **Mục tiêu:** Định vị chính xác đối tượng lưu trữ dữ liệu (Controller/URLs) trong các view phức tạp của Facebook.
+* **Cách làm:**
+  - Viết hàm quét đệ quy subviews (`dumpSubviewsRecursive`) in ra: tên class, frame, hidden, alpha và kiểm tra respondsToSelector.
+  - Sử dụng runtime Objective-C (`class_copyIvarList`) để in ra toàn bộ biến ivar nội bộ kèm theo giá trị địa chỉ của chúng.
+  - *Ví dụ thành công:* Nhờ dump danh sách ivars của `FBVideoPlaybackContainerView`, ta phát hiện `FBVideoPlaybackController` thực tế nằm ở biến `_delegate` chứ không phải `_videoPlaybackController`, giúp sửa lỗi Reels lệch pha ngay lập tức.
+
+### 2. Sử dụng Post-mortem Logs làm Stack Trace
+* **Mục tiêu:** Định vị chính xác dòng code gây crash khi ứng dụng sập đột ngột mà không có Xcode debugger.
+* **Cách làm:** Ghi log chi tiết (nhãn `[adblock]` hoặc `[reels]`) ngay trước và sau mỗi bước tính toán/lấy dữ liệu. Dòng log cuối cùng xuất hiện trong file `/var/mobile/Documents/glow.txt` chính là ranh giới gây sập.
+
+### 3. Ưu tiên Logos Hooking (%hook / %orig) cho các Core Models
+* **Quy luật bộ nhớ:** Hook các hàm gốc bằng con trỏ C thủ công (`method_setImplementation`) dễ gây sập bộ nhớ (EXC_BAD_ACCESS) do ARC (Automatic Reference Counting) tự động thêm retain/release không khớp chữ ký phương thức gốc.
+* **Giải pháp:** Sử dụng Logos `%hook` và `%orig` để biên dịch viên Theos tự động quản lý vòng đời đối tượng ARC, triệt tiêu hoàn toàn crash khi duyệt danh sách hoặc mở chi tiết.
+

@@ -132,9 +132,11 @@ build_ipa() {
         return 1
     fi
 
-    # Inject
+    # Inject GlowV3 with extension stripping (-u -w -e) and TrollStore support
     cyan -i "$FB_IPA" -o "$OUTPUT_IPA" \
-        -f "$DEB_FILE" --overwrite -s -d
+        -u -w -e -d -s \
+        -f "$DEB_FILE" \
+        --overwrite
 
     if [ -f "$OUTPUT_IPA" ]; then
         local size=$(ls -lh "$OUTPUT_IPA" | awk '{print $5}')

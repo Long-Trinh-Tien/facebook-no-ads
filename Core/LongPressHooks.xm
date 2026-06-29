@@ -50,6 +50,10 @@ static void hooked_tabbar_didMoveToWindow(id self, SEL _cmd, UIWindow *window) {
         typedef void (*Fn)(id, SEL, id);
         ((Fn)orig_tabbar_didMoveToWindow)(self, _cmd, (id)window);
     }
+    
+    // CRITICAL: Only apply to UITabBar instances to prevent generic UIView hooking
+    if (![self isKindOfClass:objc_getClass("UITabBar")]) return;
+    
     if (!window) return;
 
     @try {
