@@ -36,6 +36,7 @@ void initReelsDownloadHooks(void);
 
 // Long press hooks
 void initLongPressHooks(void);
+void installLongPressOnCurrentUI(void);
 
 // UI Explorer hooks
 void initExplorerHooks(void);

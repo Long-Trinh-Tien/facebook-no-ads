@@ -82,6 +82,7 @@ static void hooked_viewDidAppear(id self, SEL _cmd, BOOL animated) {
     installHooks();
     tryInstallReelsHooks();      // Try dynamic registration on subsequent controller views
     tryInstallPlaybackHooks();   // Try dynamic registration of playback controller hooks
+    installLongPressOnCurrentUI(); // Proactively scan the UI and add Settings gesture
 }
 
 __attribute__((constructor))
