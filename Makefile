@@ -32,9 +32,6 @@ GlowV3_FILES = Tweak.x \
     UI/GlowSettingsViewController.m \
     Utils/GlowViewUtils.m
 
-# Compile AdBlock hooks without ARC to prevent memory management crashes on Newsfeed elements
-Core/AdBlockHooks.xm_CFLAGS = -fno-objc-arc
-
 GlowV3_FRAMEWORKS = UIKit Photos
 GlowV3_PRIVATE_FRAMEWORKS = Photos
 GlowV3_CFLAGS = -fobjc-arc -Wno-error -I. -ICore -IManagers -IUI -IUtils

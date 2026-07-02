@@ -1,5 +1,5 @@
 // StoryDownloadHooks.xm
-// Hooks for Story download (FBSnacksMediaContainerView)
+// Hooks for Story download (FBSnacksMediaContainerView) with correct didMoveToWindow signature
 #import "GlowCommon.h"
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -11,20 +11,23 @@
 static IMP orig_storyContainer_didMoveToWindow = NULL;
 static const void *kGlowStoryContainerLPKey = &kGlowStoryContainerLPKey;
 
-static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd, UIWindow *window) {
+// didMoveToWindow takes no arguments in UIKit, matching the signature exactly to avoid ARM64 stack corruption
+static void hooked_storyContainer_didMoveToWindow(id self, SEL _cmd) {
     if (orig_storyContainer_didMoveToWindow) {
-        typedef void (*FnType)(id, SEL, id);
-        ((FnType)orig_storyContainer_didMoveToWindow)(self, _cmd, (id)window);
+        typedef void (*FnType)(id, SEL);
+        ((FnType)orig_storyContainer_didMoveToWindow)(self, _cmd);
     }
     
     // CRITICAL: Only apply to FBSnacksMediaContainerView instances to prevent generic UIView hooking
     if (![self isKindOfClass:objc_getClass("FBSnacksMediaContainerView")]) return;
     
     if (![GlowSettingsManager shared].downloadStory) return;
+    
+    UIView *container = (UIView *)self;
+    UIWindow *window = container.window;
     if (!window) return;
 
     @try {
-        UIView *container = (UIView *)self;
         // Check if gesture already added using static key
         NSNumber *already = objc_getAssociatedObject(container, kGlowStoryContainerLPKey);
         if (already && [already boolValue]) {

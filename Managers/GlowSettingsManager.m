@@ -32,8 +32,10 @@ void prefsChanged(CFNotificationCenterRef center, void *observer,
                      [d boolForKey:@"com.tommy.glow.removeAds"] : YES;
     self.disableStorySeen = [d objectForKey:@"com.tommy.glow.disableStorySeen"] ?
                             [d boolForKey:@"com.tommy.glow.disableStorySeen"] : YES;
-    self.downloadVideo = [d boolForKey:@"com.tommy.glow.downloadVideo"];
-    self.downloadStory = [d boolForKey:@"com.tommy.glow.downloadStory"];
+    self.downloadVideo = [d objectForKey:@"com.tommy.glow.downloadVideo"] ?
+                         [d boolForKey:@"com.tommy.glow.downloadVideo"] : YES;
+    self.downloadStory = [d objectForKey:@"com.tommy.glow.downloadStory"] ?
+                         [d boolForKey:@"com.tommy.glow.downloadStory"] : YES;
     self.removePYMK = [d boolForKey:@"com.tommy.glow.removePYMK"];
     self.removeReelsCarousel = [d boolForKey:@"com.tommy.glow.removeReelsCarousel"];
     self.removeSuggested = [d boolForKey:@"com.tommy.glow.removeSuggested"];
@@ -53,7 +55,7 @@ void prefsChanged(CFNotificationCenterRef center, void *observer,
 
     LOG("[prefs] reload: ads=%d seen=%d video=%d story=%d pymk=%d reels=%d\n",
         self.removeAds, self.disableStorySeen, self.downloadVideo, self.downloadStory,
-        self.removePYMK, self.removeReelsCarousel);
+        self.removePYMK, self.downloadReels);
 }
 
 + (NSString *)localizedString:(NSString *)key {

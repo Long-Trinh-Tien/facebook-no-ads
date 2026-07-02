@@ -1,5 +1,5 @@
 // ReelsDownloadHooks.xm
-// Hooks for Reels download (FBShortsSideBarView)
+// Hooks for Reels download (FBShortsSideBarView) with correct didMoveToWindow signature
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import "Hooks.h"
@@ -29,19 +29,22 @@ static BOOL hooked_pointInside_withEvent(id self, SEL _cmd, CGPoint point, UIEve
     return [sideBar pointInside:point withEvent:event];
 }
 
-static void hooked_shortsSideBarDidMoveToWindow(id self, SEL _cmd, UIWindow *window) {
+// didMoveToWindow takes no arguments in UIKit, matching the signature exactly to avoid ARM64 stack corruption
+static void hooked_shortsSideBarDidMoveToWindow(id self, SEL _cmd) {
     if (orig_shortsSideBarDidMoveToWindow) {
-        typedef void (*FnType)(id, SEL, id);
-        ((FnType)orig_shortsSideBarDidMoveToWindow)(self, _cmd, (id)window);
+        typedef void (*FnType)(id, SEL);
+        ((FnType)orig_shortsSideBarDidMoveToWindow)(self, _cmd);
     }
     
     // CRITICAL: Only apply to FBShortsSideBarView instances to prevent generic UIView hooking
     if (![self isKindOfClass:objc_getClass("FBShortsSideBarView")]) return;
     
     if (![GlowSettingsManager shared].downloadReels) return;
+    
+    UIView *sideBar = (UIView *)self;
+    UIWindow *window = sideBar.window;
     if (!window) return;
 
-    UIView *sideBar = (UIView *)self;
     @try {
         // Add download button
         [[GlowReelHandler shared] addDownloadButtonToSidebar:sideBar];

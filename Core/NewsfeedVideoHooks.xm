@@ -1,5 +1,5 @@
 // NewsfeedVideoHooks.xm
-// Hooks for newsfeed video download (FBVideoPlaybackContainerView long press)
+// Hooks for newsfeed video download (FBVideoPlaybackContainerView long press) with correct didMoveToWindow signature
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import "Hooks.h"
@@ -36,14 +36,18 @@ static Class findVideoContainerClass(void) {
     return nil;
 }
 
-static void hooked_videoContainerDidMoveToWindow(id self, SEL _cmd, UIWindow *window) {
+// didMoveToWindow takes no arguments in UIKit, matching the signature exactly to avoid ARM64 stack corruption
+static void hooked_videoContainerDidMoveToWindow(id self, SEL _cmd) {
     if (orig_videoContainerDidMoveToWindow) {
-        typedef void (*FnType)(id, SEL, id);
-        ((FnType)orig_videoContainerDidMoveToWindow)(self, _cmd, (id)window);
+        typedef void (*FnType)(id, SEL);
+        ((FnType)orig_videoContainerDidMoveToWindow)(self, _cmd);
     }
     
     // CRITICAL: Only apply to instances of the actual video container class to prevent generic UIView hooking
     if (![self isKindOfClass:g_videoContainerClass]) return;
+    
+    UIView *container = (UIView *)self;
+    UIWindow *window = container.window;
     if (!window) return;
 
     // Check if in Reels context (walk responder chain)
@@ -72,7 +76,7 @@ static void hooked_videoContainerDidMoveToWindow(id self, SEL _cmd, UIWindow *wi
             initWithTarget:[GlowVideoHandler shared]
                     action:@selector(onVideoContainerLongPress:)];
         lp.minimumPressDuration = 0.5;
-        [(UIView *)self addGestureRecognizer:lp];
+        [container addGestureRecognizer:lp];
         LOG("[dl/news] Added long press gesture to newsfeed video container\n");
     }
 }

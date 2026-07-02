@@ -1,5 +1,5 @@
 // StorySeenHooks.xm
-// Hooks for blocking story seen receipts
+// Hooks for blocking story seen receipts (proven void return type approach)
 #import "GlowCommon.h"
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -10,31 +10,28 @@
 static int seen_count = 0;
 static IMP orig_seen1 = NULL, orig_seen2 = NULL, orig_seen3 = NULL;
 
-static id noop_seen_1(id self, SEL _cmd, id a, id b) {
+static void noop_seen_1(id self, SEL _cmd, id a, id b) {
     seen_count++;
     if (seen_count <= 5 || (seen_count % 50) == 0) {
         LOG("[seen] blocked _sendSeenThreadIDsWithBucket (count=%d)\n", seen_count);
     }
-    // Block network seen request - DO NOT call original IMP
-    return nil;
+    // Block network seen request by not calling original IMP (returns void)
 }
 
-static id noop_seen_2(id self, SEL _cmd, id a) {
+static void noop_seen_2(id self, SEL _cmd, id a) {
     seen_count++;
     if (seen_count <= 5 || (seen_count % 50) == 0) {
         LOG("[seen] blocked _sendThreadIDsAsSeenInViewerSession (count=%d)\n", seen_count);
     }
-    // Block - DO NOT call original IMP
-    return nil;
+    // Block by not calling original IMP (returns void)
 }
 
-static id noop_seen_3(id self, SEL _cmd, id a, id b, id c, BOOL d, id e, id f) {
+static void noop_seen_3(id self, SEL _cmd, id a, id b, id c, BOOL d, id e, id f) {
     seen_count++;
     if (seen_count <= 5 || (seen_count % 50) == 0) {
         LOG("[seen] blocked markThreadsViewReceiptsAndLightweightReactionsAsSeen (count=%d)\n", seen_count);
     }
-    // Block - DO NOT call original IMP
-    return nil;
+    // Block by not calling original IMP (returns void)
 }
 
 void initStorySeenHooks(void) {

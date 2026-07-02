@@ -1,4 +1,5 @@
 // Core/LongPressHooks.xm
+// Safe hook on UITabBar to add settings long press, matching signatures exactly to prevent ARM64 stack corruption.
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import "Hooks.h"
@@ -8,6 +9,7 @@
 #import "Utils/GlowCommon.h"
 
 static IMP orig_tabbar_didMoveToWindow = NULL;
+static IMP orig_tabbar_layoutSubviews = NULL;
 static const void *kGlowSettingsLPKey = &kGlowSettingsLPKey;
 
 static void openGlowSettings(void) {
@@ -36,8 +38,7 @@ static void openGlowSettings(void) {
 @implementation GlowSettingsLongPressHandler
 - (void)handleLongPress:(UILongPressGestureRecognizer *)gr {
     if (gr.state == UIGestureRecognizerStateBegan) {
-        LOG("[ui] tab bar long press triggered on %s %p, opening settings\n", 
-            class_getName(object_getClass(gr.view)), gr.view);
+        LOG("[ui] tab bar long press triggered, opening settings\n");
         openGlowSettings();
     }
 }
@@ -45,20 +46,10 @@ static void openGlowSettings(void) {
 
 static GlowSettingsLongPressHandler *g_lpHandler = nil;
 
-static void hooked_tabbar_didMoveToWindow(id self, SEL _cmd, UIWindow *window) {
-    if (orig_tabbar_didMoveToWindow) {
-        typedef void (*Fn)(id, SEL, id);
-        ((Fn)orig_tabbar_didMoveToWindow)(self, _cmd, (id)window);
-    }
-    
-    // CRITICAL: Only apply to UITabBar instances to prevent generic UIView hooking
-    if (![self isKindOfClass:objc_getClass("UITabBar")]) return;
-    
-    if (!window) return;
-
+static void addSettingsGestureToTabBar(UIView *tabBar) {
+    if (!tabBar) return;
     @try {
-        UIView *tabBar = (UIView *)self;
-        // Check if gesture already added using static key
+        // Check if gesture already added using Associated Object
         NSNumber *already = objc_getAssociatedObject(tabBar, kGlowSettingsLPKey);
         if (already && [already boolValue]) {
             return;
@@ -76,23 +67,58 @@ static void hooked_tabbar_didMoveToWindow(id self, SEL _cmd, UIWindow *window) {
         [tabBar addGestureRecognizer:lp];
         
         objc_setAssociatedObject(tabBar, kGlowSettingsLPKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        LOG("[ui] added settings long press gesture to %s %p\n", 
-            class_getName(object_getClass(tabBar)), tabBar);
+        LOG("[ui] added settings long press gesture to UITabBar %p\n", tabBar);
     } @catch (NSException *e) {
         LOG("[ui] failed to add long press to UITabBar: %s\n", e.reason.UTF8String);
     }
+}
+
+// UITabBar didMoveToWindow takes NO arguments. We must match the signature exactly.
+static void hooked_tabbar_didMoveToWindow(id self, SEL _cmd) {
+    if (orig_tabbar_didMoveToWindow) {
+        typedef void (*Fn)(id, SEL);
+        ((Fn)orig_tabbar_didMoveToWindow)(self, _cmd);
+    }
+    
+    // CRITICAL: Only apply to UITabBar instances to prevent generic UIView hooking
+    if (![self isKindOfClass:objc_getClass("UITabBar")]) return;
+    
+    addSettingsGestureToTabBar((UIView *)self);
+}
+
+// UITabBar layoutSubviews takes NO arguments. We must match the signature exactly.
+static void hooked_tabbar_layoutSubviews(id self, SEL _cmd) {
+    if (orig_tabbar_layoutSubviews) {
+        typedef void (*Fn)(id, SEL);
+        ((Fn)orig_tabbar_layoutSubviews)(self, _cmd);
+    }
+    
+    // CRITICAL: Only apply to UITabBar instances to prevent generic UIView hooking
+    if (![self isKindOfClass:objc_getClass("UITabBar")]) return;
+    
+    addSettingsGestureToTabBar((UIView *)self);
 }
 
 void initLongPressHooks(void) {
     @try {
         Class cls = objc_getClass("UITabBar");
         if (cls) {
+            // Hook didMoveToWindow
             SEL sel = @selector(didMoveToWindow);
             Method m = class_getInstanceMethod(cls, sel);
             if (m) {
                 orig_tabbar_didMoveToWindow = method_getImplementation(m);
                 method_setImplementation(m, (IMP)hooked_tabbar_didMoveToWindow);
                 LOG("  hook: UITabBar.didMoveToWindow -> add settings long press\n");
+            }
+            
+            // Hook layoutSubviews as fallback if didMoveToWindow fired before hooks installation
+            SEL lsSel = @selector(layoutSubviews);
+            Method lsM = class_getInstanceMethod(cls, lsSel);
+            if (lsM) {
+                orig_tabbar_layoutSubviews = method_getImplementation(lsM);
+                method_setImplementation(lsM, (IMP)hooked_tabbar_layoutSubviews);
+                LOG("  hook: UITabBar.layoutSubviews -> add settings long press (fallback)\n");
             }
         }
     } @catch (NSException *e) {

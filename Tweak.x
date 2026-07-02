@@ -86,7 +86,7 @@ static void hooked_viewDidAppear(id self, SEL _cmd, BOOL animated) {
 
 __attribute__((constructor))
 static void glow_init(void) {
-    LOG("\n=== Glow v8.4.1 (Modular Build — Long Press Story) — %s ===\n", __DATE__ " " __TIME__);
+    LOG("\n=== Glow v8.4.1 (Modular Build) — %s ===\n", __DATE__ " " __TIME__);
 
     [[GlowSettingsManager shared] loadSettings];
 
