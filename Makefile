@@ -1,15 +1,6 @@
 ARCHS = arm64
 include $(THEOS)/makefiles/common.mk
 
-# Glow for Facebook - Modular Build System (v8.2.68+)
-# 
-# Build all modules:
-#   - Core/*.xm      - Hooks (Logos)
-#   - Managers/*.m   - Business logic
-#   - UI/*.m         - UI components
-#   - Utils/*.m      - Utilities
-#   - Tweak.x        - Entry point
-
 TWEAK_NAME = GlowV3
 
 GlowV3_FILES = Tweak.x \
@@ -23,6 +14,8 @@ GlowV3_FILES = Tweak.x \
     Core/LongPressHooks.xm \
     Core/ExplorerHooks.xm \
     Core/RuntimeEnumHooks.xm \
+    Core/LikeConfirmHooks.xm \
+    Core/NoAutoRefreshHooks.xm \
     Managers/GlowLogManager.m \
     Managers/GlowSettingsManager.m \
     Managers/GlowCacheManager.m \

@@ -1,5 +1,5 @@
 // GlowSettingsManager.h
-// Manages all user settings (18 s_* flags) and preferences loading
+// Manages all user settings and preferences loading
 #import <Foundation/Foundation.h>
 
 @interface GlowSettingsManager : NSObject
@@ -29,6 +29,7 @@
 @property (nonatomic, assign) BOOL allFormats;
 @property (nonatomic, assign) BOOL clearCacheOnLaunch;
 @property (nonatomic, assign) BOOL notifyUpdates;
+@property (nonatomic, assign) BOOL disableAutoRefresh;
 
 // Localization helper
 + (NSString *)localizedString:(NSString *)key;

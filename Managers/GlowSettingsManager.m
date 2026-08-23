@@ -1,49 +1,33 @@
-// GlowSettingsManager.m
-#import "GlowCommon.h"
-#import "GlowSettingsManager.h"
-#import "GlowLogManager.h"
-
-void reloadPrefs(void) {
-    [[GlowSettingsManager shared] loadSettings];
-}
-
-void prefsChanged(CFNotificationCenterRef center, void *observer,
-                  CFStringRef name, const void *object, CFDictionaryRef userInfo) {
-    [[GlowSettingsManager shared] loadSettings];
-}
+// Managers/GlowSettingsManager.m
+#import "Managers/GlowSettingsManager.h"
 
 @implementation GlowSettingsManager
 
 + (instancetype)shared {
-    static GlowSettingsManager *instance = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        instance = [[self alloc] init];
-        [instance loadSettings];
+    static GlowSettingsManager *s = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        s = [[GlowSettingsManager alloc] init];
+        [s loadSettings];
     });
-    return instance;
+    return s;
 }
 
 - (void)loadSettings {
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
 
-    // Load with defaults
-    self.removeAds = [d objectForKey:@"com.tommy.glow.removeAds"] ?
-                     [d boolForKey:@"com.tommy.glow.removeAds"] : YES;
-    self.disableStorySeen = [d objectForKey:@"com.tommy.glow.disableStorySeen"] ?
-                            [d boolForKey:@"com.tommy.glow.disableStorySeen"] : YES;
-    self.downloadVideo = [d objectForKey:@"com.tommy.glow.downloadVideo"] ?
-                         [d boolForKey:@"com.tommy.glow.downloadVideo"] : YES;
-    self.downloadStory = [d objectForKey:@"com.tommy.glow.downloadStory"] ?
-                         [d boolForKey:@"com.tommy.glow.downloadStory"] : YES;
+    self.removeAds = [d objectForKey:@"com.tommy.glow.removeAds"] ? [d boolForKey:@"com.tommy.glow.removeAds"] : YES;
+    self.disableStorySeen = [d objectForKey:@"com.tommy.glow.disableStorySeen"] ? [d boolForKey:@"com.tommy.glow.disableStorySeen"] : YES;
+    self.downloadVideo = [d objectForKey:@"com.tommy.glow.downloadVideo"] ? [d boolForKey:@"com.tommy.glow.downloadVideo"] : YES;
+    self.downloadStory = [d objectForKey:@"com.tommy.glow.downloadStory"] ? [d boolForKey:@"com.tommy.glow.downloadStory"] : YES;
+    self.downloadReels = [d objectForKey:@"com.tommy.glow.downloadReels"] ? [d boolForKey:@"com.tommy.glow.downloadReels"] : YES;
+
     self.removePYMK = [d boolForKey:@"com.tommy.glow.removePYMK"];
     self.removeReelsCarousel = [d boolForKey:@"com.tommy.glow.removeReelsCarousel"];
     self.removeSuggested = [d boolForKey:@"com.tommy.glow.removeSuggested"];
     self.hideComposer = [d boolForKey:@"com.tommy.glow.hideComposer"];
     self.disableAutoNext = [d boolForKey:@"com.tommy.glow.disableAutoNext"];
     self.confirmLike = [d boolForKey:@"com.tommy.glow.confirmLike"];
-    self.downloadReels = [d objectForKey:@"com.tommy.glow.downloadReels"] ?
-                         [d boolForKey:@"com.tommy.glow.downloadReels"] : YES;
     self.hideOverlay = [d boolForKey:@"com.tommy.glow.hideOverlay"];
     self.confirmReelsLike = [d boolForKey:@"com.tommy.glow.confirmReelsLike"];
     self.downloadLongPress = [d boolForKey:@"com.tommy.glow.downloadLongPress"];
@@ -52,51 +36,48 @@ void prefsChanged(CFNotificationCenterRef center, void *observer,
     self.allFormats = [d boolForKey:@"com.tommy.glow.allFormats"];
     self.clearCacheOnLaunch = [d boolForKey:@"com.tommy.glow.clearCacheOnLaunch"];
     self.notifyUpdates = [d boolForKey:@"com.tommy.glow.notifyUpdates"];
-
-    LOG("[prefs] reload: ads=%d seen=%d video=%d story=%d pymk=%d reels=%d\n",
-        self.removeAds, self.disableStorySeen, self.downloadVideo, self.downloadStory,
-        self.removePYMK, self.downloadReels);
+    self.disableAutoRefresh = [d objectForKey:@"com.tommy.glow.disableAutoRefresh"] ? [d boolForKey:@"com.tommy.glow.disableAutoRefresh"] : YES;
 }
 
 + (NSString *)localizedString:(NSString *)key {
-    static NSDictionary *cached = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        cached = @{
-            // Sections
-            @"section.home": @"TRANG CHỦ",
-            @"section.reels": @"REELS",
-            @"section.stories": @"STORIES",
-            @"section.downloader": @"TRÌNH TẢI VIDEO",
-            @"section.other": @"KHÁC",
+    static NSDictionary *dict = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        dict = @{
+            @"section.home": @"Bảng tin (Home Feed)",
+            @"section.reels": @"Video ngắn (Reels)",
+            @"section.stories": @"Tin (Stories)",
+            @"section.downloader": @"Tải xuống (Downloader)",
+            @"section.other": @"Khác (Other)",
 
-            // Home section
-            @"removeAds": @"Xóa quảng cáo",
-            @"removePYMK": @"Xóa gợi ý kết bạn",
-            @"removeReelsCarousel": @"Xóa thanh cuộn reels",
-            @"confirmLike": @"Xác nhận thích bài viết",
-            @"downloadVideo": @"Tải video",
-            @"downloadVideo.desc": @"Nhấn giữ để tải video từ bảng tin và story",
-            @"removeSuggested": @"Xóa bài viết được đề xuất",
+            @"removeAds": @"Chặn quảng cáo",
+            @"removePYMK": @"Ẩn gợi ý kết bạn (PYMK)",
+            @"removeReelsCarousel": @"Ẩn Reels trên Bảng tin",
+            @"removeSuggested": @"Ẩn bài viết gợi ý",
+            @"confirmLike": @"Xác nhận khi Thích bài viết",
+            @"confirmLike.desc": @"Hiện popup hỏi trước khi thả Like bài viết",
+            @"disableAutoRefresh": @"Không tự làm mới Feed (Giữ vị trí)",
+            @"disableAutoRefresh.desc": @"Không tự reload/cuộn lên đầu khi mở lại app",
+            @"downloadVideo": @"Tải video Bảng tin",
+            @"downloadVideo.desc": @"Ấn giữ video để tải",
 
-            // Reels
-            @"downloadReels": @"Tải reels",
-            @"hideOverlay": @"Ẩn lớp phủ",
-            @"confirmReelsLike": @"Xác nhận thích reels",
-            @"downloadLongPress": @"Tải xuống bằng nhấn giữ",
+            @"downloadReels": @"Tải video Reels",
+            @"hideOverlay": @"Ẩn giao diện khi xem Reels",
+            @"confirmReelsLike": @"Xác nhận khi Thích Reels",
+            @"downloadLongPress": @"Ấn giữ để tải",
 
-            // Stories
-            @"downloadStory": @"Tải stories",
-            @"disableStorySeen": @"Xem ẩn danh",
-            @"disableAutoNext": @"Tắt tự động chuyển tiếp",
-            @"removeStoryPYMK": @"Xóa gợi ý kết bạn trong story",
+            @"downloadStory": @"Tải Story",
+            @"disableStorySeen": @"Xem Story ẩn danh (Không hiện Đã xem)",
+            @"disableAutoNext": @"Tắt tự động chuyển Story",
+            @"removeStoryPYMK": @"Ẩn gợi ý trong Story",
 
-            // Downloader
-            @"allFormats": @"Bao gồm tất cả các định dạng",
+            @"allFormats": @"Hiện tất cả định dạng tải",
+            @"notifyUpdates": @"Thông báo cập nhật",
+            @"clearCacheOnLaunch": @"Tự động dọn rác khi mở app",
         };
     });
 
-    return cached[key] ?: key;
+    return dict[key] ?: key;
 }
 
 @end

@@ -1,146 +1,93 @@
 // Logger.xm
-// Fake CydiaSubstrate that intercepts calls, queues them in memory, and writes to file post-launch
+// A stable, completely self-contained CydiaSubstrate logger tweak that dynamically hooks MSHookMessageEx in memory.
+// Logs step-by-step progress immediately to locate the exact line causing any crash.
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
-#import <pthread.h>
 
+static void standalone_log(const char *format, ...) {
+    char buffer[2048];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    
+    // 1. Log to NSLog (syslog)
+    NSLog(@"[00GlowLogger] %s", buffer);
+    
+    // 2. Write to /var/mobile/Documents/glow.txt (if writable)
+    FILE *f = fopen("/var/mobile/Documents/glow.txt", "a");
+    if (f) {
+        fputs(buffer, f);
+        fflush(f);
+        fclose(f);
+    }
+    
+    // 3. Write to the app's sandbox Documents directory (always writable)
+    @try {
+        NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        if (paths.count > 0) {
+            NSString *docDir = paths[0];
+            NSString *filePath = [docDir stringByAppendingPathComponent:@"glow_sandbox.txt"];
+            FILE *fs = fopen([filePath UTF8String], "a");
+            if (fs) {
+                fputs(buffer, fs);
+                fflush(fs);
+                fclose(fs);
+            }
+        }
+    } @catch (NSException *e) {
+        NSLog(@"[00GlowLogger] Failed to write to sandbox log: %@", e.reason);
+    }
+}
+
+#define LOG(fmt, ...) standalone_log(fmt, ##__VA_ARGS__)
+
+// Signatures for CydiaSubstrate/Ellekit functions
 typedef void (*MSHookMessageExType)(Class cls, SEL sel, IMP temp_imp, IMP *orig_imp);
 typedef void (*MSHookFunctionType)(void *symbol, void *replace, void **result);
 
-// Globals to store real implementations
-static MSHookMessageExType real_MSHookMessageEx = NULL;
-static MSHookFunctionType real_MSHookFunction = NULL;
+static MSHookMessageExType orig_MSHookMessageEx = NULL;
 
-// Safe in-memory log queue
-static NSMutableArray<NSString *> *logQueue = nil;
-static pthread_mutex_t logMutex = PTHREAD_MUTEX_INITIALIZER;
-
-static void queue_log(NSString *logStr) {
-    NSLog(@"[FakeSubstrate] %@", logStr); // Print to console immediately
-    
-    pthread_mutex_lock(&logMutex);
-    if (!logQueue) {
-        logQueue = [[NSMutableArray alloc] init];
-    }
-    [logQueue addObject:logStr];
-    pthread_mutex_unlock(&logMutex);
-}
-
-static void write_logs_to_file(void) {
-    pthread_mutex_lock(&logMutex);
-    NSArray<NSString *> *logsToWrite = [logQueue copy];
-    [logQueue removeAllObjects];
-    pthread_mutex_unlock(&logMutex);
-    
-    if (logsToWrite.count == 0) return;
-    
-    NSString *logPath = @"/var/mobile/Documents/glow_logger.txt";
-    
-    NSFileManager *fm = [NSFileManager defaultManager];
-    // Write header if file does not exist
-    if (![fm fileExistsAtPath:logPath]) {
-        NSString *header = @"=== Glow Original 1.3.1 Hook Log (Via Fake Substrate) ===\n";
-        [header writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+static void hooked_MSHookMessageEx(Class cls, SEL sel, IMP temp_imp, IMP *orig_imp) {
+    @try {
+        const char *className = cls ? class_getName(cls) : "nil";
+        const char *selName = sel ? sel_getName(sel) : "nil";
+        
+        LOG("[OriginalGlow/MSHookMessageEx] Class: %s, Selector: %s, Replacement: %p\n", className, selName, temp_imp);
+    } @catch (NSException *e) {
+        LOG("[Logger] Exception logging MSHookMessageEx: %s\n", e.reason.UTF8String);
     }
     
-    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
-    if (fh) {
-        @try {
-            [fh seekToEndOfFile];
-            for (NSString *line in logsToWrite) {
-                NSString *formatted = [line stringByAppendingString:@"\n"];
-                [fh writeData:[formatted dataUsingEncoding:NSUTF8StringEncoding]];
-            }
-            [fh synchronizeFile];
-        } @catch (NSException *e) {
-            NSLog(@"[FakeSubstrate] Write log exception: %@", e.reason);
-        } @finally {
-            [fh closeFile];
-        }
+    // Call the real MSHookMessageEx
+    if (orig_MSHookMessageEx) {
+        orig_MSHookMessageEx(cls, sel, temp_imp, orig_imp);
     }
 }
 
-static void resolve_real_substrate(void) {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        void *handle = dlopen("@loader_path/CydiaSubstrateReal", RTLD_LAZY);
-        if (!handle) {
-            handle = dlopen("@rpath/CydiaSubstrate.framework/CydiaSubstrateReal", RTLD_LAZY);
-        }
-        if (!handle) {
-            handle = dlopen("@executable_path/Frameworks/CydiaSubstrate.framework/CydiaSubstrateReal", RTLD_LAZY);
-        }
-        if (!handle) {
-            NSString *frameworksPath = [[NSBundle mainBundle] privateFrameworksPath];
-            NSString *substratePath = [frameworksPath stringByAppendingPathComponent:@"CydiaSubstrate.framework/CydiaSubstrateReal"];
-            handle = dlopen([substratePath UTF8String], RTLD_LAZY);
-        }
+%ctor {
+    LOG("=== [Logger] %ctor Enter ===\n");
+    
+    @try {
+        LOG("[Logger] Locating Substrate/Ellekit symbols in process memory...\n");
+        void *msHookMsgExPtr = dlsym(RTLD_DEFAULT, "MSHookMessageEx");
+        LOG("[Logger] dlsym MSHookMessageEx pointer resolved: %p\n", msHookMsgExPtr);
         
-        if (handle) {
-            real_MSHookMessageEx = (MSHookMessageExType)dlsym(handle, "MSHookMessageEx");
-            real_MSHookFunction = (MSHookFunctionType)dlsym(handle, "MSHookFunction");
-            NSLog(@"[FakeSubstrate] Successfully loaded CydiaSubstrateReal and resolved symbols");
-        } else {
-            NSLog(@"[FakeSubstrate] ERROR: Failed to load CydiaSubstrateReal");
-        }
+        void *msHookFnPtr = dlsym(RTLD_DEFAULT, "MSHookFunction");
+        LOG("[Logger] dlsym MSHookFunction pointer resolved: %p\n", msHookFnPtr);
         
-        // Start delayed writer (5 seconds after first call) to flush logs safely when sandbox is ready
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            NSLog(@"[FakeSubstrate] Flushing early logs to file...");
-            write_logs_to_file();
+        if (msHookMsgExPtr && msHookFnPtr) {
+            MSHookFunctionType msHookFn = (MSHookFunctionType)msHookFnPtr;
             
-            // Set up a repeating timer to periodically write logs
-            [NSTimer scheduledTimerWithTimeInterval:3.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
-                write_logs_to_file();
-            }];
-        });
-    });
-}
-
-extern "C" void MSHookMessageEx(Class cls, SEL sel, IMP temp_imp, IMP *orig_imp) {
-    resolve_real_substrate();
-    
-    const char *className = cls ? class_getName(cls) : "nil";
-    const char *selName = sel ? sel_getName(sel) : "nil";
-    
-    NSString *logMsg = [NSString stringWithFormat:@"[MSHookMessageEx] Class: %s, Selector: %s, Replacement: %p", className, selName, temp_imp];
-    queue_log(logMsg);
-    
-    // CRITICAL: Protect against nil class to prevent crash!
-    if (!cls) {
-        queue_log([NSString stringWithFormat:@"[FakeSubstrate] WARNING: cls is nil for selector %s! Skipping hook to prevent crash.", selName]);
-        return;
+            LOG("[Logger] Calling MSHookFunction to hook MSHookMessageEx...\n");
+            msHookFn(msHookMsgExPtr, (void *)hooked_MSHookMessageEx, (void **)&orig_MSHookMessageEx);
+            LOG("[Logger] Successfully hooked MSHookMessageEx of Substrate dynamically\n");
+        } else {
+            LOG("[Logger] ERROR: MSHookMessageEx or MSHookFunction pointer was NULL!\n");
+        }
+    } @catch (NSException *e) {
+        LOG("[Logger] Constructor exception: %s\n", e.reason.UTF8String);
     }
     
-    if (real_MSHookMessageEx) {
-        real_MSHookMessageEx(cls, sel, temp_imp, orig_imp);
-    }
-}
-
-extern "C" void MSHookFunction(void *symbol, void *replace, void **result) {
-    resolve_real_substrate();
-    
-    const char *symName = "unknown";
-    Dl_info info;
-    if (dladdr(symbol, &info) && info.dli_sname) {
-        symName = info.dli_sname;
-    }
-    
-    NSString *logMsg = [NSString stringWithFormat:@"[MSHookFunction] Symbol: %p (%s), Replacement: %p", symbol, symName, replace];
-    queue_log(logMsg);
-    
-    if (real_MSHookFunction) {
-        real_MSHookFunction(symbol, replace, result);
-    }
-}
-
-extern "C" void *MSHookIvar(id self, const char *name) {
-    Ivar ivar = class_getInstanceVariable(object_getClass(self), name);
-    return ivar ? (void *)((char *)(__bridge void *)self + ivar_getOffset(ivar)) : NULL;
-}
-
-__attribute__((constructor))
-static void fake_substrate_init(void) {
-    NSLog(@"=== Fake CydiaSubstrate loaded (In-Memory Logging Ready) ===");
+    LOG("=== [Logger] %ctor Exit ===\n");
 }

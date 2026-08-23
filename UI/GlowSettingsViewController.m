@@ -4,7 +4,6 @@
 #import "Managers/GlowLogManager.h"
 #import "Utils/GlowCommon.h"
 
-// Custom switch cell matching Glow design
 @interface GlowSwitchCell : UITableViewCell
 @property (nonatomic, strong) UISwitch *switchView;
 @property (nonatomic, strong) UILabel *titleLabel;
@@ -83,10 +82,11 @@
         _sections = @[
             @[  // HOME
                 @{@"key": @"removeAds", @"title": @"removeAds", @"subtitle": @"", @"value": @(sm.removeAds)},
+                @{@"key": @"disableAutoRefresh", @"title": @"disableAutoRefresh", @"subtitle": @"disableAutoRefresh.desc", @"value": @(sm.disableAutoRefresh)},
                 @{@"key": @"removePYMK", @"title": @"removePYMK", @"subtitle": @"", @"value": @(sm.removePYMK)},
                 @{@"key": @"removeReelsCarousel", @"title": @"removeReelsCarousel", @"subtitle": @"", @"value": @(sm.removeReelsCarousel)},
                 @{@"key": @"removeSuggested", @"title": @"removeSuggested", @"subtitle": @"", @"value": @(sm.removeSuggested)},
-                @{@"key": @"confirmLike", @"title": @"confirmLike", @"subtitle": @"", @"value": @(sm.confirmLike)},
+                @{@"key": @"confirmLike", @"title": @"confirmLike", @"subtitle": @"confirmLike.desc", @"value": @(sm.confirmLike)},
                 @{@"key": @"downloadVideo", @"title": @"downloadVideo", @"subtitle": @"downloadVideo.desc", @"value": @(sm.downloadVideo)},
             ],
             @[  // REELS
@@ -118,7 +118,6 @@
     self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
     self.title = @"Glow Settings";
 
-    // Grabber for sheet style presentation
     if (@available(iOS 15.0, *)) {
         self.sheetPresentationController.prefersGrabberVisible = YES;
     }
