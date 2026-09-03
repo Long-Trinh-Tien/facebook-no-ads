@@ -1,221 +1,187 @@
-# RE Tools — Custom Python Scripts
+# Tools - Static Analysis Scripts
 
-> ⚠️ **IMPORTANT:** For iOS 15+ binaries with `LC_DYLD_CHAINED_FIXUPS`, these tools have
-> **LIMITED RELIABILITY**. Different pointers use different slide prefixes (0x10000, 0x40000, 0x5118001, etc.),
-> making full static parsing difficult without a proper Mach-O library.
->
-> **RECOMMENDED:** Use the **runtime verifier** (`glow_verify.ipa` from R3.0-verify) for
-> reliable class/method discovery. The Python tools are useful for quick checks and
-> string searches.
+This folder contains Python scripts for analyzing iOS app binaries to identify classes, methods, and ivars for tweak development.
 
-## Tools
+## 📦 Scripts Overview
 
-### 1. `dump_objc.py` — Dump ObjC class/method/ivar info (partial)
+### New Scripts (Added v8.2.64)
 
-**Vấn đề giải quyết:** `class-dump` (nygard) không work với iOS 15+ binaries do `LC_DYLD_CHAINED_FIXUPS`. `lechium/classdumpios` cần macOS.
+These scripts were created during static analysis of Facebook 560.x to identify the correct class names and method signatures for the Glow tweak.
 
-**Solution:** Custom parser với multiple slide prefix handling.
-
-**Usage:**
+#### `quick_analyze.py` ⭐ Recommended
+Quick analysis of multiple key classes at once.
 ```bash
-# List all classes (first 50)
-python3 dump_objc.py /path/to/binary
-
-# Filter by class name
-python3 dump_objc.py /path/to/binary FBFeedUnit
-
-# Find classes with specific method (use * prefix)
-python3 dump_objc.py /path/to/binary "*asFBFeedUnitIsSponsoredGraphQL"
+python3 tools/quick_analyze.py
 ```
+**Output:** Methods/ivars for 10 key classes (FBVideoPlaybackContainerView, FBVideoPlaybackController, etc.)
 
-**Limitations:**
-- iOS 15+ binaries may have classes with names that don't show in dump
-- Methods/ivars may be incomplete
-- For best results, use runtime verifier
-
-**Best Use Case:** Quick check if a class/method exists, search for keywords.
-
----
-
-### 2. `binary_diff.py` — Compare 2 binary dumps (works if dumps are valid)
-
-**Vấn đề giải quyết:** Khi FB update, cần biết classes/methods nào thay đổi.
-
-**Usage:**
+#### `find_methods.py`
+Find video-related methods for a specific class.
 ```bash
-# 1. Get dumps (use runtime verifier for best results)
-#    Or if you have valid dump_objc output:
-python3 dump_objc.py old/FBSharedFramework > old.txt
-python3 dump_objc.py new/FBSharedFramework > new.txt
-
-# 2. Compare
-python3 binary_diff.py old.txt new.txt
+python3 tools/find_methods.py <binary> <class_name>
 ```
-
-**Output example:**
-```
-=== Binary Diff ===
-Old: 22297 classes
-New: 22300 classes
-
-=== REMOVED CLASSES (2) ===
-  - FBMemFeedStory
-  - FBVideoChannelPlaylistItem
-
-=== SUMMARY ===
-Removed: 2 classes
-Added: 5 classes
-Modified: 3 classes
-```
-
----
-
-### 3. `strings_grep.py` — Smart string search (RECOMMENDED — works well)
-
-**Vấn đề giải quyết:** Raw `strings | grep` returns too much noise. Cần filter theo type.
-
-**Usage:**
+**Example:**
 ```bash
-# All matches
-python3 strings_grep.py /path/to/binary Sponsor
-
-# Only class names
-python3 strings_grep.py /path/to/binary Sponsor --type=class
-
-# Only method names
-python3 strings_grep.py /path/to/binary asFB --type=method
+python3 tools/find_methods.py Payload/Facebook.app/Frameworks/FBSharedFramework.framework/FBSharedFramework FBVideoPlaybackContainerView
 ```
 
-**Output:**
-```
-Searching FBSharedFramework for 'Snacks' (type=all)
-
-Found 23 matches (showing first 23):
-
-  [C] FBSnacksBucketsSeenStateManager
-  [C] FBSnacksMediaContainerView
-  [C] FBSnacksPhotoView
-  [C] FBSnacksWebPhotoView
-  [M] initWithThread:bucket:mediaViewDelegate:mediaViewGenerator:toolbox:shouldBlurMedia:
-  [M] _sendSeenThreadIDsWithBucket:session:
-  ...
-```
-
-**Why this works:** Just searches ASCII strings, doesn't need pointer resolution.
-
----
-
-### 4. `extract_ipa.py` — Extract and analyze IPA (RECOMMENDED — works well)
-
-**Vấn đề giải quyết:** Manual `unzip + find binary + read plist` is repetitive.
-
-**Usage:**
+#### `deep_analyze.py`
+Deep analysis of class structure (methods, ivars, type encodings).
 ```bash
-python3 extract_ipa.py /path/to/facebook.ipa
-# or
-python3 extract_ipa.py /path/to/facebook.ipa my_work_dir
+python3 tools/deep_analyze.py <binary> <class_name>
 ```
 
-**Output example:**
-```
-Extracting facebook.ipa → my_work_dir/...
-App: my_work_dir/Payload/Facebook.app
-
-=== App Info ===
-  Bundle ID: com.facebook.Facebook
-  Name: Facebook
-  Version: 560.1.0
-  Build: 963085760
-  Min iOS: 15.1
-
-=== Frameworks (10) ===
-  FBCameraFramework.framework (63.3 MB)
-  ...
-```
-
----
-
-## Recommended Workflow
-
-For FB 560.x binaries (iOS 15+), the recommended approach is:
-
-```
-1. EXTRACT (extract_ipa.py)         → Get binary, version, frameworks
-       ↓
-2. STATIC SEARCH (strings_grep.py)  → Find class/method names
-       ↓
-3. STATIC DUMP (dump_objc.py)        → Best-effort class/method list
-       ↓
-4. RUNTIME VERIFY (Tweak.x)          → DEFINITIVE answer
-       ↓
-5. BUILD TWEAK based on verified APIs
-```
-
-For other binaries (older iOS, different apps), the tools may work fully.
-
----
-
-## Why Custom Tools Don't Fully Work for iOS 15+
-
-The iOS 15+ `LC_DYLD_CHAINED_FIXUPS` feature uses different slide prefixes for different data:
-
-| Data type | Common slide prefix |
-|-----------|---------------------|
-| `__objc_classlist` entries | `0x10000` |
-| `class_ro_t` data | `0x40000` |
-| `class_ro_t` name | `0x5118001000000` (varies!) |
-| Method list | `0x20000` |
-| String pointers (in `__objc_methname`) | `0x10000` |
-
-A proper Mach-O library (lief, macholib) should handle these, but they fail on iOS 15+ chained fixups.
-
-**Solution:** Use the **runtime verifier** (Tweak.x that lists classes at runtime) for definitive results. The runtime already resolves all pointers correctly because ObjC runtime knows the load address.
-
----
-
-## Tools Status Summary
-
-| Tool | Status | Use case |
-|------|--------|----------|
-| `dump_objc.py` | ⚠️ Partial | Quick check (incomplete for iOS 15+) |
-| `binary_diff.py` | ✅ Works if dumps valid | Compare 2 dumps |
-| `strings_grep.py` | ✅ Works well | Search symbols |
-| `extract_ipa.py` | ✅ Works well | Extract + info |
-
----
-
-## Best Alternative: Runtime Verifier
-
-For definitive class/method discovery on iOS 15+ binaries, use the runtime verifier built earlier:
-
-**Source:** `glow-verify/Tweak.x` (in `~/test/glow/glow-verify/`)
-**IPA:** `~/test/glow/glow_verify.ipa`
-**Output:** `/var/mobile/Documents/glow_verify.txt`
-
-This Tweak runs in the actual app context, so all pointers resolve correctly. Used to discover:
-- FBMemNewsFeedEdge (3 methods: node, deduplicationKey, category)
-- FBSnacksBucketsSeenStateManager (6 methods, including _sendSeenThreadIDsWithBucket:session:)
-- FBSnacksMediaContainerView (17 methods)
-- FBVideoOverlayPluginComponentBackgroundView (8 methods)
-- 13+ other target classes verified
-
-See `BUILD_GUIDE.md` and `INVESTIGATION_GUIDE.md` for full details.
-
----
-
-## Python Requirements
-
+#### `parse_macho.py`
+Parse Mach-O binary structure to find ObjC class references.
 ```bash
-pip3 install --break-system-packages lief
+python3 tools/parse_macho.py <binary>
 ```
 
-Built-in `struct` and `plistlib` are enough for basic usage.
+#### `parse_objc.py`
+Parse ObjC metadata from llvm-otool output.
+```bash
+python3 tools/parse_objc.py <binary> <class_name>
+```
+
+#### `extract_class.py`
+Extract detailed class information including methods and properties.
+```bash
+python3 tools/extract_class.py <binary> <class_name>
+```
+
+### Existing Scripts
+
+- `extract_ipa.py` - Extract IPA file to directory
+- `strings_grep.py` - Search for strings matching pattern
+- `dump_objc.py` - Dump ObjC class information
+- `binary_diff.py` - Compare two binaries
+
+## 🚀 Quick Start
+
+### 1. Extract Facebook IPA
+```bash
+python3 tools/extract_ipa.py facebook.ipa /tmp/fb_extract
+```
+
+### 2. Analyze Key Classes
+```bash
+python3 tools/quick_analyze.py
+```
+
+This will analyze the FBSharedFramework and show methods/ivars for:
+- FBVideoPlaybackContainerView
+- FBVideoPlaybackController
+- FBVideoPlaybackItem
+- FBSnacksMediaContainerView
+- FBSnacksNewVideoView
+- FBShortsSideBarView
+- FBShortsPlaybackController
+- FBVideoOverlayPluginComponentBackgroundView
+- FBSnacksMediaPlayerManager
+- FBVideoOverlayPluginComponentView
+
+### 3. Analyze Specific Class
+```bash
+python3 tools/find_methods.py \
+    /tmp/fb_extract/Payload/Facebook.app/Frameworks/FBSharedFramework.framework/FBSharedFramework \
+    FBVideoPlaybackContainerView
+```
+
+## 🛠️ Requirements
+
+- Python 3.6+
+- `strings` command (usually pre-installed on Linux)
+- `llvm-otool-18` (for some scripts)
+- `macholib` Python package (for Mach-O parsing)
+
+Install dependencies:
+```bash
+pip install macholib --break-system-packages
+```
+
+## 📊 What These Scripts Found
+
+Using these scripts, we discovered that in FB 560.x:
+
+1. **Class names changed:**
+   - `VideoContainerView` → `FBVideoPlaybackContainerView`
+   - Need to use full class name with `FB` prefix
+
+2. **Ivar names changed:**
+   - `_controller` → `_videoPlaybackController`
+   - More specific ivar names
+
+3. **Methods confirmed exist:**
+   - `currentVideoPlaybackItem` (on FBVideoPlaybackController)
+   - `HDPlaybackURL`, `SDPlaybackURL` (on FBVideoPlaybackItem)
+   - `setPlaying:` (on FBVideoPlaybackController)
+   - `manager` (on FBSnacksNewVideoView)
+
+4. **New classes for Reels:**
+   - `FBShortsPlaybackController`
+   - `FBShortsSideBarView`
+   - `FBShortsViewerOverlayComponentView`
+
+## 🎯 Use Cases
+
+### When developing a new tweak:
+1. Extract the target app's IPA
+2. Run `quick_analyze.py` to see all key classes
+3. Use `find_methods.py` to dig into specific classes
+4. Update your tweak code with correct class/method names
+
+### When Facebook updates break your tweak:
+1. Extract new Facebook IPA
+2. Compare class structures with old version
+3. Update class names in your tweak
+4. Rebuild and test
+
+### When debugging "class not found" errors:
+1. Check if the class still exists with `find_methods.py`
+2. If class name changed, update your hook
+3. If class removed, find the new equivalent
+
+## 📝 Example Output
+
+```
+================================================================================
+📦 FBVideoPlaybackContainerView
+================================================================================
+Methods (1):
+  - V_delegate
+
+================================================================================
+📦 FBVideoPlaybackController
+================================================================================
+Methods (9):
+  - N
+  - V_controller
+  - V_playbackController
+  - V_videoController
+  - V_videoPlaybackController
+  - V_videoPlayerController
+  - V_warmedPlayer
+  - VvideoController
+  - W
+```
+
+**Note:** `V_` prefix indicates ivars (instance variables).
+
+## 🔗 Related Documentation
+
+- `../JTOOL_ANALYSIS.md` - Detailed analysis report
+- `../STATIC_ANALYSIS.md` - Static analysis findings
+- `../TWEAK_X_GUIDE.md` - How to read Tweak.x
+
+## 💡 Tips
+
+1. **Always use full paths** when specifying binaries
+2. **Run from the tools/ directory** or use `tools/` prefix
+3. **Pipe output to grep** for filtering: `python3 quick_analyze.py | grep -A 5 "FBVideoPlaybackController"`
+4. **Redirect to file** for large outputs: `python3 quick_analyze.py > analysis.txt`
 
 ---
 
-## Compatibility
-
-- **Python:** 3.6+
-- **OS:** Linux, macOS, WSL
-- **iOS binary versions:** 12-14 (fully), 15+ (partial — strings_grep + extract_ipa work)
-- **Architectures:** arm64, arm64e
+**Created:** Jun 26 2026  
+**Version:** v8.2.64  
+**Purpose:** Static analysis tools for iOS tweak development

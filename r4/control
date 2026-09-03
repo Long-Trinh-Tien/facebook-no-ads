@@ -1,0 +1,9 @@
+Package: com.tommy.glowr4
+Name: GlowR4
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: R4 Verifier for Facebook class discovery
+Maintainer: tommy
+Author: tommy
+Section: Tweaks
+Depends: mobilesubstrate
