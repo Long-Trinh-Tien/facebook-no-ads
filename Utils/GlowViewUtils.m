@@ -6,6 +6,54 @@
 
 @implementation GlowViewUtils
 
++ (NSBundle *)glowBundle {
+    static NSBundle *bundle = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *mainPath = [[NSBundle mainBundle] bundlePath];
+        NSArray *candidates = @[
+            [mainPath stringByAppendingPathComponent:@"Glow.bundle"],
+            [mainPath stringByAppendingPathComponent:@"Frameworks/Glow.bundle"],
+            @"/Library/Application Support/Glow.bundle",
+            [[NSBundle mainBundle] pathForResource:@"Glow" ofType:@"bundle"] ?: @""
+        ];
+        for (NSString *p in candidates) {
+            if (p.length > 0 && [[NSFileManager defaultManager] fileExistsAtPath:p]) {
+                bundle = [NSBundle bundleWithPath:p];
+                if (bundle) {
+                    LOG("[bundle] Found Glow.bundle at: %s\n", p.UTF8String);
+                    break;
+                }
+            }
+        }
+    });
+    return bundle;
+}
+
++ (UIImage *)glowImageNamed:(NSString *)name {
+    if (!name) return nil;
+    @try {
+        NSBundle *b = [self glowBundle];
+        if (b) {
+            if (@available(iOS 13.0, *)) {
+                UIImage *img = [UIImage imageNamed:name inBundle:b compatibleWithTraitCollection:nil];
+                if (img) return [img imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+            } else {
+                UIImage *img = [UIImage imageNamed:name inBundle:b compatibleWithTraitCollection:nil];
+                if (img) return img;
+            }
+        }
+        // Fallback for download
+        if (@available(iOS 13.0, *)) {
+            if ([name containsString:@"download"]) {
+                return [[UIImage systemImageNamed:@"arrow.down.to.line.circle.fill"] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] ?:
+                       [[UIImage systemImageNamed:@"arrow.down.circle.fill"] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+            }
+        }
+    } @catch (NSException *e) {}
+    return nil;
+}
+
 + (void)showSafeToast:(NSString *)message {
     if (!message) return;
     dispatch_async(dispatch_get_main_queue(), ^{

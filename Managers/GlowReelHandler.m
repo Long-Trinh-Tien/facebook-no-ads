@@ -456,13 +456,12 @@ static void dumpViewDiagnostics(UIView *view) {
     if (sbFrameInOverlay.origin.x < 10 || sbFrameInOverlay.origin.y < 10) return;
 
     CGFloat btnW = 56;
-    CGFloat btnH = 56;
+    CGFloat btnH = 64;
     CGFloat btnX = sbFrameInOverlay.origin.x + (sideBar.bounds.size.width - btnW) / 2;
-    CGFloat btnY = sbFrameInOverlay.origin.y - btnH - 12;
+    CGFloat btnY = sbFrameInOverlay.origin.y - btnH - 6;
 
     UIButton *btn = (UIButton *)[overlay viewWithTag:kReelsDownloadButtonTag];
     if (btn) {
-        // Dynamic repositioning: update button's frame to follow the sidebar shifts
         btn.frame = CGRectMake(btnX, btnY, btnW, btnH);
         [overlay bringSubviewToFront:btn];
         return;
@@ -471,17 +470,30 @@ static void dumpViewDiagnostics(UIView *view) {
     btn = [UIButton buttonWithType:UIButtonTypeCustom];
     btn.tag = kReelsDownloadButtonTag;
     btn.frame = CGRectMake(btnX, btnY, btnW, btnH);
+    btn.backgroundColor = [UIColor clearColor];
     
-    // Aesthetic Styling
-    btn.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.6];
-    btn.layer.cornerRadius = btnW / 2;
-    btn.clipsToBounds = YES;
+    // Download icon from Glow.bundle
+    UIImage *dlImg = [GlowViewUtils glowImageNamed:@"download"];
+    UIImageView *iconView = [[UIImageView alloc] initWithFrame:CGRectMake((btnW - 32) / 2, 4, 32, 32)];
+    iconView.image = dlImg;
+    iconView.tintColor = [UIColor whiteColor];
+    iconView.contentMode = UIViewContentModeScaleAspectFit;
+    iconView.layer.shadowColor = [UIColor blackColor].CGColor;
+    iconView.layer.shadowOffset = CGSizeMake(0, 1.5);
+    iconView.layer.shadowOpacity = 0.8;
+    iconView.layer.shadowRadius = 2.5;
+    [btn addSubview:iconView];
     
-    UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, btnW, btnH)];
-    label.text = @"⬇";
+    // Clean label matching Facebook sidebar button labels
+    UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(0, 38, btnW, 16)];
+    label.text = @"Tải";
     label.textColor = [UIColor whiteColor];
-    label.font = [UIFont systemFontOfSize:26 weight:UIFontWeightBold];
+    label.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
     label.textAlignment = NSTextAlignmentCenter;
+    label.layer.shadowColor = [UIColor blackColor].CGColor;
+    label.layer.shadowOffset = CGSizeMake(0, 1.0);
+    label.layer.shadowOpacity = 0.8;
+    label.layer.shadowRadius = 2.0;
     [btn addSubview:label];
     
     btn.accessibilityIdentifier = @"GlowReelButton";
@@ -491,7 +503,7 @@ static void dumpViewDiagnostics(UIView *view) {
     [overlay addSubview:btn];
     [overlay bringSubviewToFront:btn];
 
-    LOG("[reels/main] ADDED button to overlay: x=%.1f y=%.1f (FDS=%d)\n", btnX, btnY, fdsCount);
+    LOG("[reels/main] ADDED native style download button to overlay: x=%.1f y=%.1f\n", btnX, btnY);
 }
 
 - (void)preWarmURLsForSidebar:(UIView *)sideBar {

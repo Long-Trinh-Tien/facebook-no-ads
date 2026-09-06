@@ -1,11 +1,15 @@
 // GlowViewUtils.h
-// UI utility functions (toast, view walking, etc.)
+// UI utility functions (toast, bundle assets, view walking, etc.)
 #import <UIKit/UIKit.h>
 
 @interface GlowViewUtils : NSObject
 
 + (void)showToast:(NSString *)message;
 + (void)showSafeToast:(NSString *)message;
+
+// Bundle & Asset Helpers
++ (NSBundle *)glowBundle;
++ (UIImage *)glowImageNamed:(NSString *)name;
 
 // Find a UIWindow in the current scene
 + (UIWindow *)keyWindow;
